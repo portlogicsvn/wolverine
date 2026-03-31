@@ -2,7 +2,7 @@
 
     <PropertyGroup>
         <Description>Marten middleware and other helpers for Wolverine HTTP Endpoints</Description>
-        <PackageId>WolverineFx.Http.Marten</PackageId>
+        <PackageId>Portlogics.WolverineFx.Http.Marten</PackageId>
         <GenerateAssemblyProductAttribute>false</GenerateAssemblyProductAttribute>
         <GenerateAssemblyCopyrightAttribute>false</GenerateAssemblyCopyrightAttribute>
         <GenerateAssemblyVersionAttribute>false</GenerateAssemblyVersionAttribute>

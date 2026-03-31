@@ -2,7 +2,7 @@
 
     <PropertyGroup>
         <Description>MySQL and MariaDB Saga, Message, and Outbox storage for Wolverine applications</Description>
-        <PackageId>WolverineFx.MySql</PackageId>
+        <PackageId>Portlogics.WolverineFx.MySql</PackageId>
         <GenerateAssemblyProductAttribute>false</GenerateAssemblyProductAttribute>
         <GenerateAssemblyCopyrightAttribute>false</GenerateAssemblyCopyrightAttribute>
         <GenerateAssemblyVersionAttribute>false</GenerateAssemblyVersionAttribute>

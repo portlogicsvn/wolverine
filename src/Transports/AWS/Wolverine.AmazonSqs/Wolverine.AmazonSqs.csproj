@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
     <PropertyGroup>
-        <PackageId>WolverineFx.AmazonSqs</PackageId>
+        <PackageId>Portlogics.WolverineFx.AmazonSqs</PackageId>
         <Description>Amazon SQS transport for Wolverine applications</Description>
     </PropertyGroup>
 

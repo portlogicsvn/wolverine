@@ -2,7 +2,7 @@
 
     <PropertyGroup>
         <Description>High Performance ASP.Net Core HTTP endpoints using the Wolverine runtime</Description>
-        <PackageId>WolverineFx.Http</PackageId>
+        <PackageId>Portlogics.WolverineFx.Http</PackageId>
     </PropertyGroup>
 
     <ItemGroup>

@@ -2,7 +2,7 @@
 
     <PropertyGroup>
         <Description>CosmosDb Saga, Message, and Outbox storage for Wolverine applications</Description>
-        <PackageId>WolverineFx.CosmosDb</PackageId>
+        <PackageId>Portlogics.WolverineFx.CosmosDb</PackageId>
         <GenerateAssemblyProductAttribute>false</GenerateAssemblyProductAttribute>
         <GenerateAssemblyCopyrightAttribute>false</GenerateAssemblyCopyrightAttribute>
         <GenerateAssemblyVersionAttribute>false</GenerateAssemblyVersionAttribute>

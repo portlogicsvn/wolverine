@@ -2,7 +2,7 @@
 
     <PropertyGroup>
         <Description>Oracle Saga, Message, and Outbox storage for Wolverine applications</Description>
-        <PackageId>WolverineFx.Oracle</PackageId>
+        <PackageId>Portlogics.WolverineFx.Oracle</PackageId>
         <GenerateAssemblyProductAttribute>false</GenerateAssemblyProductAttribute>
         <GenerateAssemblyCopyrightAttribute>false</GenerateAssemblyCopyrightAttribute>
         <GenerateAssemblyVersionAttribute>false</GenerateAssemblyVersionAttribute>

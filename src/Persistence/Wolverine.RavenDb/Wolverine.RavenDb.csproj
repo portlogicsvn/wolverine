@@ -2,7 +2,7 @@
 
     <PropertyGroup>
         <Description>RavenDb Saga, Message, and Outbox storage for Wolverine applications</Description>
-        <PackageId>WolverineFx.RavenDb</PackageId>
+        <PackageId>Portlogics.WolverineFx.RavenDb</PackageId>
         <GenerateAssemblyProductAttribute>false</GenerateAssemblyProductAttribute>
         <GenerateAssemblyCopyrightAttribute>false</GenerateAssemblyCopyrightAttribute>
         <GenerateAssemblyVersionAttribute>false</GenerateAssemblyVersionAttribute>

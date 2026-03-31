@@ -3,7 +3,7 @@
     <PropertyGroup>
         <Description>EF Core-backed Persistence for Wolverine Applications</Description>
         <Authors>Jeremy D. Miller, Mark Warpool</Authors>
-        <PackageId>WolverineFx.EntityFrameworkCore</PackageId>
+        <PackageId>Portlogics.WolverineFx.EntityFrameworkCore</PackageId>
         <GenerateAssemblyProductAttribute>false</GenerateAssemblyProductAttribute>
         <GenerateAssemblyCopyrightAttribute>false</GenerateAssemblyCopyrightAttribute>
         <GenerateAssemblyVersionAttribute>false</GenerateAssemblyVersionAttribute>

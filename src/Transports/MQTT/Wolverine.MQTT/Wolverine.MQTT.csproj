@@ -2,7 +2,7 @@
 
     <PropertyGroup>
         <Description>MQTT Transport for Wolverine Messaging Systems</Description>
-        <PackageId>WolverineFx.MQTT</PackageId>
+        <PackageId>Portlogics.WolverineFx.MQTT</PackageId>
         <GenerateAssemblyProductAttribute>false</GenerateAssemblyProductAttribute>
         <GenerateAssemblyCopyrightAttribute>false</GenerateAssemblyCopyrightAttribute>
         <GenerateAssemblyVersionAttribute>false</GenerateAssemblyVersionAttribute>

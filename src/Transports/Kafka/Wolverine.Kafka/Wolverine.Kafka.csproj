@@ -2,7 +2,7 @@
 
     <PropertyGroup>
         <Description>Kafka Transport for Wolverine Messaging Systems</Description>
-        <PackageId>WolverineFx.Kafka</PackageId>
+        <PackageId>Portlogics.WolverineFx.Kafka</PackageId>
         <GenerateAssemblyProductAttribute>false</GenerateAssemblyProductAttribute>
         <GenerateAssemblyCopyrightAttribute>false</GenerateAssemblyCopyrightAttribute>
         <GenerateAssemblyVersionAttribute>false</GenerateAssemblyVersionAttribute>

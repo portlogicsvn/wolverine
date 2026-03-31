@@ -2,7 +2,7 @@
 
     <PropertyGroup>
         <Description>Compliance test harnesses for adding persistence and transport options to Wolverine</Description>
-        <PackageId>WolverineFx.ComplianceTests</PackageId>
+        <PackageId>Portlogics.WolverineFx.ComplianceTests</PackageId>
     </PropertyGroup>
 
     <ItemGroup>

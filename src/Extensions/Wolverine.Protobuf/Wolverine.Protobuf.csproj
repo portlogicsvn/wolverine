@@ -2,7 +2,7 @@
 
 	<PropertyGroup>
 		<Description>Protobuf serialization for Wolverine Applications</Description>
-		<PackageId>WolverineFx.Protobuf</PackageId>
+		<PackageId>Portlogics.WolverineFx.Protobuf</PackageId>
 	</PropertyGroup>
 
 	<ItemGroup>

@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
         <Description>RabbitMQ Transport for Wolverine Messaging Systems</Description>
-        <PackageId>WolverineFx.RabbitMQ</PackageId>
+        <PackageId>Portlogics.WolverineFx.RabbitMQ</PackageId>
         <GenerateAssemblyProductAttribute>false</GenerateAssemblyProductAttribute>
         <GenerateAssemblyCopyrightAttribute>false</GenerateAssemblyCopyrightAttribute>
         <GenerateAssemblyVersionAttribute>false</GenerateAssemblyVersionAttribute>

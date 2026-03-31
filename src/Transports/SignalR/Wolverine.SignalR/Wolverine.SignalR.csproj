@@ -2,7 +2,7 @@
 
     <PropertyGroup>
         <Description>SignalR Integration for Wolverine Systems</Description>
-        <PackageId>WolverineFx.SignalR</PackageId>
+        <PackageId>Portlogics.WolverineFx.SignalR</PackageId>
         <GenerateAssemblyProductAttribute>false</GenerateAssemblyProductAttribute>
         <GenerateAssemblyCopyrightAttribute>false</GenerateAssemblyCopyrightAttribute>
         <GenerateAssemblyVersionAttribute>false</GenerateAssemblyVersionAttribute>

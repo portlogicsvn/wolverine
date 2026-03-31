@@ -2,7 +2,7 @@
 
     <PropertyGroup>
         <Description>Fluent Validation middleware for Wolverine HTTP Endpoints</Description>
-        <PackageId>WolverineFx.Http.FluentValidation</PackageId>
+        <PackageId>Portlogics.WolverineFx.Http.FluentValidation</PackageId>
         <GenerateAssemblyProductAttribute>false</GenerateAssemblyProductAttribute>
         <GenerateAssemblyCopyrightAttribute>false</GenerateAssemblyCopyrightAttribute>
         <GenerateAssemblyVersionAttribute>false</GenerateAssemblyVersionAttribute>

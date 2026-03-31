@@ -2,7 +2,7 @@
 
     <PropertyGroup>
         <Description>Redis Streams Transport for Wolverine Messaging Systems</Description>
-        <PackageId>WolverineFx.Redis</PackageId>
+        <PackageId>Portlogics.WolverineFx.Redis</PackageId>
         <GenerateAssemblyProductAttribute>false</GenerateAssemblyProductAttribute>
         <GenerateAssemblyCopyrightAttribute>false</GenerateAssemblyCopyrightAttribute>
         <GenerateAssemblyVersionAttribute>false</GenerateAssemblyVersionAttribute>

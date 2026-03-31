@@ -2,7 +2,7 @@
 
     <PropertyGroup>
         <Description>NATS Transport for Wolverine Messaging Systems</Description>
-        <PackageId>WolverineFx.Nats</PackageId>
+        <PackageId>Portlogics.WolverineFx.Nats</PackageId>
         <GenerateAssemblyProductAttribute>false</GenerateAssemblyProductAttribute>
         <GenerateAssemblyCopyrightAttribute>false</GenerateAssemblyCopyrightAttribute>
         <GenerateAssemblyVersionAttribute>false</GenerateAssemblyVersionAttribute>

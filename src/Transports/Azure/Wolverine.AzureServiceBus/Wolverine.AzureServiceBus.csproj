@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
     <PropertyGroup>
-        <PackageId>WolverineFx.AzureServiceBus</PackageId>
+        <PackageId>Portlogics.WolverineFx.AzureServiceBus</PackageId>
         <Description>Azure Service Bus transport for Wolverine applications</Description>
     </PropertyGroup>
 

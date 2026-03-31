@@ -2,7 +2,7 @@
 
     <PropertyGroup>
         <Description>Postgresql Saga, Message, and Outbox storage for Wolverine applications</Description>
-        <PackageId>WolverineFx.Postgresql</PackageId>
+        <PackageId>Portlogics.WolverineFx.Postgresql</PackageId>
         <GenerateAssemblyProductAttribute>false</GenerateAssemblyProductAttribute>
         <GenerateAssemblyCopyrightAttribute>false</GenerateAssemblyCopyrightAttribute>
         <GenerateAssemblyVersionAttribute>false</GenerateAssemblyVersionAttribute>

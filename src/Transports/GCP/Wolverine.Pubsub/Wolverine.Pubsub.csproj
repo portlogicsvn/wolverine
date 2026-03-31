@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
     <PropertyGroup>
-        <PackageId>WolverineFx.Pubsub</PackageId>
+        <PackageId>Portlogics.WolverineFx.Pubsub</PackageId>
         <Description>Google Cloud Platform Pub/Sub transport for Wolverine applications</Description>
     </PropertyGroup>
 
