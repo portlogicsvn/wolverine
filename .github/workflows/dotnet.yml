@@ -60,13 +60,13 @@ jobs:
             # GitHub
             if [ -n "${{ secrets.GITHUB_TOKEN }}" ]; then
               echo "${0##*/}": Pushing $package to GitHub...
-              dotnet nuget push $package --source https://nuget.pkg.github.com/jasperfx/index.json --api-key ${{ secrets.GITHUB_TOKEN }} --skip-duplicate
+              dotnet nuget push $package --source https://nuget.pkg.github.com/portlogics/index.json --api-key ${{ secrets.GITHUB_TOKEN }} --skip-duplicate
             fi
           
             # Feedz (remove once GitHub supports anonymous access)
             if [ -n "${{ secrets.FEEDZ_KEY }}" ]; then
               echo "${0##*/}": Pushing $package to Feedz...
-              dotnet nuget push $package --source https://f.feedz.io/jasperfx/wolverine/nuget --api-key ${{ secrets.FEEDZ_KEY }} --skip-duplicate
+              dotnet nuget push $package --source https://f.feedz.io/portlogics/wolverine/nuget --api-key ${{ secrets.FEEDZ_KEY }} --skip-duplicate
             fi
           
           done
