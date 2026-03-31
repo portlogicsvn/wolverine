@@ -20,6 +20,11 @@ public class DeliveryOptions
     }
 
     /// <summary>
+    ///     Instruct Wolverine to override MessageType property by this value
+    /// </summary>
+    public string? MessageType { get; set; }
+
+    /// <summary>
     ///     Instruct Wolverine to throw away this message if it is not successfully sent and processed
     ///     by the time specified
     /// </summary>
@@ -92,6 +97,11 @@ public class DeliveryOptions
         if (DeliverBy.HasValue)
         {
             envelope.DeliverBy = DeliverBy;
+        }
+
+        if (MessageType.IsNotEmpty())
+        {
+            envelope.MessageType = MessageType;
         }
 
         if (ScheduledTime.HasValue)
