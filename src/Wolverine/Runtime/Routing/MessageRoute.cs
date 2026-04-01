@@ -181,8 +181,6 @@ public class MessageRoute : IMessageRoute, IMessageInvoker
             TenantId = options?.TenantId ?? bus.TenantId,
             TopicName = topicName
         };
-        
-        options?.Override(envelope);
 
         foreach (var rule in Rules) rule.Modify(envelope);
         if (typeof(T) == typeof(Acknowledgement))
@@ -193,6 +191,8 @@ public class MessageRoute : IMessageRoute, IMessageInvoker
         {
             envelope.ReplyRequested = typeof(T).ToMessageTypeName();
         }
+
+        options?.Override(envelope);
 
         envelope.DeliverWithin = timeout.Value;
         envelope.Sender = Sender;

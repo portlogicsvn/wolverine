@@ -147,14 +147,23 @@ public class HandlerPipeline : IHandlerPipeline
             }
             else
             {
-                return new NoHandlerContinuation(_runtime.MissingHandlers(), _runtime);
+                if (serializer is IAsyncMessageSerializer asyncMessageSerializer)
+                {
+                    envelope.Message = await asyncMessageSerializer.ReadFromDataAsync(typeof(Envelope), envelope);
+                }
+                else
+                {
+                    envelope.Message = serializer.ReadFromData(typeof(Envelope), envelope);
+                }
+
+                //return new NoHandlerContinuation(_runtime.MissingHandlers(), _runtime);
             }
 
-            if (envelope.Message == null)
-            {
-                return new MoveToErrorQueue(new InvalidOperationException(
-                    "No message body could be de-serialized from the raw data in this envelope"));
-            }
+            //if (envelope.Message == null)
+            //{
+            //    return new MoveToErrorQueue(new InvalidOperationException(
+            //        "No message body could be de-serialized from the raw data in this envelope"));
+            //}
 
             return NullContinuation.Instance;
         }
@@ -191,13 +200,8 @@ public class HandlerPipeline : IHandlerPipeline
 
         if (envelope.IsResponse)
         {
-            // If a reply listener is registered (from InvokeAsync), complete it directly.
-            // If not (from PublishAsync + RequireResponse), fall through to normal handler execution
-            // so the response can be handled by a registered message handler.
-            if (_runtime.Replies.Complete(envelope))
-            {
-                return MessageSucceededContinuation.Instance;
-            }
+            _runtime.Replies.Complete(envelope);
+            return MessageSucceededContinuation.Instance;
         }
 
         var executor = _executors[envelope.Message!.GetType()];

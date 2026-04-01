@@ -30,6 +30,10 @@ public class SystemTextJsonSerializer : IMessageSerializer
 
     public object ReadFromData(Type messageType, Envelope envelope)
     {
+        // Portlogics hack
+        if(messageType == typeof(Envelope))
+            return envelope;
+
         return JsonSerializer.Deserialize(envelope.Data, messageType, _options)!;
     }
 
