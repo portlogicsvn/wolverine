@@ -628,7 +628,7 @@ public class MessageContext : MessageBus, IMessageContext, IHasTenantId, IEnvelo
         }
 
         //Portlogics hack
-        if (Envelope?.ReplyUri != null (Envelope.ReplyRequested == "envelope" || message.GetType().ToMessageTypeName() == Envelope.ReplyRequested))
+        if (Envelope?.ReplyUri != null && (Envelope.ReplyRequested == "envelope" || message.GetType().ToMessageTypeName() == Envelope.ReplyRequested))
         {
             await EndpointFor(Envelope.ReplyUri!).SendAsync(message, new DeliveryOptions { IsResponse = true });
 
