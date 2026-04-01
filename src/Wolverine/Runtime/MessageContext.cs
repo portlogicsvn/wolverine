@@ -70,6 +70,10 @@ public class MessageContext : MessageBus, IMessageContext, IHasTenantId, IEnvelo
     private bool isMissingRequestedReply()
     {
         var replyRequested = Envelope!.ReplyRequested;
+
+        //Portlogics hack
+        if (replyRequested == "envelope") return false;
+
         foreach (var envelope in Outstanding)
         {
             if (envelope.MessageType == replyRequested) return false;
@@ -623,7 +627,8 @@ public class MessageContext : MessageBus, IMessageContext, IHasTenantId, IEnvelo
                 return;
         }
 
-        if (Envelope?.ReplyUri != null && message.GetType().ToMessageTypeName() == Envelope.ReplyRequested)
+        //Portlogics hack
+        if (Envelope?.ReplyUri != null (Envelope.ReplyRequested == "envelope" || message.GetType().ToMessageTypeName() == Envelope.ReplyRequested))
         {
             await EndpointFor(Envelope.ReplyUri!).SendAsync(message, new DeliveryOptions { IsResponse = true });
 
