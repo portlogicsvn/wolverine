@@ -539,8 +539,11 @@ public partial class HandlerGraph : ICodeFileCollectionWithServices, IWithFailur
 
         lock (_messageTypesLock)
         {
-             // Porlogics hack
-            _messageTypes = _messageTypes.AddOrUpdate(messageType.Name, messageType);
+            string messageName = messageType.Name;
+            if(!messageName.StartsWith("REQ_"))
+                messageName = messageType.ToMessageTypeName();
+
+            _messageTypes = _messageTypes.AddOrUpdate(messageName, messageType);
             _replyTypes = _replyTypes.Add(messageType);
         }
     }
