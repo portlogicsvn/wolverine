@@ -9,6 +9,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Primitives;
 using Wolverine.Configuration;
 using Wolverine.Http.CodeGen;
+using Wolverine.Http.ContentNegotiation;
 using Wolverine.Http.Resources;
 using Wolverine.Runtime;
 using Endpoint = Microsoft.AspNetCore.Http.Endpoint;
@@ -25,6 +26,7 @@ public partial class HttpGraph : EndpointDataSource, ICodeFileCollectionWithServ
         new StatusCodePolicy(),
         new ResultWriterPolicy(),
         new StringResourceWriterPolicy(),
+        new ContentNegotiationWriterPolicy(),
         new JsonResourceWriterPolicy()
     ];
 
@@ -42,6 +44,12 @@ public partial class HttpGraph : EndpointDataSource, ICodeFileCollectionWithServ
     }
     
     internal IServiceContainer Container { get; }
+
+    /// <summary>
+    /// When true, automatically apply antiforgery metadata to form data and file upload endpoints.
+    /// Defaults to false. Enable by calling <see cref="WolverineHttpOptions.AutoAntiforgeryOnFormEndpoints"/>.
+    /// </summary>
+    internal bool AutoAntiforgeryOnFormEndpoints { get; set; }
 
     internal IEnumerable<IResourceWriterPolicy> WriterPolicies => _optionsWriterPolicies.Concat(_builtInWriterPolicies);
 
@@ -103,6 +111,11 @@ public partial class HttpGraph : EndpointDataSource, ICodeFileCollectionWithServ
 
         wolverineHttpOptions.Middleware.Apply(_chains, Rules, Container);
         _optionsWriterPolicies.AddRange(wolverineHttpOptions.ResourceWriterPolicies);
+
+        // Apply route prefix policy before other policies so that
+        // downstream policies see the final route patterns
+        var routePrefixPolicy = new RoutePrefixPolicy(wolverineHttpOptions);
+        routePrefixPolicy.Apply(_chains, Rules, Container);
 
         var policies = _options.Policies.OfType<IChainPolicy>();
         foreach (var policy in policies) policy.Apply(_chains, Rules, Container);

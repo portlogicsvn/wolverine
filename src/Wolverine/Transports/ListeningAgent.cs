@@ -24,6 +24,12 @@ public interface IListeningAgent : IListenerCircuit
 {
     Uri Uri { get; }
 
+    /// <summary>
+    /// Approximate timestamp of the last time queue activity was observed on this listener.
+    /// Based on QueueCount change detection, not individual message receipt.
+    /// </summary>
+    DateTimeOffset LastQueueActivityAt { get; }
+
     ValueTask StopAndDrainAsync();
 
     ValueTask MarkAsTooBusyAndStopReceivingAsync();
@@ -40,6 +46,8 @@ public class ListeningAgent : IAsyncDisposable, IDisposable, IListeningAgent
     private readonly WolverineRuntime _runtime;
     private IReceiver? _receiver;
     private IDisposable? _restarter;
+    private int _lastObservedQueueCount;
+    private DateTimeOffset _lastQueueCountChangeAt = DateTimeOffset.UtcNow;
 
     public ListeningAgent(Endpoint endpoint, WolverineRuntime runtime)
     {
@@ -104,6 +112,27 @@ public class ListeningAgent : IAsyncDisposable, IDisposable, IListeningAgent
     }
 
     public int QueueCount => _receiver is ILocalQueue q ? q.QueueCount : 0;
+
+    /// <summary>
+    /// Approximate timestamp of the last time a message was received on this listener,
+    /// tracked by observing QueueCount changes. Updated by BackPressureAgent polling
+    /// or explicit calls to <see cref="UpdateQueueCountObservation"/>.
+    /// </summary>
+    public DateTimeOffset LastQueueActivityAt => _lastQueueCountChangeAt;
+
+    /// <summary>
+    /// Call periodically to update the heuristic for last message received.
+    /// If QueueCount has changed since the last observation, the timestamp is updated.
+    /// </summary>
+    internal void UpdateQueueCountObservation()
+    {
+        var current = QueueCount;
+        if (current != _lastObservedQueueCount)
+        {
+            _lastQueueCountChangeAt = DateTimeOffset.UtcNow;
+            _lastObservedQueueCount = current;
+        }
+    }
 
     public async Task EnqueueDirectlyAsync(IEnumerable<Envelope> envelopes)
     {
@@ -170,6 +199,20 @@ public class ListeningAgent : IAsyncDisposable, IDisposable, IListeningAgent
 
     public async ValueTask StopAndDrainAsync()
     {
+        await StopAndDrainCoreAsync(latchBeforeDrain: true);
+    }
+
+    /// <summary>
+    /// Shared implementation for stop-and-drain. When <paramref name="latchBeforeDrain"/> is
+    /// <c>true</c> (normal shutdown), the receiver is latched before <see cref="IReceiver.DrainAsync"/>
+    /// so that the drain knows it is safe to wait for any in-flight messages to complete.
+    /// When <c>false</c> (pause triggered from within the handler pipeline, e.g. rate limiting),
+    /// the receiver is <em>not</em> pre-latched, so <see cref="IReceiver.DrainAsync"/> sees
+    /// <c>_latched == false</c> and returns immediately — avoiding a deadlock caused by the
+    /// current message's execute frame being on the call stack.
+    /// </summary>
+    private async ValueTask StopAndDrainCoreAsync(bool latchBeforeDrain)
+    {
         if (Status == ListeningStatus.Stopped || Status == ListeningStatus.GloballyLatched)
         {
             return;
@@ -182,15 +225,26 @@ public class ListeningAgent : IAsyncDisposable, IDisposable, IListeningAgent
             return;
         }
 
-        Listener = null;
-        _receiver = null;
-
         try
         {
             using var activity = WolverineTracing.ActivitySource.StartActivity(WolverineTracing.StoppingListener);
             activity?.SetTag(WolverineTracing.EndpointAddress, Uri);
 
             await listener.StopAsync();
+
+            // When called during normal shutdown, latch BEFORE drain so DrainAsync knows
+            // it can safely wait for in-flight messages to complete.
+            // When called from within the handler pipeline (e.g. PauseListenerContinuation),
+            // do NOT latch here: DrainAsync will see _latched==false and return immediately,
+            // preventing a deadlock with the current message's execute frame.
+            if (latchBeforeDrain)
+            {
+                LatchReceiver();
+            }
+
+            Listener = null;
+            _receiver = null;
+
             if (receiver != null)
             {
                 await receiver.DrainAsync();
@@ -298,7 +352,11 @@ public class ListeningAgent : IAsyncDisposable, IDisposable, IListeningAgent
         {
             using var activity = WolverineTracing.ActivitySource.StartActivity(WolverineTracing.PausingListener);
             activity?.SetTag(WolverineTracing.EndpointAddress, Uri);
-            await StopAndDrainAsync();
+            // Do NOT pre-latch the receiver here. PauseAsync may be called from within the
+            // handler pipeline (e.g. via RateLimitContinuation → PauseListenerContinuation).
+            // Pre-latching causes DrainAsync to wait for the ActionBlock to drain, which
+            // deadlocks because the current message's execute frame is still on the call stack.
+            await StopAndDrainCoreAsync(latchBeforeDrain: false);
         }
         catch (Exception e)
         {

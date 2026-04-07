@@ -8,6 +8,7 @@ using JasperFx.CodeGeneration.Frames;
 using JasperFx.CodeGeneration.Model;
 using JasperFx.CodeGeneration.Services;
 using JasperFx.Core;
+using Wolverine.Http.Antiforgery;
 using JasperFx.Core.Reflection;
 using JasperFx.Descriptors;
 using Microsoft.AspNetCore.Builder;
@@ -19,6 +20,7 @@ using Microsoft.AspNetCore.Routing.Patterns;
 using Microsoft.Extensions.DependencyInjection;
 using Wolverine.Configuration;
 using Wolverine.Http.CodeGen;
+using Wolverine.Http.ContentNegotiation;
 using Wolverine.Http.Metadata;
 using Wolverine.Http.Policies;
 using Wolverine.Persistence;
@@ -74,6 +76,12 @@ public partial class HttpChain : Chain<HttpChain, ModifyHttpChainAttribute>, ICo
     /// </summary>
     [IgnoreDescription]
     public Variable? ResourceVariable { get; set; }
+
+    /// <summary>
+    /// Controls how content negotiation behaves when no matching content type writer is found.
+    /// Default is Loose (falls back to JSON). Set to Strict to return 406 Not Acceptable.
+    /// </summary>
+    public ConnegMode ConnegMode { get; set; } = ConnegMode.Loose;
 
     // Make the assumption that the route argument has to match the parameter name
     private GeneratedType? _generatedType;
@@ -204,7 +212,7 @@ public partial class HttpChain : Chain<HttpChain, ModifyHttpChainAttribute>, ICo
     }
 
     [IgnoreDescription]
-    public RoutePattern? RoutePattern { get; private set; }
+    public RoutePattern? RoutePattern { get; internal set; }
 
     public Type? RequestType
     {
@@ -404,10 +412,36 @@ public partial class HttpChain : Chain<HttpChain, ModifyHttpChainAttribute>, ICo
             Metadata.Accepts(typeof(IFormFile), true, "application/x-www-form-urlencoded", "multipart/form-data");
         }
 
+        applyAntiforgeryMetadata();
+
         foreach (var attribute in Method.HandlerType.GetCustomAttributes()) Metadata.WithMetadata(attribute);
         foreach (var attribute in Method.Method.GetCustomAttributes()) Metadata.WithMetadata(attribute);
     }
 
+    private void applyAntiforgeryMetadata()
+    {
+        // Check for explicit opt-out via [DisableAntiforgery] on method or class
+        if (Method.Method.HasAttribute<DisableAntiforgeryAttribute>() ||
+            Method.HandlerType.HasAttribute<DisableAntiforgeryAttribute>())
+        {
+            Metadata.WithMetadata(WolverineAntiforgeryMetadata.NotRequired);
+            return;
+        }
+
+        // Check for explicit opt-in via [ValidateAntiforgery] on method or class
+        if (Method.Method.HasAttribute<ValidateAntiforgeryAttribute>() ||
+            Method.HandlerType.HasAttribute<ValidateAntiforgeryAttribute>())
+        {
+            Metadata.WithMetadata(WolverineAntiforgeryMetadata.Required);
+            return;
+        }
+
+        // Auto-enable for form data and file upload endpoints when antiforgery is enabled
+        if (_parent.AutoAntiforgeryOnFormEndpoints && (IsFormData || FileParameters.Any()))
+        {
+            Metadata.WithMetadata(WolverineAntiforgeryMetadata.Required);
+        }
+    }
 
     public HttpElementVariable? TryFindOrCreateFormValue(ParameterInfo parameter)
     {
