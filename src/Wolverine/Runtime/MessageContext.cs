@@ -603,6 +603,13 @@ public class MessageContext : MessageBus, IMessageContext, IHasTenantId, IEnvelo
             }
         }
 
+        // Portlogics hack
+        if (((message?.GetType().Name) ?? string.Empty).StartsWith("REQ_"))
+        {
+            await PublishAsync(message);
+            return;
+        }
+
         switch (message)
         {
             case null:
