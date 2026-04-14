@@ -79,17 +79,13 @@ public class EfCoreEnvelopeTransaction : IEnvelopeTransaction
 
         if (DbContext.IsWolverineEnabled())
         {
-            foreach (var envelope in envelopes)
-            {
-                var outgoing = new OutgoingMessage(envelope);
-                DbContext.Add(outgoing);
-            }
+            DbContext.AddRange(envelopes.Select(e => new OutgoingMessage(e)));
         }
         else
         {
             var conn = DbContext.Database.GetDbConnection();
             var tx = DbContext.Database.CurrentTransaction!.GetDbTransaction();
-            var cmd = DatabasePersistence.BuildIncomingStorageCommand(envelopes, _database);
+            var cmd = DatabasePersistence.BuildOutgoingStorageCommand(envelopes, envelopes[0].OwnerId, _database);
             cmd.Transaction = tx;
             cmd.Connection = conn;
 

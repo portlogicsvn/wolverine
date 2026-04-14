@@ -285,6 +285,22 @@ public sealed partial class WolverineOptions : IPolicies
         MetadataRules.Add(new GroupIdToPartitionKeyRule());
     }
 
+    void IPolicies.PropagateIncomingHeadersToOutgoing(params string[] headerNames)
+    {
+        if (headerNames == null || headerNames.Length == 0)
+            throw new ArgumentException("At least one header name is required", nameof(headerNames));
+
+        MetadataRules.Add(new PropagateHeadersRule(headerNames));
+    }
+
+    void IPolicies.PropagateIncomingHeaderToOutgoing(string headerName)
+    {
+        if (string.IsNullOrWhiteSpace(headerName))
+            throw new ArgumentException("A header name is required", nameof(headerName));
+
+        MetadataRules.Add(new PropagateOneHeaderRule(headerName));
+    }
+
     internal MiddlewarePolicy FindOrCreateMiddlewarePolicy()
     {
         var policy = RegisteredPolicies.OfType<MiddlewarePolicy>().FirstOrDefault();
