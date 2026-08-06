@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
         <Description>Build Robust Event Driven Architectures with Simpler Code</Description>
-        <PackageId>WolverineFx</PackageId>
+        <PackageId>Portlogics.WolverineFx</PackageId>
         <!--
           AOT pillar (wolverine#2715, tracked in #2746). The per-file annotation
           pass is complete (chunks A–U, PRs #2747 / #2753–#2778). Every
