@@ -8,7 +8,7 @@
           This intentionally does NOT touch:
             - package ids already under Portlogics.WolverineFx.*
         -->
-        <PackageId>$([System.Text.RegularExpressions.Regex]::Replace('$(PackageId)', '^WolverineFx', 'Portlogics.WolverineFx'))</PackageId>
+        <PackageId>$([System.Text.RegularExpressions.Regex]::Replace('$(PackageId)', '^WolverineFx', 'Portlogics.Wolverine'))</PackageId>
     </PropertyGroup>
 
     <!--
