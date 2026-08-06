@@ -30,6 +30,19 @@ jobs:
           # but the API key is exchanged dynamically via GitHub OIDC.
           user: ${{ secrets.NUGET_USER }}
 
+      - name: Debug NuGet token metadata
+        shell: bash
+        env:
+          NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
+        run: |
+          if [ -z "$NUGET_API_KEY" ]; then
+            echo "NuGet API key output is empty"
+            exit 1
+          fi
+
+          echo "NuGet API key was issued successfully"
+          echo "NuGet API key length: ${#NUGET_API_KEY}"
+
       - name: Publish to NuGet
         shell: bash
         run: |

@@ -1,6 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project>
 
+    <PropertyGroup Condition="'$(PortlogicsRemapSingleLevelPackageIds)' == 'true' and $([System.Text.RegularExpressions.Regex]::IsMatch('$(PackageId)', '^WolverineFx(\..+)?$'))">
+        <!--
+          Pack-time rebrand only: remap Wolverine package ids
+          from WolverineFx... to Portlogics.Wolverine...
+          This intentionally does NOT touch:
+            - package ids already under Portlogics.WolverineFx.*
+        -->
+        <PackageId>$([System.Text.RegularExpressions.Regex]::Replace('$(PackageId)', '^WolverineFx', 'Portlogics.Wolverine'))</PackageId>
+    </PropertyGroup>
+
     <!--
       Security remediation for GHSA-v5pm-xwqc-g5wc (uncontrolled recursion / stack overflow
       when parsing OpenAPI documents with circular schema references).
