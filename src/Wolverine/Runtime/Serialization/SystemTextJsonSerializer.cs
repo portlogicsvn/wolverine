@@ -48,7 +48,9 @@ public class SystemTextJsonSerializer : IMessageSerializer
     {
         // Portlogics hack
         if (envelope.Message is byte[])
-            return envelope.Message as byte[];
+        {
+            return (byte[])envelope.Message!;
+        }
 
         return JsonSerializer.SerializeToUtf8Bytes(envelope.Message, _options);
     }
