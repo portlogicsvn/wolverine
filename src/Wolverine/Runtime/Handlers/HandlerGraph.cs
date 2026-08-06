@@ -666,6 +666,7 @@ public partial class HandlerGraph : ICodeFileCollectionWithServices, IWithFailur
 
         lock (_messageTypesLock)
         {
+            // Portlogics hack
             string messageName = messageType.Name;
             if(!messageName.StartsWith("REQ_"))
                 messageName = messageType.ToMessageTypeName();
