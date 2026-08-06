@@ -56,7 +56,7 @@
     <PackageVersion Include="Marten.AspNetCore" Version="9.22.2" />
     <PackageVersion Include="Marten.Newtonsoft" Version="9.22.2" />
     <PackageVersion Include="MemoryPack" Version="1.21.3" />
-    <PackageVersion Include="MessagePack" Version="3.1.7" />
+    <PackageVersion Include="MessagePack" Version="3.1.8" />
     <PackageVersion Include="Meziantou.Extensions.Logging.Xunit" Version="1.0.15" />
     <PackageVersion Include="Microsoft.AspNetCore.Mvc.Testing" Version="9.0.14" />
     <PackageVersion Include="Microsoft.AspNetCore.SignalR" Version="1.2.9" />
