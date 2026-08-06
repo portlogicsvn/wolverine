@@ -19,12 +19,12 @@ public class control_queue_tests : PostgresqlContext, IAsyncLifetime
     private static IHost _receiver = null!;
     private static Uri _receiverUri = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         await dropControlSchema();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _sender.StopAsync();
         _sender.Dispose();
@@ -63,9 +63,9 @@ public class control_queue_tests : PostgresqlContext, IAsyncLifetime
     public async Task control_queue_table_should_exist()
     {
         using var conn = new NpgsqlConnection(Servers.PostgresConnectionString);
-        await conn.OpenAsync();
+        await conn.OpenAsync(TestContext.Current.CancellationToken);
 
-        var tables = await conn.ExistingTablesAsync(schemas: ["pgcontrol"]);
+        var tables = await conn.ExistingTablesAsync(schemas: ["pgcontrol"], ct: TestContext.Current.CancellationToken);
         await conn.CloseAsync();
 
         tables.ShouldContain(x => x.Name == DatabaseConstants.ControlQueueTableName);

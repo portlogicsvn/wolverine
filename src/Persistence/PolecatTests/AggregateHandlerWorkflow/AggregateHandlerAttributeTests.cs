@@ -8,6 +8,12 @@ using Wolverine.Configuration;
 using Wolverine.Polecat;
 using Wolverine.Runtime;
 using Wolverine.Runtime.Handlers;
+// JasperFx rc lifted its own IdentityAttribute (JasperFx.IdentityAttribute),
+// which now collides with Wolverine.Polecat.IdentityAttribute under the
+// `using Wolverine.Polecat;` import above. These tests exercise Polecat's
+// aggregate-handler attribute recognition (Polecat stays on alpha.10), so
+// pin [Identity] to the Polecat attribute the way it resolved pre-bump.
+using IdentityAttribute = Wolverine.Polecat.IdentityAttribute;
 
 namespace PolecatTests.AggregateHandlerWorkflow;
 
@@ -16,14 +22,14 @@ public class AggregateHandlerAttributeTests
     [Fact]
     public void determine_version_member_for_aggregate()
     {
-        AggregateHandling.DetermineVersionMember(typeof(PcInvoice))
+        AggregateHandling.DetermineVersionMember(typeof(PcInvoice))!
             .Name.ShouldBe(nameof(PcInvoice.Version));
     }
 
     [Fact]
     public void determine_aggregate_by_second_parameter()
     {
-        var chain = HandlerChain.For<PcInvoiceHandler>(x => x.Handle(default(ApprovePcInvoice), default),
+        var chain = HandlerChain.For<PcInvoiceHandler>(x => x.Handle(default(ApprovePcInvoice)!, default!),
             new HandlerGraph());
         AggregateHandling.DetermineAggregateType(chain)
             .ShouldBe(typeof(PcInvoice));
@@ -32,7 +38,7 @@ public class AggregateHandlerAttributeTests
     [Fact]
     public void throw_if_aggregate_type_is_indeterminate()
     {
-        var chain = HandlerChain.For<PcInvoiceHandler>(x => x.Handle(default(ApprovePcInvoice)), new HandlerGraph());
+        var chain = HandlerChain.For<PcInvoiceHandler>(x => x.Handle(default(ApprovePcInvoice)!), new HandlerGraph());
         Should.Throw<InvalidOperationException>(() =>
         {
             AggregateHandling.DetermineAggregateType(chain);
@@ -42,7 +48,7 @@ public class AggregateHandlerAttributeTests
     [Fact]
     public void throw_if_return_is_void_and_does_not_take_in_stream()
     {
-        var chain = HandlerChain.For<PcInvoiceHandler>(x => x.Handle(default(PcInvalid1), default), new HandlerGraph());
+        var chain = HandlerChain.For<PcInvoiceHandler>(x => x.Handle(default(PcInvalid1)!, default!), new HandlerGraph());
         Should.Throw<InvalidOperationException>(() =>
         {
             new AggregateHandlerAttribute().Modify(chain, new GenerationRules(), ServiceContainer.Empty());
@@ -52,7 +58,7 @@ public class AggregateHandlerAttributeTests
     [Fact]
     public void throw_if_return_is_Task_and_does_not_take_in_stream()
     {
-        var chain = HandlerChain.For<PcInvoiceHandler>(x => x.Handle(default(PcInvalid2), default), new HandlerGraph());
+        var chain = HandlerChain.For<PcInvoiceHandler>(x => x.Handle(default(PcInvalid2)!, default!), new HandlerGraph());
         Should.Throw<InvalidOperationException>(() =>
         {
             new AggregateHandlerAttribute().Modify(chain, new GenerationRules(), ServiceContainer.Empty());
@@ -62,10 +68,10 @@ public class AggregateHandlerAttributeTests
     [Fact]
     public void determine_aggregate_id_from_command_type_in_aggregate_handler_attribute()
     {
-        var chain = HandlerChain.For<PcInvoiceHandler>(x => x.Handle(default(CreatePcInvoice)), new HandlerGraph());
+        var chain = HandlerChain.For<PcInvoiceHandler>(x => x.Handle(default(CreatePcInvoice)!), new HandlerGraph());
         new AggregateHandlerAttribute { AggregateType = typeof(PcInvoice) }.TryInferMessageIdentity(chain, out var property)
             .ShouldBe(true);
-        property.Name.ShouldBe(nameof(CreatePcInvoice.Id));
+        property!.Name.ShouldBe(nameof(CreatePcInvoice.Id));
     }
 
     [Fact]
@@ -80,6 +86,15 @@ public class AggregateHandlerAttributeTests
     {
         AggregateHandling.DetermineAggregateIdMember(typeof(PcInvoice), typeof(RejectPcInvoice))
             .Name.ShouldBe(nameof(RejectPcInvoice.Something));
+    }
+
+    [Fact]
+    public void determine_aggregate_id_with_shared_jasperfx_identity_attribute()
+    {
+        // Regression for #3117 -- Polecat should honor the shared JasperFx.IdentityAttribute
+        // used across the rest of the Critter Stack (and Marten), not just its own [Identity].
+        AggregateHandling.DetermineAggregateIdMember(typeof(PcInvoice), typeof(RejectPcInvoiceShared))
+            .Name.ShouldBe(nameof(RejectPcInvoiceShared.Something));
     }
 
     [Fact]
@@ -148,6 +163,10 @@ public record CreatePcInvoice(Guid Id);
 public record PcInvoiceCreated;
 
 public record RejectPcInvoice([property: Identity] Guid Something);
+
+// Uses the shared JasperFx.IdentityAttribute (fully qualified to bypass the
+// file-level alias pinning [Identity] to Wolverine.Polecat.IdentityAttribute).
+public record RejectPcInvoiceShared([property: JasperFx.Identity] Guid Something);
 
 public class PcInvoiceHandler
 {

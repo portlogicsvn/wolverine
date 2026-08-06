@@ -17,10 +17,16 @@ public class Bug_305_invoke_async_with_return_not_publishing_with_tuple_return_v
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery()
+                    .IncludeType(typeof(CreateItemCommandHandler))
+                    .IncludeType(typeof(AlwaysMessageHandler))
+                    .IncludeType(typeof(ItemCreatedHandler))
+                    .IncludeType(typeof(SecondItemCreatedHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Services.AddMarten(Servers.PostgresConnectionString).IntegrateWithWolverine();
                 // Add the auto transaction middleware attachment policy
                 opts.Policies.AutoApplyTransactions();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var (tracked, created) = await host.InvokeMessageAndWaitAsync<ItemCreated>(new CreateItemCommand { Name = "Trevor" });
 
@@ -36,10 +42,16 @@ public class Bug_305_invoke_async_with_return_not_publishing_with_tuple_return_v
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery()
+                    .IncludeType(typeof(CreateItemCommandHandler))
+                    .IncludeType(typeof(AlwaysMessageHandler))
+                    .IncludeType(typeof(Message2Handler))
+                    .IncludeType(typeof(Message3Handler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Services.AddMarten(Servers.PostgresConnectionString).IntegrateWithWolverine();
                 // Add the auto transaction middleware attachment policy
                 opts.Policies.AutoApplyTransactions();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         Func<IMessageContext, Task> execute = async c =>
         {
@@ -62,8 +74,7 @@ public class CreateItemCommand
     public string Name { get; set; } = string.Empty;
 }
 
-#region sample_using_AlwaysPublishResponse
-
+#region sample_using_alwayspublishresponse
 public class CreateItemCommandHandler
 {
     // Using this attribute will force Wolverine to also publish the ItemCreated event even if

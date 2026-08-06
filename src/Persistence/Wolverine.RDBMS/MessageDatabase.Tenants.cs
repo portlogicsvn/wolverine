@@ -13,9 +13,19 @@ public abstract partial class MessageDatabase<T>
         // Gotta make sure the database state is in good shape first...
         // TODO -- might have to latch this w/ AutoCreate
         await ApplyAllConfiguredChangesToDatabaseAsync(ct: _cancellation);
-        
+
+        var assignments = tenantConnectionStrings.AllActiveByTenant().ToArray();
+        if (assignments.Length == 0)
+        {
+            // Nothing to seed. An empty master tenant table is valid — tenants may be registered
+            // later at runtime (e.g. via the master-table tenancy source). Compiling/executing a
+            // command with no SQL appended throws "CommandText property has not been initialized".
+            // GH-3019.
+            return;
+        }
+
         var builder = ToCommandBuilder();
-        foreach (var assignment in tenantConnectionStrings.AllActiveByTenant())
+        foreach (var assignment in assignments)
         {
             builder.Append($"delete from  {Settings.SchemaName}.{DatabaseConstants.TenantsTableName} where {StorageConstants.TenantIdColumn} = ");
             builder.AppendParameter(assignment.TenantId);
@@ -26,7 +36,7 @@ public abstract partial class MessageDatabase<T>
             builder.Append(");");
         }
 
-        var command = builder.Compile();
+        await using var command = builder.Compile();
         await using var conn = CreateConnection();
         await conn.OpenAsync(_cancellation);
         try
@@ -92,7 +102,8 @@ public abstract partial class MessageDatabase<T>
         {
             await using var reader =
                 await conn.CreateCommand(
-                        $"select {StorageConstants.TenantIdColumn}, {StorageConstants.ConnectionStringColumn} from {Settings.SchemaName}.{DatabaseConstants.TenantsTableName} where {DatabaseConstants.DisabledColumn} = false")
+                        $"select {StorageConstants.TenantIdColumn}, {StorageConstants.ConnectionStringColumn} from {Settings.SchemaName}.{DatabaseConstants.TenantsTableName} where {DatabaseConstants.DisabledColumn} = @disabled")
+                    .With("disabled", false)
                     .ExecuteReaderAsync(_cancellation);
 
             while (await reader.ReadAsync(_cancellation))
@@ -122,10 +133,15 @@ public abstract partial class MessageDatabase<T>
         await conn.OpenAsync(_cancellation);
         try
         {
+            // Upsert + (re-)enable. Uses a portable delete-then-insert rather than PostgreSQL's
+            // ON CONFLICT (which SqlServer rejects), and a bool parameter rather than a `false`
+            // literal (SqlServer has no boolean literal — it parses `false` as a column name). GH-3023.
             await conn.CreateCommand(
-                    $"insert into {Settings.SchemaName}.{DatabaseConstants.TenantsTableName} ({StorageConstants.TenantIdColumn}, {StorageConstants.ConnectionStringColumn}, {DatabaseConstants.DisabledColumn}) values (@id, @connection, false) on conflict ({StorageConstants.TenantIdColumn}) do update set {StorageConstants.ConnectionStringColumn} = @connection, {DatabaseConstants.DisabledColumn} = false")
+                    $"delete from {Settings.SchemaName}.{DatabaseConstants.TenantsTableName} where {StorageConstants.TenantIdColumn} = @id;" +
+                    $"insert into {Settings.SchemaName}.{DatabaseConstants.TenantsTableName} ({StorageConstants.TenantIdColumn}, {StorageConstants.ConnectionStringColumn}, {DatabaseConstants.DisabledColumn}) values (@id, @connection, @disabled)")
                 .With("id", tenantId)
                 .With("connection", connectionString)
+                .With("disabled", false)
                 .ExecuteNonQueryAsync(_cancellation);
         }
         finally
@@ -177,7 +193,8 @@ public abstract partial class MessageDatabase<T>
         try
         {
             await using var reader = await conn.CreateCommand(
-                    $"select {StorageConstants.TenantIdColumn} from {Settings.SchemaName}.{DatabaseConstants.TenantsTableName} where {DatabaseConstants.DisabledColumn} = true")
+                    $"select {StorageConstants.TenantIdColumn} from {Settings.SchemaName}.{DatabaseConstants.TenantsTableName} where {DatabaseConstants.DisabledColumn} = @disabled")
+                .With("disabled", true)
                 .ExecuteReaderAsync(_cancellation);
 
             while (await reader.ReadAsync(_cancellation))

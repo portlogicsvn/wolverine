@@ -7,8 +7,6 @@ using Wolverine.RabbitMQ.Internal;
 using Wolverine.Runtime;
 using Wolverine.Tracking;
 using Xunit;
-using Xunit.Abstractions;
-
 namespace Wolverine.RabbitMQ.Tests;
 
 public class end_to_end_with_named_broker
@@ -25,7 +23,7 @@ public class end_to_end_with_named_broker
     public async Task send_message_to_and_receive_through_rabbitmq_with_inline_receivers()
     {
         var queueName = RabbitTesting.NextQueueName();
-        using var publisher = WolverineHost.For(opts =>
+        using var publisher = await WolverineHost.ForAsync(opts =>
         {
             opts.AddNamedRabbitMqBroker(theName, factory => {}).AutoProvision().AutoPurgeOnStartup();
 
@@ -37,7 +35,7 @@ public class end_to_end_with_named_broker
         });
 
 
-        using var receiver = WolverineHost.For(opts =>
+        using var receiver = await WolverineHost.ForAsync(opts =>
         {
             opts.AddNamedRabbitMqBroker(theName, factory => { }).AutoProvision();
 
@@ -47,14 +45,14 @@ public class end_to_end_with_named_broker
             opts.Services.AddResourceSetupOnStartup(StartupAction.ResetState);
         });
 
-        await receiver.ResetResourceState();
+        await receiver.ResetResourceState(cancellation: TestContext.Current.CancellationToken);
 
         for (int i = 0; i < 10000; i++)
         {
             await publisher.SendAsync(new ColorChosen { Name = "blue" });
         }
 
-        var cancellation = new CancellationTokenSource(30.Seconds());
+        using var cancellation = new CancellationTokenSource(30.Seconds());
         var queue = receiver.Get<IWolverineRuntime>().Endpoints.EndpointByName(queueName).ShouldBeOfType<RabbitMqQueue>();
 
         while (!cancellation.IsCancellationRequested && await queue.QueuedCountAsync() > 0)
@@ -71,7 +69,7 @@ public class end_to_end_with_named_broker
     public async Task correct_scheme_on_reply_uri()
     {
         var queueName = RabbitTesting.NextQueueName();
-        using var publisher = WolverineHost.For(opts =>
+        using var publisher = await WolverineHost.ForAsync(opts =>
         {
             opts.Discovery.DisableConventionalDiscovery();
             
@@ -85,7 +83,7 @@ public class end_to_end_with_named_broker
         });
 
 
-        using var receiver = WolverineHost.For(opts =>
+        using var receiver = await WolverineHost.ForAsync(opts =>
         {
             opts.UseRabbitMq().AutoProvision();
 
@@ -96,7 +94,7 @@ public class end_to_end_with_named_broker
             opts.Services.AddResourceSetupOnStartup(StartupAction.ResetState);
         });
 
-        await receiver.ResetResourceState();
+        await receiver.ResetResourceState(cancellation: TestContext.Current.CancellationToken);
 
         var request = new RequestId(Guid.NewGuid());
         var (tracked, response) =

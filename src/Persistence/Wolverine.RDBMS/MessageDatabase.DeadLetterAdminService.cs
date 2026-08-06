@@ -10,12 +10,15 @@ namespace Wolverine.RDBMS;
 
 public abstract partial class MessageDatabase<T>
 {
+    // GH-3166: sentinel "received at" for dead letters whose envelope had no Destination (received_at is NULL).
+    internal static readonly Uri UnknownReceivedAtUri = new("unknown://none");
+
     public async Task<IReadOnlyList<DeadLetterQueueCount>> SummarizeAllAsync(string serviceName, TimeRange range,
         CancellationToken token)
     {
         var builder = ToCommandBuilder();
         builder.Append($"select {DatabaseConstants.ReceivedAt}, {DatabaseConstants.MessageType}, {DatabaseConstants.ExceptionType}, count(*) as total");
-        builder.Append($" from {SchemaName}.{DatabaseConstants.DeadLetterTable}");
+        builder.Append($" from {QuotedSchemaName}.{DatabaseConstants.DeadLetterTable}");
         builder.Append(" where 1 = 1");
 
         if (range.From.HasValue)
@@ -32,7 +35,7 @@ public abstract partial class MessageDatabase<T>
         
         builder.Append($" group by {DatabaseConstants.ReceivedAt}, {DatabaseConstants.MessageType}, {DatabaseConstants.ExceptionType}");
         
-        var cmd = builder.Compile();
+        await using var cmd = builder.Compile();
 
         var envelopes = new List<DeadLetterQueueCount>();
         
@@ -44,7 +47,15 @@ public abstract partial class MessageDatabase<T>
 
             while (await reader.ReadAsync(token))
             {
-                var uri = new Uri(await reader.GetFieldValueAsync<string>(0, token));
+                // GH-3166: received_at is envelope.Destination?.ToString() and is NULL for any envelope
+                // that dead-lettered without a destination. An unguarded new Uri(GetFieldValueAsync<string>)
+                // threw on DBNull and aborted the ENTIRE summarize — so a single destination-less dead
+                // letter made the DLQ explorer report "No dead letter queue entries found" for the whole
+                // store, even though count(*) (the durability monitor's path) reported hundreds. Group the
+                // destination-less rows under a clear sentinel instead of throwing.
+                var uri = await reader.IsDBNullAsync(0, token)
+                    ? UnknownReceivedAtUri
+                    : new Uri(await reader.GetFieldValueAsync<string>(0, token));
                 var messageType = await reader.GetFieldValueAsync<string>(1, token);
                 var exceptionType = await reader.GetFieldValueAsync<string>(2, token);
                 var count = await reader.GetFieldValueAsync<int>(3, token);
@@ -71,7 +82,7 @@ public abstract partial class MessageDatabase<T>
 
         var topSelect = toTopClause(query);
         
-        builder.Append($"select{topSelect} {DatabaseConstants.DeadLetterFields}, count(*) OVER() as total_rows from {SchemaName}.{DatabaseConstants.DeadLetterTable} where 1 = 1");
+        builder.Append($"select{topSelect} {DatabaseConstants.DeadLetterFields}, count(*) OVER() as total_rows from {QuotedSchemaName}.{DatabaseConstants.DeadLetterTable} where 1 = 1");
 
         writeDeadLetterWhereClause(query, builder);
 
@@ -89,7 +100,7 @@ public abstract partial class MessageDatabase<T>
         await using var conn = CreateConnection();
         await conn.OpenAsync(token);
 
-        var cmd = builder.Compile();
+        await using var cmd = builder.Compile();
         cmd.Connection = conn;
 
         await using var reader = await cmd.ExecuteReaderAsync(token);
@@ -97,14 +108,14 @@ public abstract partial class MessageDatabase<T>
         var results = new DeadLetterEnvelopeResults{PageNumber = query.PageNumber};
         if (await reader.ReadAsync(token))
         {
-            var env = await DatabasePersistence.ReadDeadLetterAsync(reader, token);
+            var env = await DatabasePersistence.ReadDeadLetterAsync(reader, token, Logger);
             results.Envelopes.Add(env);
             results.TotalCount = await reader.GetFieldValueAsync<int>(10, token);
         }
 
         while (await reader.ReadAsync(token))
         {
-            var env = await DatabasePersistence.ReadDeadLetterAsync(reader, token);
+            var env = await DatabasePersistence.ReadDeadLetterAsync(reader, token, Logger);
             results.Envelopes.Add(env);
         }
 
@@ -152,6 +163,12 @@ public abstract partial class MessageDatabase<T>
             builder.AppendParameter(query.ReceivedAt);
         }
 
+        if (query.Replayable.HasValue)
+        {
+            builder.Append($" and {DatabaseConstants.Replayable} = ");
+            builder.AppendParameter(query.Replayable.Value);
+        }
+
         if (query.MessageIds != null && query.MessageIds.Any())
         {
             writeMessageIdArrayQueryList(builder, query.MessageIds);
@@ -166,7 +183,7 @@ public abstract partial class MessageDatabase<T>
     {
         var builder = ToCommandBuilder();
         
-        builder.Append($"delete from {SchemaName}.{DatabaseConstants.DeadLetterTable} where 1 = 1");
+        builder.Append($"delete from {QuotedSchemaName}.{DatabaseConstants.DeadLetterTable} where 1 = 1");
 
         writeDeadLetterWhereClause(query, builder);
 
@@ -178,7 +195,7 @@ public abstract partial class MessageDatabase<T>
         var builder = ToCommandBuilder();
 
         builder.Append(
-            $"update {SchemaName}.{DatabaseConstants.DeadLetterTable} set {DatabaseConstants.Replayable} = ");
+            $"update {QuotedSchemaName}.{DatabaseConstants.DeadLetterTable} set {DatabaseConstants.Replayable} = ");
         builder.AppendParameter(true);
         builder.Append(" where 1 = 1");
         writeDeadLetterWhereClause(query, builder);
@@ -198,7 +215,7 @@ public abstract partial class MessageDatabase<T>
 
         var builder = ToCommandBuilder();
         builder.Append(
-            $"update {SchemaName}.{DatabaseConstants.DeadLetterTable} set {DatabaseConstants.Body} = ");
+            $"update {QuotedSchemaName}.{DatabaseConstants.DeadLetterTable} set {DatabaseConstants.Body} = ");
         builder.AppendParameter(serialized);
         builder.Append($", {DatabaseConstants.Replayable} = ");
         builder.AppendParameter(true);

@@ -17,6 +17,7 @@ using Wolverine.Polecat.Persistence.Sagas;
 using Wolverine.Persistence;
 using Wolverine.Runtime;
 using Wolverine.Runtime.Handlers;
+using System.Diagnostics.CodeAnalysis;
 
 namespace Wolverine.Polecat;
 
@@ -24,8 +25,8 @@ internal record AggregateHandling(IDataRequirement Requirement)
 {
     private static readonly Type _versioningBaseType = typeof(AggregateVersioning<>);
 
-    public Type AggregateType { get; init; }
-    public Variable AggregateId { get; init; }
+    public required Type AggregateType { get; init; }
+    public required Variable AggregateId { get; init; }
 
     public ConcurrencyStyle LoadStyle { get; init; }
     public Variable? Version { get; init; }
@@ -37,10 +38,13 @@ internal record AggregateHandling(IDataRequirement Requirement)
     {
         Store(chain);
 
+        declareAggregateIdRouteParameter(chain);
+
         new PolecatPersistenceFrameProvider().ApplyTransactionSupport(chain, container);
 
         var loader = new LoadAggregateFrame(this);
         chain.Middleware.Add(loader);
+        chain.Middleware.Add(new TagAggregateOtelFrame(AggregateType, AggregateId));
 
         var firstCall = chain.HandlerCalls().First();
 
@@ -69,6 +73,44 @@ internal record AggregateHandling(IDataRequirement Requirement)
         return aggregate;
     }
 
+    /// <summary>
+    /// Tell an HTTP chain the CLR type of the route parameter that names this aggregate, so that the
+    /// generated OpenAPI parameter carries the identity's real schema.
+    ///
+    /// On the <c>[AggregateHandler]</c> shape the aggregate id is read off the command rather than off the
+    /// route, so an unconstrained token — the <c>{id}</c> in <c>[WolverinePost("/orders/{id}/confirm")]</c>
+    /// paired with <c>Handle(ConfirmOrder command, Order order)</c> — is bound by nothing in the endpoint
+    /// signature and would otherwise be described as a plain <c>string</c>. The identity type is Polecat
+    /// domain knowledge that Wolverine.Http cannot infer on its own. See GH-3420.
+    /// </summary>
+    private void declareAggregateIdRouteParameter(IChain chain)
+    {
+        if (chain is not IRoutedChain routed) return;
+
+        var routeParameterNames = routed.RouteParameterNames;
+        if (routeParameterNames.Count == 0) return;
+
+        // Same precedence as WriteAggregateAttribute.FindIdentity()
+        string?[] candidates =
+        [
+            (Requirement as WriteAggregateAttribute)?.RouteOrParameterName,
+            $"{AggregateType.Name.ToCamelCase()}Id",
+            "id"
+        ];
+
+        foreach (var candidate in candidates)
+        {
+            if (candidate.IsEmpty()) continue;
+
+            var match = routeParameterNames.FirstOrDefault(x => x.EqualsIgnoreCase(candidate!));
+            if (match != null)
+            {
+                routed.DeclareRouteParameterType(match, AggregateId.VariableType);
+                return;
+            }
+        }
+    }
+
     public void Store(IChain chain)
     {
         if (chain.Tags.TryGetValue(nameof(AggregateHandling), out var raw))
@@ -89,7 +131,7 @@ internal record AggregateHandling(IDataRequirement Requirement)
         }
     }
 
-    public static bool TryLoad(IChain chain, out AggregateHandling handling)
+    public static bool TryLoad(IChain chain, [NotNullWhen(true)] out AggregateHandling? handling)
     {
         if (chain.Tags.TryGetValue(nameof(AggregateHandling), out var raw))
         {
@@ -104,7 +146,7 @@ internal record AggregateHandling(IDataRequirement Requirement)
         return false;
     }
 
-    public static bool TryLoad<T>(IChain chain, out AggregateHandling handling)
+    public static bool TryLoad<T>(IChain chain, [NotNullWhen(true)] out AggregateHandling? handling)
     {
         if (chain.Tags.TryGetValue(nameof(AggregateHandling), out var raw))
         {
@@ -183,7 +225,12 @@ internal record AggregateHandling(IDataRequirement Requirement)
     internal static MemberInfo DetermineAggregateIdMember(Type aggregateType, Type commandType)
     {
         var conventionalMemberName = $"{aggregateType.Name}Id";
-        var member = commandType.GetMembers().FirstOrDefault(x => x.HasAttribute<IdentityAttribute>())
+
+        // Honor both the Polecat-specific [Identity] and the shared JasperFx.IdentityAttribute
+        // used across the rest of the Critter Stack (and Marten) so a single store-agnostic
+        // command/aggregate source can codegen against both stores.
+        var member = commandType.GetMembers().FirstOrDefault(x =>
+                         x.HasAttribute<IdentityAttribute>() || x.HasAttribute<JasperFx.IdentityAttribute>())
                      ?? commandType.GetMembers().FirstOrDefault(x =>
                          x.Name.EqualsIgnoreCase(conventionalMemberName) || x.Name.EqualsIgnoreCase("Id"));
 
@@ -195,7 +242,7 @@ internal record AggregateHandling(IDataRequirement Requirement)
         if (member == null)
         {
             throw new InvalidOperationException(
-                $"Unable to determine the aggregate id for aggregate type {aggregateType.FullNameInCode()} on command type {commandType.FullNameInCode()}. Either make a property or field named '{conventionalMemberName}', or decorate a member with the {typeof(IdentityAttribute).FullNameInCode()} attribute");
+                $"Unable to determine the aggregate id for aggregate type {aggregateType.FullNameInCode()} on command type {commandType.FullNameInCode()}. Either make a property or field named '{conventionalMemberName}', or decorate a member with the {typeof(IdentityAttribute).FullNameInCode()} or {typeof(JasperFx.IdentityAttribute).FullNameInCode()} attribute");
         }
 
         return member;
@@ -258,8 +305,8 @@ internal record AggregateHandling(IDataRequirement Requirement)
     internal Variable RelayAggregateToHandlerMethod(Variable eventStream, IChain chain, MethodCall firstCall,
         Type aggregateType)
     {
-        Variable aggregateVariable = new MemberAccessVariable(eventStream,
-            typeof(IEventStream<>).MakeGenericType(aggregateType).GetProperty(nameof(IEventStream<string>.Aggregate)));
+        var member = typeof(IEventStream<>).MakeGenericType(aggregateType).GetProperty(nameof(IEventStream<string>.Aggregate));
+        Variable aggregateVariable = new MemberAccessVariable(eventStream, member!);
 
         if (Requirement.Required)
         {
@@ -281,7 +328,7 @@ internal record AggregateHandling(IDataRequirement Requirement)
         }
         else if (Parameter != null)
         {
-            firstCall.TrySetArgument(Parameter.Name, aggregateVariable);
+            firstCall.TrySetArgument(Parameter.Name!, aggregateVariable);
         }
         else
         {
@@ -290,14 +337,14 @@ internal record AggregateHandling(IDataRequirement Requirement)
 
         if (Parameter != null)
         {
-            StoreDeferredMiddlewareVariable(chain, Parameter.Name, aggregateVariable);
+            StoreDeferredMiddlewareVariable(chain, Parameter.Name!, aggregateVariable);
         }
 
         foreach (var methodCall in chain.Middleware.OfType<MethodCall>())
         {
             if (Parameter != null)
             {
-                if (!methodCall.TrySetArgument(Parameter.Name, aggregateVariable))
+                if (!methodCall.TrySetArgument(Parameter.Name!, aggregateVariable))
                 {
                     methodCall.TrySetArgument(aggregateVariable);
                 }
@@ -336,7 +383,7 @@ internal record AggregateHandling(IDataRequirement Requirement)
             $"Unable to determine a Polecat aggregate type for {chain}. You may need to explicitly specify the aggregate type in a {nameof(AggregateHandlerAttribute)} attribute");
     }
 
-    internal static MemberInfo DetermineVersionMember(Type aggregateType)
+    internal static MemberInfo? DetermineVersionMember(Type aggregateType)
     {
         var versioning =
             _versioningBaseType.CloseAndBuildAs<IAggregateVersioning>(AggregationScope.SingleStream, aggregateType);

@@ -5,7 +5,7 @@
 ## Tech Stack
 
 - **Language**: C# 12+
-- **Frameworks**: .NET 8.0, 9.0, 10.0
+- **Frameworks**: .NET 9.0, 10.0 (net8.0 dropped in 6.0; 5.x maintained on the `5.0` branch)
 - **Build**: MSBuild + Nuke (scripted automation)
 - **Core Dependencies**: JasperFx (runtime compilation), Microsoft.Extensions.*, System.Threading.Tasks.Dataflow
 - **Docs**: Vitepress (in `/docs`)
@@ -61,9 +61,34 @@ dotnet test src/Testing/CoreTests/
 npm install && npm run docs
 ```
 
-**Solutions**:
-- `wolverine.sln` - Full solution
-- `wolverine_slim.sln` - Lightweight variant
+**Solutions** (new `.slnx` XML format):
+- `wolverine.slnx` - Full solution
+- `wolverine_slim.slnx` - Lightweight variant
+
+> ⚠️ **CI builds `wolverine.slnx` (the full solution)** — pinned in
+> `.nuke/parameters.json` (`"Solution": "wolverine.slnx"`) and consumed by
+> the `Compile` target in `build/Build.cs`.
+>
+> `wolverine_slim.slnx` omits several extension projects — most notably
+> `Wolverine.EntityFrameworkCore`, `Wolverine.Polecat`, `Wolverine.RavenDb`,
+> `Wolverine.Http.Newtonsoft`, `Wolverine.FluentValidation`,
+> `Wolverine.AzureServiceBus.Tests`, the `PolecatTests` / `MartenTests`
+> suites, and `WolverineWebApi`. A clean slim build is **not sufficient
+> evidence** that a tightening change to a dependency (e.g. a new AOT/trim
+> annotation in JasperFx, a type lift from Marten/Polecat into JasperFx.Events)
+> is clean across Wolverine. **Build `wolverine.slnx` before pushing**:
+>
+> ```bash
+> dotnet build wolverine.slnx -c Release -f net9.0
+> ```
+>
+> ⚠️ **Pass `-f net9.0`.** `.nuke/parameters.json` pins `"Framework": "net9.0"`, so the `Compile`
+> target builds the solution *pinned to a single framework*. A bare
+> `dotnet build wolverine.slnx` builds each project for its own `TargetFrameworks` instead, which
+> is a **weaker** check — a net10.0-only project passes locally and then fails CI with
+> `NETSDK1005: Assets file ... doesn't have a target for 'net9.0'`. That is not hypothetical; it
+> is what made GH-3839's first push red after a clean local build. Build the unpinned form too if
+> you like, but the pinned one is the gate.
 
 ## Key Entry Points
 
@@ -82,6 +107,62 @@ npm install && npm run docs
 Valid handler method names: `Handle`, `HandleAsync`, `Consume`, `ConsumeAsync` (`HandlerDiscovery.cs:17-22`)
 
 Handlers are discovered by scanning assemblies. Use attributes like `[WolverineHandler]`, `[WolverineMessage]`, `[WolverineIgnore]` to control discovery.
+
+## Naming conventions
+
+Member casing is driven by **accessibility**, not by member kind:
+
+- **`internal` and `public` members** (methods, properties, events, constants) use **PascalCase**.
+- **`private` and `protected` members** (methods, properties) use **camelCase** — e.g. `buildSenderIfMissing()`,
+  `writeOutgoingHeader()`, `tableExistsAsync()`. This includes `private static` helper methods.
+- Private/protected **fields** keep the conventional leading underscore + camelCase (`_sender`, `_queueTable`).
+
+When in doubt, match the surrounding file. Examples: `EnvelopeMapper` (`buildIncoming`/`buildOutgoing` private vs
+`MapProperty`/`ReceivesMessage` public), `SqlServerQueue` (`buildSenderIfMissing` private vs `SendAsync` public).
+
+## Performance conventions
+
+### Use `ImHashMap` for hot-path dictionary lookups
+
+For any dictionary lookup where performance matters — per-message work, per-Envelope work, per-handler dispatch — use `ImHashMap<TKey, TValue>` from `JasperFx.Core`. **Do not replace `ImHashMap` with `FrozenDictionary`** even when the data is post-bootstrap-immutable.
+
+`ImHashMap` is a copy-on-write hash trie:
+- Lookups are lock-free and don't allocate.
+- Writes return a new map; callers swap via `Interlocked.CompareExchange` or a plain field assignment.
+- The trie structure is friendlier to the JIT for our hot paths than `FrozenDictionary`'s hash-bucket layout in practice.
+
+If a hot path is paying for **mutation** (not lookup), the right fix is **pre-population at bootstrap** — typically inside the relevant `chain.Compile()` or `WolverineRuntime.HostService.StartAsync()` path — so steady-state runtime sees pure reads. Keep the `ImHashMap` field type.
+
+Examples in the codebase:
+- `WolverineMessageNaming._typeNames` (`src/Wolverine/Util/WolverineMessageNaming.cs:140`) — pre-populated via `PrepopulateCache(IEnumerable<Type>)` at startup.
+- `HandlerGraph._chains` / `_handlers` (`src/Wolverine/Runtime/Handlers/HandlerGraph.cs:41,43`) — built once in `Compile()`.
+- `Endpoint._serializers` (`src/Wolverine/Configuration/Endpoint.cs:185`) — `Endpoint.Compile()` pre-seeds the map with every globally-registered content type (`Endpoint.cs:524-537`), so `TryFindSerializer` (`Endpoint.cs:593-613`) is a pure lock-free read on the hot path; an unregistered content type falls back to `Runtime.Options.TryFindSerializer` without mutating the endpoint cache.
+
+`FrozenDictionary` may still be appropriate for **non-hot-path** snapshots, e.g. metadata exposed to user code that doesn't participate in dispatch. Default to `ImHashMap` unless you have a specific reason otherwise.
+
+## Test conventions
+
+### Getting an `IMessageBus` from an `IHost` in tests
+
+`IMessageBus` is scoped per-message, so resolving it from the host's root container yields a bus that isn't wired into the active `MessageContext` and won't behave correctly under tracking, outbox, or context-propagation tests.
+
+```csharp
+// ❌ Don't — pulls the bus from the root scope, missing the per-message context
+var bus = host.Services.GetRequiredService<IMessageBus>();
+
+// ✅ Do — extension method in the `Wolverine` namespace that hands you a
+// scoped bus already attached to the current message context
+var bus = host.MessageBus();
+```
+
+### Database connection strings come from `Servers`
+
+Always obtain database connection strings from the `Servers` type (`src/Servers.cs`,
+e.g. `Servers.PostgresConnectionString`, `Servers.SqlServerConnectionString`). **Never
+hardcode a connection string literal in a test.** This keeps host/port/credentials
+centralized and CI-portable — e.g. Wolverine's own docker-compose Postgres runs on port
+**5433** (`docker compose up -d postgresql`), distinct from Marten's `5432`, and only
+`Servers` knows that.
 
 ## Configuration Organization
 
@@ -116,4 +197,6 @@ When working on specific areas, consult these files:
 
 ## Version
 
-Current: **5.13.0** (see `Directory.Build.props`)
+- **5.39.0** — last shipped on the 5.x line (see `Directory.Build.props`).
+- **6.0** — `main` branch ongoing development (JasperFx 2.0-alpha line, net9.0/net10.0).
+- **5.x maintenance** — bug fixes only, off the `5.0` branch.

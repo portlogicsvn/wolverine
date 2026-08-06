@@ -42,7 +42,7 @@ look like this:
         return Results.Ok(invoice);
     }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/Documents.cs#L14-L31' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_get_invoice_longhand' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/Documents.cs#L15-L31' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_get_invoice_longhand' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Pretty straightforward, but it's a little annoying to have to scatter in all the attributes for OpenAPI and there's definitely
@@ -58,7 +58,7 @@ public static Invoice Get([Document] Invoice invoice)
     return invoice;
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/Documents.cs#L33-L41' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_document_attribute' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/Documents.cs#L33-L40' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_document_attribute' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Notice that the `[Document]` attribute was able to use the "id" route parameter. By default, Wolverine is looking first
@@ -75,7 +75,7 @@ public static IMartenOp Approve([Document("number")] Invoice invoice)
     return MartenOps.Store(invoice);
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/Documents.cs#L54-L63' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_overriding_route_argument_with_document_attribute' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/Documents.cs#L52-L60' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_overriding_route_argument_with_document_attribute' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 In the code above, if the `Invoice` document does not exist, the route will stop and return a status code 404 for Not Found.  
@@ -92,7 +92,7 @@ However, if the document is soft-deleted your endpoint will still be executed.
 If you want soft-deleted documents to be treated as `NULL` for a endpoint, you can set `MaybeSoftDeleted` to `false`.  
 In combination with `Required = true` that means the endpoint will return 404 for missing and soft-deleted documents.
 
-<!-- snippet: sample_using_Document_with_MaybeSoftDeleted -->
+<!-- snippet: sample_using_document_with_maybesoftdeleted -->
 <a id='snippet-sample_using_document_with_maybesoftdeleted'></a>
 ```cs
 [WolverineGet("/invoices/soft-delete/{id}")]
@@ -101,7 +101,7 @@ public static Invoice GetSoftDeleted([Document(Required = true, MaybeSoftDeleted
     return invoice;
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/Documents.cs#L65-L71' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_document_with_maybesoftdeleted' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/Documents.cs#L62-L68' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_document_with_maybesoftdeleted' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 
@@ -148,7 +148,7 @@ public static OrderShipped Ship(ShipOrder2 command, [Aggregate] Order order)
     return new OrderShipped();
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/Orders.cs#L147-L162' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_aggregate_attribute_1' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/Orders.cs#L146-L160' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_aggregate_attribute_1' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Using this version of the "aggregate workflow", you no longer have to supply a command in the request body, so you could
@@ -167,7 +167,7 @@ public static OrderShipped Ship3([Aggregate] Order order)
     return new OrderShipped();
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/Orders.cs#L164-L176' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_aggregate_attribute_2' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/Orders.cs#L162-L173' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_aggregate_attribute_2' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 A couple other notes: 
@@ -207,7 +207,7 @@ public record ItemReady(string Name);
 
 public class Item
 {
-    public string Name { get; set; }
+    public string Name { get; set; } = null!;
     public bool Ready { get; set; }
 }
 
@@ -260,12 +260,12 @@ public class Order
     public bool IsShipped() => Shipped.HasValue;
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/Orders.cs#L17-L89' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_order_aggregate_for_http' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/Orders.cs#L18-L89' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_order_aggregate_for_http' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 To append a single event to an event stream from an HTTP endpoint, you can use a return value like so:
 
-<!-- snippet: sample_using_EmptyResponse -->
+<!-- snippet: sample_using_emptyresponse -->
 <a id='snippet-sample_using_emptyresponse'></a>
 ```cs
 [AggregateHandler]
@@ -279,7 +279,7 @@ public static OrderShipped Ship(ShipOrder command, Order order)
     return new OrderShipped();
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/Orders.cs#L122-L135' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_emptyresponse' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/Orders.cs#L122-L134' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_emptyresponse' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Or potentially append multiple events using the `Events` type as a return value like this sample:
@@ -315,7 +315,7 @@ public static (OrderStatus, Events) Post(MarkItemReady command, Order order)
     return (new OrderStatus(order.Id, order.IsReadyToShip()), events);
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/Orders.cs#L240-L270' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_returning_multiple_events_from_http_endpoint' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/Orders.cs#L236-L265' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_returning_multiple_events_from_http_endpoint' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ### Responding with the Updated Aggregate
@@ -341,14 +341,14 @@ public static (UpdatedAggregate, Events) ConfirmDifferent(ConfirmOrder command, 
     );
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/Orders.cs#L298-L312' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_returning_updated_aggregate_as_response_from_http_endpoint' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/Orders.cs#L293-L306' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_returning_updated_aggregate_as_response_from_http_endpoint' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 If you should happen to have a message handler or HTTP endpoint signature that uses multiple event streams,
 but you want the `UpdatedAggregate` to **only** apply to one of the streams, you can use the `UpdatedAggregate<T>`
 to tip off Wolverine about that like in this sample:
 
-<!-- snippet: sample_MakePurchaseHandler -->
+<!-- snippet: sample_makepurchasehandler -->
 <a id='snippet-sample_makepurchasehandler'></a>
 ```cs
 public static class MakePurchaseHandler
@@ -364,8 +364,8 @@ public static class MakePurchaseHandler
 
         [WriteAggregate] IEventStream<Inventory> inventory)
     {
-        if (command.Number > inventory.Aggregate.Quantity ||
-            (command.Number * inventory.Aggregate.UnitPrice) > account.Aggregate.Balance)
+        if (command.Number > inventory.Aggregate!.Quantity ||
+            (command.Number * inventory.Aggregate.UnitPrice) > account.Aggregate!.Balance)
         {
             // Do Nothing!
             return new UpdatedAggregate<XAccount>();
@@ -378,7 +378,7 @@ public static class MakePurchaseHandler
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/MartenTests/AggregateHandlerWorkflow/mixed_aggregate_handler_with_multiple_streams.cs#L86-L115' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_makepurchasehandler' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/MartenTests/AggregateHandlerWorkflow/mixed_aggregate_handler_with_multiple_streams.cs#L90-L118' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_makepurchasehandler' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ::: info
@@ -509,13 +509,13 @@ projections.
 If you want to inject the current state of an event sourced aggregate as a parameter into
 an HTTP endpoint method, use the `[ReadAggregate]` attribute like this:
 
-<!-- snippet: sample_using_ReadAggregate_in_HTTP -->
+<!-- snippet: sample_using_readaggregate_in_http -->
 <a id='snippet-sample_using_readaggregate_in_http'></a>
 ```cs
 [WolverineGet("/orders/latest/{id}")]
 public static Order GetLatest(Guid id, [ReadAggregate] Order order) => order;
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/Orders.cs#L326-L331' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_readaggregate_in_http' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/Orders.cs#L320-L324' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_readaggregate_in_http' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 If the aggregate doesn't exist, the HTTP request will stop with a 404 status code. 
@@ -535,7 +535,7 @@ Register it in `WolverineHttpOptions` like this:
 ```cs
 opts.UseMartenCompiledQueryResultPolicy();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Program.cs#L255-L259' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_user_marten_compiled_query_policy' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Program.cs#L343-L346' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_user_marten_compiled_query_policy' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 If you now return a compiled query from an Endpoint the result will get directly streamed to the client as JSON. Short circuiting JSON deserialization.
@@ -548,7 +548,7 @@ public static ApprovedInvoicedCompiledQuery GetApproved()
     return new ApprovedInvoicedCompiledQuery();
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/Documents.cs#L73-L79' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_compiled_query_return_endpoint' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/Documents.cs#L70-L76' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_compiled_query_return_endpoint' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 <!-- snippet: sample_compiled_query_return_query -->
@@ -562,6 +562,176 @@ public class ApprovedInvoicedCompiledQuery : ICompiledListQuery<Invoice>
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/Documents.cs#L109-L119' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_compiled_query_return_query' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/Documents.cs#L106-L115' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_compiled_query_return_query' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
+## Streaming JSON Responses <Badge type="tip" text="5.32" />
+
+[`Marten.AspNetCore`](https://martendb.io/documents/aspnetcore.html) ships three
+typed return values — `StreamOne<T>`, `StreamMany<T>`, and `StreamAggregate<T>` —
+that write Marten's raw JSON directly to the HTTP response. The JSON never
+round-trips through a .NET object and the framework's serializer, so there's no
+deserialize/serialize overhead.
+
+Each type also supplies correct OpenAPI metadata (`Produces<T>`, `Produces(404)`
+where appropriate) via `IEndpointMetadataProvider`, so Swashbuckle, NSwag, and
+Minimal-API's built-in OpenAPI generator all see the right response shape.
+
+The types implement `IResult`, so Wolverine.Http dispatches them through its
+existing `ResultWriterPolicy` — **no extra Wolverine-specific configuration is
+needed**. Just `using Marten.AspNetCore;` in your endpoint file and return one.
+
+### When to use which
+
+| Type                   | Source                                           | Shape returned | 404? |
+| ---------------------- | ------------------------------------------------ | -------------- | ---- |
+| `StreamOne<T>`         | `IQueryable<T>` — regular Marten document query  | Single `T`     | yes  |
+| `StreamMany<T>`        | `IQueryable<T>` — regular Marten document query  | JSON array `T[]` | no (empty array = 200) |
+| `StreamAggregate<T>`   | `IDocumentSession` + stream id — event-sourced   | Single `T`     | yes  |
+| `StreamPaged<T>`       | `IQueryable<T>` + page number/size                | Paged envelope | no   |
+| `StreamPagedByCursor<T>` | `IQueryable<T>` + cursor/page size              | Cursor envelope | no   |
+
+**Key difference — `StreamOne<T>` vs `StreamAggregate<T>`**:
+
+- **`StreamOne<T>`** is for regular Marten documents — plain objects persisted via
+  `session.Store()` and queried with `session.Query<T>()`. The query hits the
+  document table directly.
+- **`StreamAggregate<T>`** is for event-sourced aggregates. Marten rebuilds the
+  latest aggregate state by folding events from the event store (or reads a
+  projected snapshot if you have one configured). Use this when `T` is an
+  event-sourced aggregate, not a stored document.
+
+### `StreamOne<T>` — single document with 404 on miss
+
+```csharp
+using Marten.AspNetCore;
+
+[WolverineGet("/invoices/{id}")]
+public static StreamOne<Invoice> Get(Guid id, IQuerySession session)
+    => new(session.Query<Invoice>().Where(x => x.Id == id));
+```
+
+Returns `200 application/json` with the JSON body on a hit, `404` on a miss.
+`Content-Length` and `Content-Type` are set automatically.
+
+### `StreamMany<T>` — JSON array
+
+```csharp
+[WolverineGet("/invoices/approved")]
+public static StreamMany<Invoice> Approved(IQuerySession session)
+    => new(session.Query<Invoice>().Where(x => x.Approved));
+```
+
+Returns `200 application/json` with a JSON array body. An empty result set
+returns `[]`, not `404`.
+
+### `StreamAggregate<T>` — event-sourced aggregate (latest)
+
+```csharp
+[WolverineGet("/orders/{id}")]
+public static StreamAggregate<Order> Get(Guid id, IDocumentSession session)
+    => new(session, id);
+```
+
+Returns `200 application/json` with the JSON of the latest projected aggregate
+state, or `404` if no stream exists for the supplied id. The constructor also
+accepts `string` ids for stores configured with string-keyed streams.
+
+### Customizing status code and content type
+
+All three types expose init-only properties for overriding defaults:
+
+```csharp
+[WolverinePost("/invoices")]
+public static StreamOne<Invoice> Create(CreateInvoice cmd, IQuerySession session)
+    => new(session.Query<Invoice>().Where(x => x.Id == cmd.InvoiceId))
+    {
+        OnFoundStatus = StatusCodes.Status201Created,
+        ContentType = "application/vnd.myapi.invoice+json"
+    };
+```
+
+### When to prefer streaming over returning `T`
+
+Reach for these types when:
+
+- The response is large (big documents, long arrays) — avoids allocating the
+  deserialized graph and re-serializing it
+- You need fine-grained control over status code and content type without
+  wrapping in `IResult`
+- You want a concise, typed endpoint signature that still produces accurate
+  OpenAPI metadata
+
+For small responses where the query result is already going to be materialized
+(to make a decision, for example), a plain `T` return is fine.
+
+## Paged Streaming Responses <Badge type="tip" text="9.18" />
+
+`Marten.AspNetCore` 9.18 adds two more `IResult` types built on the same
+streaming infrastructure, for paginated queries: `StreamPaged<T>` and
+`StreamPagedByCursor<T>`. Like `StreamOne<T>`, `StreamMany<T>`, and
+`StreamAggregate<T>`, both types just work with Wolverine.HTTP — they
+implement `IResult` and `IEndpointMetadataProvider`, so no Wolverine-specific
+code is required.
+
+### `StreamPaged<T>` — offset paging
+
+```csharp
+[WolverineGet("/invoices/paged")]
+public static StreamPaged<Invoice> GetPaged(int pageNumber, int pageSize, IQuerySession session)
+    => new(session.Query<Invoice>().OrderBy(x => x.Id), pageNumber, pageSize);
+```
+
+Returns `200 application/json` with a paged envelope shaped like:
+
+```json
+{
+    "pageNumber": 1,
+    "pageSize": 20,
+    "totalItemCount": 42,
+    "items": [ /* Invoice[] */ ]
+}
+```
+
+Use this for classic "page 1 of N" UIs where you need a total count and
+random access to any page number.
+
+### `StreamPagedByCursor<T>` — keyset (cursor) paging
+
+```csharp
+[WolverineGet("/invoices/by-cursor")]
+public static StreamPagedByCursor<Invoice> GetByCursor(string? cursor, int pageSize, IQuerySession session)
+    => new(session.Query<Invoice>().OrderBy(x => x.Id), cursor, pageSize);
+```
+
+Returns `200 application/json` with the requested page of items plus a
+`nextCursor` value the client passes back on the next request to continue
+from where it left off:
+
+```json
+{
+    "items": [ /* Invoice[] */ ],
+    "nextCursor": "..."
+}
+```
+
+Keyset pagination scales better than offset paging for large or
+frequently-changing result sets, because it doesn't need to compute a total
+count or skip over previously-seen rows on every request.
+
+## ETag Support for `StreamOne<T>` and `StreamAggregate<T>` <Badge type="tip" text="9.18" />
+
+`StreamOne<T>` and `StreamAggregate<T>` compute and emit an `ETag` response
+header by default. If the client sends a matching `If-None-Match` request
+header, Marten short-circuits the response with `304 Not Modified` instead of
+re-serializing and sending the body — useful for caching individual
+documents or aggregates behind a CDN or browser cache.
+
+Set `EmitETag = false` to opt out if you don't want this behavior for a
+particular endpoint:
+
+```csharp
+[WolverineGet("/invoices/{id}")]
+public static StreamOne<Invoice> Get(Guid id, IQuerySession session)
+    => new(session.Query<Invoice>().Where(x => x.Id == id)) { EmitETag = false };
+```

@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using ImTools;
 using JasperFx;
 using JasperFx.Blocks;
@@ -349,7 +350,9 @@ public partial class MultiTenantedMessageStore : IMessageStore, IMessageInbox, I
 
     public void Initialize(IWolverineRuntime runtime)
     {
+#pragma warning disable VSTHRD002 // Avoid problematic synchronous waits
         InitializeAsync(runtime).GetAwaiter().GetResult();
+#pragma warning restore VSTHRD002 // Avoid problematic synchronous waits
     }
 
     public bool HasDisposed { get; private set; }
@@ -358,8 +361,17 @@ public partial class MultiTenantedMessageStore : IMessageStore, IMessageInbox, I
     public IDeadLetters DeadLetters => this;
     public IScheduledMessages ScheduledMessages => Main.ScheduledMessages;
     public INodeAgentPersistence Nodes => this;
+
+    // Multi-tenant store delegates dynamic-listener registration to the main
+    // store. Listener URIs aren't tenant-scoped - registering the same URI
+    // across tenants would create duplicate listeners - so the master is
+    // authoritative for the registry.
+    public IListenerStore Listeners => Main.Listeners;
+
     public IMessageStoreAdmin Admin => this;
 
+    [UnconditionalSuppressMessage("Trimming", "IL2026",
+        Justification = "DatabaseDescriptor(subject) reads subject's runtime-type properties for diagnostic reporting. Trimmed-away properties on MultiTenantedMessageStore are silently omitted, which is acceptable for this diagnostic surface.")]
     public DatabaseDescriptor Describe()
     {
         return new DatabaseDescriptor(this)
@@ -462,14 +474,29 @@ public partial class MultiTenantedMessageStore : IMessageStore, IMessageInbox, I
         return executeOnAllAsync(d => d.Admin.CheckConnectivityAsync(token));
     }
 
-    async Task IMessageStoreAdmin.MigrateAsync()
+    Task IMessageStoreAdmin.AssertStorageExistsAsync(CancellationToken token)
+    {
+        return executeOnAllAsync(d => d.Admin.AssertStorageExistsAsync(token));
+    }
+
+    Task IMessageStoreAdmin.MigrateAsync()
+    {
+        return migrateAsync(null);
+    }
+
+    Task IMessageStoreAdmin.MigrateAsync(AutoCreate? overrideAutoCreate)
+    {
+        return migrateAsync(overrideAutoCreate);
+    }
+
+    private async Task migrateAsync(AutoCreate? overrideAutoCreate)
     {
         if (!_initialized)
         {
             await InitializeAsync(_runtime);
         }
 
-        await Main.Admin.MigrateAsync();
+        await Main.Admin.MigrateAsync(overrideAutoCreate);
 
         var exceptions = new List<Exception>();
 
@@ -477,7 +504,7 @@ public partial class MultiTenantedMessageStore : IMessageStore, IMessageInbox, I
         {
             try
             {
-                await assignment.Value.Admin.MigrateAsync();
+                await assignment.Value.Admin.MigrateAsync(overrideAutoCreate);
                 _byTenant = _byTenant.AddOrUpdate(assignment.TenantId, assignment.Value);
             }
             catch (Exception e)
@@ -544,9 +571,14 @@ public partial class MultiTenantedMessageStore : IMessageStore, IMessageInbox, I
         return Main.Nodes.LoadNodeAsync(nodeId, cancellationToken);
     }
 
-    Task INodeAgentPersistence.MarkHealthCheckAsync(WolverineNode node, CancellationToken cancellationToken)
+    Task<bool> INodeAgentPersistence.MarkHealthCheckAsync(WolverineNode node, CancellationToken cancellationToken)
     {
         return Main.Nodes.MarkHealthCheckAsync(node, cancellationToken);
+    }
+
+    Task INodeAgentPersistence.ReregisterNodeAsync(WolverineNode node, CancellationToken cancellationToken)
+    {
+        return Main.Nodes.ReregisterNodeAsync(node, cancellationToken);
     }
 
     Task INodeAgentPersistence.OverwriteHealthCheckTimeAsync(Guid nodeId, DateTimeOffset lastHeartbeatTime)
@@ -562,6 +594,15 @@ public partial class MultiTenantedMessageStore : IMessageStore, IMessageInbox, I
     Task<IReadOnlyList<NodeRecord>> INodeAgentPersistence.FetchRecentRecordsAsync(int count)
     {
         return Main.Nodes.FetchRecentRecordsAsync(count);
+    }
+
+    // GH-3701: node records are written to, and read back from, the Main store only -- see LogRecordsAsync
+    // and FetchRecentRecordsAsync above -- so the retention cap has to follow them there. Without this
+    // override a multi-tenanted store inherited the interface's no-op default and never trimmed at all,
+    // which is exactly the shape (one main store, hundreds of tenant databases) the 36M-row report came from.
+    Task INodeAgentPersistence.DeleteOldNodeRecordsAsync(int retainCount)
+    {
+        return Main.Nodes.DeleteOldNodeRecordsAsync(retainCount);
     }
 
     bool INodeAgentPersistence.HasLeadershipLock()

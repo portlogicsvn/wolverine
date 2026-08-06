@@ -42,7 +42,7 @@ public static class ConnegWriteEndpoints
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/ConnegEndpoints.cs#L11-L52' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_conneg_write_response' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/ConnegEndpoints.cs#L10-L44' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_conneg_write_response' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Key points:
@@ -83,7 +83,7 @@ public static class StrictConnegEndpoints
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/ConnegEndpoints.cs#L54-L76' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_conneg_strict' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/ConnegEndpoints.cs#L46-L67' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_conneg_strict' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ### Global Configuration
@@ -129,7 +129,7 @@ public static class LooseConnegEndpoints
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/ConnegEndpoints.cs#L78-L99' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_conneg_loose_fallback' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/ConnegEndpoints.cs#L69-L89' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_conneg_loose_fallback' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## How It Works
@@ -182,3 +182,9 @@ public static class RequestConnegEndpoints
 ```
 
 This allows the same route and HTTP method to handle different request body formats.
+
+A request whose `Content-Type` none of the endpoints on the route declares gets a `415 Unsupported Media Type`.
+That includes a request that sends **no** `Content-Type` header at all, which returned a `404` before Wolverine
+6.23 — the route exists, so a media-type status is the honest answer. Matching compares only the media type, so
+parameters such as `charset=utf-8` do not defeat it, but it is otherwise exact: `application/json` does **not**
+match a declared `application/vnd.item.v1+json`, and a wildcard in the attribute never matches anything.

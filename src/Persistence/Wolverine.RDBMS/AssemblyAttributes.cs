@@ -1,4 +1,7 @@
 using System.Runtime.CompilerServices;
+using Wolverine.Attributes;
+
+[assembly: ExcludeFromServiceCapabilities]
 
 [assembly: InternalsVisibleTo("PersistenceTests")]
 [assembly: InternalsVisibleTo("SqlServerTests")]
@@ -8,4 +11,5 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("SqliteTests")]
 [assembly: InternalsVisibleTo("Wolverine.Oracle")]
 [assembly: InternalsVisibleTo("OracleTests")]
+[assembly: InternalsVisibleTo("Wolverine.ComplianceTests")]
 [assembly: InternalsVisibleTo("DynamicProxyGenAssembly2")] // Castle Core proxies for NSubstitute

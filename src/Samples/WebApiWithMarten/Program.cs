@@ -6,7 +6,6 @@ using Wolverine;
 using Wolverine.Marten;
 
 #region sample_integrating_wolverine_with_marten
-
 var builder = WebApplication.CreateBuilder(args);
 builder.Host.ApplyJasperFxExtensions();
 
@@ -39,19 +38,14 @@ builder.Host.UseWolverine(opts =>
 
 #endregion
 
-// Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
-builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
-
+builder.Services.AddOpenApi();
 
 var app = builder.Build();
-
 
 app.MapGet("/orders", (IQuerySession session, HttpContext context)
     => session.Query<Order>().WriteArray(context));
 
 #region sample_delegate_to_command_bus_from_minimal_api
-
 // Delegate directly to Wolverine commands -- More efficient recipe coming later...
 app.MapPost("/orders/create2", (CreateOrder command, IMessageBus bus)
     => bus.InvokeAsync(command));
@@ -60,7 +54,6 @@ app.MapPost("/orders/create2", (CreateOrder command, IMessageBus bus)
 
 
 #region sample_create_order_through_minimal_api
-
 app.MapPost("/orders/create3", async (CreateOrder command, IDocumentSession session, IMartenOutbox outbox) =>
 {
     var order = new Order
@@ -81,10 +74,8 @@ app.MapPost("/orders/create3", async (CreateOrder command, IDocumentSession sess
 
 #endregion
 
-app.MapGet("/", () => Results.Redirect("/swagger"));
-
-app.UseSwagger();
-app.UseSwaggerUI();
+app.MapOpenApi();
+app.MapGet("/", () => Results.Redirect("/openapi/v1.json"));
 
 // Lot of Wolverine and Marten diagnostics and administrative tools
 // come through JasperFx command line support

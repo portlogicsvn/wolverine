@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using IntegrationTests;
 using JasperFx.Core;
 using Marten;
@@ -6,7 +5,6 @@ using Microsoft.Extensions.Hosting;
 using NSubstitute;
 using JasperFx.Resources;
 using Shouldly;
-using Wolverine.ComplianceTests;
 using Wolverine.ComplianceTests.Compliance;
 using Wolverine;
 using Wolverine.ErrorHandling;
@@ -18,44 +16,48 @@ using Wolverine.Util;
 
 namespace CircuitBreakingTests;
 
-public class stopping_and_starting_listeners : IDisposable
+public class stopping_and_starting_listeners : IAsyncLifetime
 {
-    private readonly int _port1;
-    private readonly int _port2;
-    private readonly int _port3;
-    private readonly IHost theListener;
+    private int _port1;
+    private int _port2;
+    private int _port3;
+    private IHost theListener = null!;
 
-    public stopping_and_starting_listeners()
+    public async ValueTask InitializeAsync()
     {
         _port1 = PortFinder.GetAvailablePort();
         _port2 = PortFinder.GetAvailablePort();
         _port3 = PortFinder.GetAvailablePort();
 
-        theListener = WolverineHost.For(opts =>
-        {
-            opts.Durability.Mode = DurabilityMode.Solo;
+        theListener = await Host.CreateDefaultBuilder()
+            .UseWolverine(opts =>
+            {
+                opts.Durability.Mode = DurabilityMode.Solo;
 
-            opts.Services.AddMarten(Servers.PostgresConnectionString)
-                .IntegrateWithWolverine();
+                opts.Services.AddMarten(Servers.PostgresConnectionString)
+                    .IntegrateWithWolverine();
 
-            opts.Services.AddResourceSetupOnStartup();
+                opts.Services.AddResourceSetupOnStartup();
 
-            opts.ListenAtPort(_port1).Named("one");
-            opts.ListenAtPort(_port2).Named("two");
-            opts.ListenAtPort(_port3).Named("three");
+                opts.ListenAtPort(_port1).Named("one");
+                opts.ListenAtPort(_port2).Named("two");
+                opts.ListenAtPort(_port3).Named("three");
 
-            opts.PublishMessage<Message1>().ToLocalQueue("one").UseDurableInbox().Named("local");
-            opts.PublishMessage<CanCauseErrorMessage>().ToLocalQueue("one").UseDurableInbox();
+                opts.PublishMessage<Message1>().ToLocalQueue("one").UseDurableInbox().Named("local");
+                opts.PublishMessage<CanCauseErrorMessage>().ToLocalQueue("one").UseDurableInbox();
 
-            opts.Policies.OnException<DivideByZeroException>()
-                .Requeue().AndPauseProcessing(5.Seconds());
-        });
+                opts.Policies.OnException<DivideByZeroException>()
+                    .Requeue().AndPauseProcessing(5.Seconds());
+            }).StartAsync();
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync() 
     {
-        theListener?.Dispose();
+        await theListener.TeardownResources();
+        await theListener.StopAsync();
+        theListener.Dispose();
     }
+   
 
     [Fact]
     public async Task pause_a_local_durable_queue()
@@ -124,21 +126,12 @@ public class stopping_and_starting_listeners : IDisposable
         var agent = theListener.GetRuntime().Endpoints.FindListeningAgent("one")!;
         await agent.PauseAsync(3.Seconds());
 
-        agent.Status.ShouldBe(ListeningStatus.Stopped);
+        // GH-3832 — a timed pause reports Paused, not a bare Stopped. It still resumes on its own
+        // when the interval elapses, which is what the wait below proves.
+        agent.Status.ShouldBe(ListeningStatus.Paused);
 
-        var stopwatch = new Stopwatch();
-        stopwatch.Start();
-
-        while (stopwatch.Elapsed < 10.Seconds())
-        {
-            if (agent.Status == ListeningStatus.Accepting)
-            {
-                stopwatch.Stop();
-                return;
-            }
-        }
-
-        agent.Status.ShouldBe(ListeningStatus.Accepting);
+        await theListener.GetRuntime().Tracker.WaitForListenerStatusAsync(
+            "one", ListeningStatus.Accepting, 30.Seconds());
     }
 
     [Fact]
@@ -149,36 +142,26 @@ public class stopping_and_starting_listeners : IDisposable
         await agent.PauseAsync(1.Seconds());
         await agent.PauseAsync(3.Seconds());
 
-        agent.Status.ShouldBe(ListeningStatus.Stopped);
+        agent.Status.ShouldBe(ListeningStatus.Paused);
 
-        var stopwatch = new Stopwatch();
-        stopwatch.Start();
-
-        while (stopwatch.Elapsed < 10.Seconds())
-        {
-            if (agent.Status == ListeningStatus.Accepting)
-            {
-                stopwatch.Stop();
-                return;
-            }
-        }
-
-        agent.Status.ShouldBe(ListeningStatus.Accepting);
+        await theListener.GetRuntime().Tracker.WaitForListenerStatusAsync(
+            "one", ListeningStatus.Accepting, 30.Seconds());
     }
 
     [Fact]
     public async Task pause_listener_on_matching_error_condition()
     {
-        using var sender = await WolverineHost.ForAsync(opts =>
-        {
-            opts.Durability.Mode = DurabilityMode.Solo;
-            opts.PublishAllMessages().ToPort(_port1).Named("one");
-        });
+        using var sender = await Host.CreateDefaultBuilder()
+            .UseWolverine(opts =>
+            {
+                opts.Durability.Mode = DurabilityMode.Solo;
+                opts.PublishAllMessages().ToPort(_port1).Named("one");
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var runtime = theListener.GetRuntime();
 
-        var stopWaiter =
-            runtime.Tracker.WaitForListenerStatusAsync("one", ListeningStatus.Stopped, 1.Minutes());
+        var stopWaiter = runtime.Tracker.WaitForListenerStatusAsync(
+            "one", ListeningStatus.Paused, 1.Minutes());
 
         await sender
             .TrackActivity()
@@ -189,22 +172,10 @@ public class stopping_and_starting_listeners : IDisposable
         await stopWaiter;
 
         var agent = runtime.Endpoints.FindListeningAgent("one")!;
-        agent.Status.ShouldBe(ListeningStatus.Stopped);
+        agent.Status.ShouldBe(ListeningStatus.Paused);
 
-        // should restart
-        var stopwatch = new Stopwatch();
-        stopwatch.Start();
-
-        while (stopwatch.Elapsed < 10.Seconds())
-        {
-            if (agent.Status == ListeningStatus.Accepting)
-            {
-                stopwatch.Stop();
-                return;
-            }
-        }
-
-        agent.Status.ShouldBe(ListeningStatus.Accepting);
+        await runtime.Tracker.WaitForListenerStatusAsync(
+            "one", ListeningStatus.Accepting, 30.Seconds());
     }
 
     [Fact]
@@ -212,36 +183,26 @@ public class stopping_and_starting_listeners : IDisposable
     {
         var runtime = theListener.GetRuntime();
 
-        var stopWaiter =
-            runtime.Tracker.WaitForListenerStatusAsync("one", ListeningStatus.Stopped, 1.Minutes());
+        var stopWaiter = runtime.Tracker.WaitForListenerStatusAsync(
+            "local", ListeningStatus.Paused, 1.Minutes());
 
-        await theListener
+        var session = await theListener
             .TrackActivity()
             .AlsoTrack(theListener)
             .DoNotAssertOnExceptionsDetected()
-            .SendMessageAndWaitAsync(new CanCauseErrorMessage{Throw = true});
+            .SendMessageAndWaitAsync(new CanCauseErrorMessage { Throw = true });
 
         await stopWaiter;
 
+        // GH-3832 — this is the payoff. The PauseListener error policy latched this queue, and it
+        // used to be indistinguishable from a back-pressure TooBusy latch; now it says which one.
         var agent = (IListenerCircuit)runtime.Endpoints.AgentForLocalQueue("one");
-        agent.Status.ShouldBe(ListeningStatus.TooBusy);
+        agent.Status.ShouldBe(ListeningStatus.Paused);
 
-        CanCauseErrorMessageHandler.Handled.ShouldBe(1);
+        session.Executed.MessagesOf<CanCauseErrorMessage>().Count().ShouldBe(1);
 
-        // should restart
-        var stopwatch = new Stopwatch();
-        stopwatch.Start();
-
-        while (stopwatch.Elapsed < 10.Seconds())
-        {
-            if (agent.Status == ListeningStatus.Accepting)
-            {
-                stopwatch.Stop();
-                return;
-            }
-        }
-
-        agent.Status.ShouldBe(ListeningStatus.Accepting);
+        await runtime.Tracker.WaitForListenerStatusAsync(
+            "local", ListeningStatus.Accepting, 30.Seconds());
     }
 }
 
@@ -252,16 +213,10 @@ public class CanCauseErrorMessage
 
 public static class CanCauseErrorMessageHandler
 {
-    public static int Handled = 0;
-
     public static void Handle(CanCauseErrorMessage message, Envelope envelope)
     {
-        Handled++;
-
         if (envelope.Attempts <= 1)
-        {
             throw new DivideByZeroException();
-        }
     }
 }
 
@@ -272,8 +227,6 @@ public class PausingMessageHandler
     public static void Handle(PausingMessage message, Envelope envelope)
     {
         if (envelope.Attempts <= 1)
-        {
             throw new DivideByZeroException("boom");
-        }
     }
 }

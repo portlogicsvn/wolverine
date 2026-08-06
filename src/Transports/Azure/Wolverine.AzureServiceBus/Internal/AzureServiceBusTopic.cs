@@ -3,12 +3,13 @@ using Azure.Messaging.ServiceBus;
 using Azure.Messaging.ServiceBus.Administration;
 using JasperFx.Core;
 using JasperFx.Core.Reflection;
+using JasperFx.Descriptors;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using Wolverine.Configuration;
 using Wolverine.Runtime;
+using Wolverine.Newtonsoft;
 using Wolverine.Runtime.Interop.MassTransit;
-using Wolverine.Runtime.Serialization;
 using Wolverine.Transports;
 using Wolverine.Transports.Sending;
 using Wolverine.Util;
@@ -29,9 +30,16 @@ public class AzureServiceBusTopic : AzureServiceBusEndpoint, IMassTransitInterop
 
         TopicName = EndpointName = topicName ?? throw new ArgumentNullException(nameof(topicName));
         Options = new CreateTopicOptions(TopicName);
+        BrokerRole = "topic";
     }
 
     public string TopicName { get; }
+
+    /// <summary>
+    /// Used by OptionsDescription to render references to this topic (for example
+    /// from <see cref="AzureServiceBusSubscription.Topic"/>) as just the topic name.
+    /// </summary>
+    public override string ToString() => TopicName;
 
     public override ValueTask<IListener> BuildListenerAsync(IWolverineRuntime runtime, IReceiver receiver)
     {
@@ -60,6 +68,7 @@ public class AzureServiceBusTopic : AzureServiceBusEndpoint, IMassTransitInterop
         return new ValueTask(Parent.WithManagementClientAsync(client => client.DeleteTopicAsync(TopicName)));
     }
 
+    [ChildDescription]
     public CreateTopicOptions Options { get; }
 
     public override ValueTask SetupAsync(ILogger logger)
@@ -125,6 +134,8 @@ public class AzureServiceBusTopic : AzureServiceBusEndpoint, IMassTransitInterop
 
     public override bool IsPartitioned { get => Options.EnablePartitioning; }
 
+    // Type resolution from the NServiceBus.EnclosedMessageTypes header is not AOT-clean; the reflection and
+    // its IL2057 suppression live in NServiceBusInterop.ResolveMessageType, next to the call.
     internal void UseNServiceBusInterop()
     {
         DefaultSerializer = new NewtonsoftSerializer(new JsonSerializerSettings());
@@ -150,7 +161,7 @@ public class AzureServiceBusTopic : AzureServiceBusEndpoint, IMassTransitInterop
                 if (serviceBusReceivedMessage.ApplicationProperties.TryGetValue("NServiceBus.ReplyToAddress",
                         out var raw))
                 {
-                    var queueName = (raw is byte[] b ? Encoding.Default.GetString(b) : raw.ToString())!;
+                    var queueName = (raw is byte[] b ? Encoding.UTF8.GetString(b) : raw.ToString())!;
                     e.ReplyUri = new Uri($"{Parent.Protocol}://queue/{queueName}");
                 }
             }
@@ -159,19 +170,18 @@ public class AzureServiceBusTopic : AzureServiceBusEndpoint, IMassTransitInterop
 
             m.MapProperty(x => x.MessageType!, (e, msg) =>
             {
-                if (msg.ApplicationProperties.TryGetValue("NServiceBus.EnclosedMessageTypes", out var raw))
+                if (msg.ApplicationProperties.TryGetValue(NServiceBusInterop.EnclosedMessageTypesHeader, out var raw))
                 {
-                    var typeName = (raw is byte[] b ? Encoding.Default.GetString(b) : raw.ToString())!;
-                    if (typeName.IsNotEmpty())
+                    var header = raw is byte[] b ? Encoding.UTF8.GetString(b) : raw?.ToString();
+                    if (NServiceBusInterop.ResolveMessageType(header) is string messageType)
                     {
-                        var messageType = Type.GetType(typeName);
-                        e.MessageType = messageType!.ToMessageTypeName();
+                        e.MessageType = messageType;
                     }
                 }
             },
                 (e, msg) =>
             {
-                msg.ApplicationProperties["NServiceBus.EnclosedMessageTypes"] = e.Message!.GetType().ToMessageTypeName();
+                msg.ApplicationProperties[NServiceBusInterop.EnclosedMessageTypesHeader] = e.Message!.GetType().ToMessageTypeName();
             });
         });
     }

@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using System.Globalization;
 using System.Xml;
 
@@ -5,6 +6,55 @@ namespace Wolverine.Runtime.Serialization;
 
 public static class EnvelopeSerializer
 {
+    /// <summary>
+    ///     The header keys that <see cref="ReadDataElement" /> promotes straight back into a typed
+    ///     <see cref="Envelope" /> property instead of leaving in <see cref="Envelope.Headers" />.
+    ///     These are skipped when the loose <see cref="Envelope.Headers" /> are written to the wire
+    ///     format so that a reserved key sitting in <c>Headers</c> — put there by a custom
+    ///     <c>IEnvelopeMapper</c> copying raw broker headers, or by user code — can never overwrite
+    ///     the authoritative typed property on the next read. See GH-3408.
+    ///     Note that this deliberately does NOT include every constant on <see cref="EnvelopeConstants" />:
+    ///     <c>causation-id</c> is intentionally carried in <c>Headers</c> (see <c>DeliveryOptions</c>) and
+    ///     is never promoted by the reader, so it must keep round-tripping as an ordinary header.
+    /// </summary>
+    internal static readonly FrozenSet<string> ReservedHeaderKeys = new[]
+    {
+        EnvelopeConstants.SourceKey,
+        EnvelopeConstants.MessageTypeKey,
+        EnvelopeConstants.ReplyUriKey,
+        EnvelopeConstants.ContentTypeKey,
+        EnvelopeConstants.CorrelationIdKey,
+        EnvelopeConstants.SagaIdKey,
+        EnvelopeConstants.ConversationIdKey,
+        EnvelopeConstants.DestinationKey,
+        EnvelopeConstants.AcceptedContentTypesKey,
+        EnvelopeConstants.IdKey,
+        EnvelopeConstants.ParentIdKey,
+        EnvelopeConstants.GroupIdKey,
+        EnvelopeConstants.DeduplicationIdKey,
+        EnvelopeConstants.ReplyRequestedKey,
+        EnvelopeConstants.AckRequestedKey,
+        EnvelopeConstants.IsResponseKey,
+        EnvelopeConstants.ExecutionTimeKey,
+        EnvelopeConstants.KeepUntilKey,
+        EnvelopeConstants.AttemptsKey,
+        EnvelopeConstants.DeliverByKey,
+        EnvelopeConstants.TenantIdKey,
+        EnvelopeConstants.TopicNameKey,
+        EnvelopeConstants.UserNameKey,
+        EnvelopeConstants.PartitionKey
+    }.ToFrozenSet(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Caps applied to inbound envelopes during deserialization. Defaults to
+    /// <see cref="EnvelopeReaderLimits.Default"/>. Wolverine publishes the
+    /// configured <see cref="WolverineOptions"/> values into this property
+    /// at host startup. The slot is process-global; when several Wolverine
+    /// hosts run in the same process, the last one to start determines the
+    /// active limits.
+    /// </summary>
+    public static EnvelopeReaderLimits Limits { get; set; } = EnvelopeReaderLimits.Default;
+
     public static void ReadDataElement(Envelope env, string key, string value)
     {
         try
@@ -67,6 +117,10 @@ public static class EnvelopeSerializer
                     env.GroupId = value;
                     break;
 
+                case EnvelopeConstants.DeduplicationIdKey:
+                    env.DeduplicationId = value;
+                    break;
+
                 case EnvelopeConstants.ReplyRequestedKey:
                     env.ReplyRequested = value;
                     break;
@@ -83,33 +137,19 @@ public static class EnvelopeSerializer
                     // Don't read it twice
                     if (env.ScheduledTime.HasValue) return;
 
-                    try
+                    if (tryReadTimestamp(value, out var scheduledTime))
                     {
-                        env.ScheduledTime = XmlConvert.ToDateTime(value, XmlDateTimeSerializationMode.Utc);
-                    }
-                    catch (Exception )
-                    {
-                        if (DateTimeOffset.TryParse(value, out var dt))
-                        {
-                            env.ScheduledTime = dt;
-                        }
+                        env.ScheduledTime = scheduledTime;
                     }
                     break;
-                
+
                 case EnvelopeConstants.KeepUntilKey:
                     // Don't read it twice
                     if (env.KeepUntil.HasValue) return;
 
-                    try
+                    if (tryReadTimestamp(value, out var keepUntil))
                     {
-                        env.KeepUntil = XmlConvert.ToDateTime(value, XmlDateTimeSerializationMode.Utc);
-                    }
-                    catch (Exception )
-                    {
-                        if (DateTimeOffset.TryParse(value, out var dt))
-                        {
-                            env.KeepUntil = dt;
-                        }
+                        env.KeepUntil = keepUntil;
                     }
                     break;
 
@@ -118,7 +158,13 @@ public static class EnvelopeSerializer
                     break;
 
                 case EnvelopeConstants.DeliverByKey:
-                    env.DeliverBy = DateTime.Parse(value);
+                    // Don't read it twice
+                    if (env.DeliverBy.HasValue) return;
+
+                    if (tryReadTimestamp(value, out var deliverBy))
+                    {
+                        env.DeliverBy = deliverBy;
+                    }
                     break;
 
                 case EnvelopeConstants.TenantIdKey:
@@ -148,11 +194,60 @@ public static class EnvelopeSerializer
         }
     }
 
+    /// <summary>
+    ///     Parse a timestamp header that may have been written by either of Wolverine's two writers:
+    ///     the binary envelope format (<c>"o"</c>, see <see cref="BinaryWriterExtensions" />) or a transport
+    ///     <see cref="Wolverine.Transports.EnvelopeMapper{TIncoming,TOutgoing}" /> header
+    ///     (<see cref="EnvelopeConstants.TransportHeaderDateTimeFormat" />). Returns false rather than throwing
+    ///     on an unrecognized value: a malformed timestamp must not be able to fail the whole envelope read,
+    ///     because callers up the stack treat a deserialization failure as "corrupt, discard" and the message
+    ///     is then lost outright instead of being retried or dead-lettered. See GH-1716 and GH-3613.
+    /// </summary>
+    private static bool tryReadTimestamp(string value, out DateTimeOffset parsed)
+    {
+        try
+        {
+            parsed = XmlConvert.ToDateTime(value, XmlDateTimeSerializationMode.Utc);
+            return true;
+        }
+        catch (Exception)
+        {
+            // Not an xsd/round-trip value; fall through to the looser attempts below.
+        }
+
+        if (DateTimeOffset.TryParse(value, out parsed))
+        {
+            return true;
+        }
+
+        // EnvelopeMapper's transport-header format, which neither of the parses above accepts.
+        return DateTimeOffset.TryParseExact(value, EnvelopeConstants.TransportHeaderDateTimeFormat,
+            CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+            out parsed);
+    }
+
     public static Envelope[] ReadMany(byte[] buffer)
     {
         using var ms = new MemoryStream(buffer);
         using var br = new BinaryReader(ms);
+        var limits = Limits;
         var numberOfMessages = br.ReadInt32();
+        if (numberOfMessages < 0 || numberOfMessages > limits.MaxBatchSize)
+        {
+            throw new InvalidEnvelopeException(
+                $"Envelope batch size {numberOfMessages} is outside the allowed range [0..{limits.MaxBatchSize}].");
+        }
+
+        // Each envelope is at least ~16 bytes on the wire (SentAt int64 +
+        // headerCount int32 + byteCount int32). Reject claims that can't fit
+        // in the buffer we actually received.
+        const int MinBytesPerEnvelope = 16;
+        if ((long)numberOfMessages * MinBytesPerEnvelope > buffer.Length)
+        {
+            throw new InvalidEnvelopeException(
+                $"Envelope batch size {numberOfMessages} is impossible for a {buffer.Length}-byte buffer.");
+        }
+
         var messages = new Envelope[numberOfMessages];
         for (var i = 0; i < numberOfMessages; i++)
         {
@@ -174,15 +269,7 @@ public static class EnvelopeSerializer
         using var ms = new MemoryStream(buffer);
         using var br = new BinaryReader(ms);
         envelope.SentAt = DateTime.FromBinary(br.ReadInt64());
-        var headerCount = br.ReadInt32();
-
-        for (var j = 0; j < headerCount; j++)
-        {
-            ReadDataElement(envelope, br.ReadString(), br.ReadString());
-        }
-
-        var byteCount = br.ReadInt32();
-        envelope.Data = br.ReadBytes(byteCount);
+        readEnvelopeBody(br, envelope, Limits);
     }
 
     private static Envelope readSingle(BinaryReader br)
@@ -191,18 +278,39 @@ public static class EnvelopeSerializer
         {
             SentAt = DateTime.FromBinary(br.ReadInt64())
         };
+        readEnvelopeBody(br, msg, Limits);
+        return msg;
+    }
 
+    private static void readEnvelopeBody(BinaryReader br, Envelope envelope, EnvelopeReaderLimits limits)
+    {
         var headerCount = br.ReadInt32();
+        if (headerCount < 0 || headerCount > limits.MaxHeaderCount)
+        {
+            throw new InvalidEnvelopeException(
+                $"Envelope header count {headerCount} is outside the allowed range [0..{limits.MaxHeaderCount}].");
+        }
 
         for (var j = 0; j < headerCount; j++)
         {
-            ReadDataElement(msg, br.ReadString(), br.ReadString());
+            ReadDataElement(envelope, br.ReadString(), br.ReadString());
         }
 
         var byteCount = br.ReadInt32();
-        msg.Data = br.ReadBytes(byteCount);
+        if (byteCount < 0 || byteCount > limits.MaxDataSize)
+        {
+            throw new InvalidEnvelopeException(
+                $"Envelope data size {byteCount} bytes is outside the allowed range [0..{limits.MaxDataSize}].");
+        }
 
-        return msg;
+        var remaining = br.BaseStream.Length - br.BaseStream.Position;
+        if (byteCount > remaining)
+        {
+            throw new InvalidEnvelopeException(
+                $"Envelope claims {byteCount} bytes of data but only {remaining} remain in the buffer.");
+        }
+
+        envelope.Data = br.ReadBytes(byteCount);
     }
 
     public static byte[] Serialize(IList<Envelope> messages)
@@ -272,6 +380,7 @@ public static class EnvelopeSerializer
         writer.WriteProp(ref count, EnvelopeConstants.AckRequestedKey, env.AckRequested);
         writer.WriteProp(ref count, EnvelopeConstants.IsResponseKey, env.IsResponse);
         writer.WriteProp(ref count, EnvelopeConstants.GroupIdKey, env.GroupId);
+        writer.WriteProp(ref count, EnvelopeConstants.DeduplicationIdKey, env.DeduplicationId);
         writer.WriteProp(ref count, EnvelopeConstants.PartitionKey, env.PartitionKey);
 
         if (env.ScheduledTime.HasValue)
@@ -298,6 +407,15 @@ public static class EnvelopeSerializer
         foreach (var pair in env.Headers)
         {
             if (pair.Value is null)
+            {
+                continue;
+            }
+
+            // A reserved key sitting in the loose Headers would be written *after* the typed
+            // properties above, and the reader promotes reserved keys straight back into those
+            // typed properties -- so writing it would let the header silently overwrite the real
+            // TenantId/SagaId/Id/etc. Skip it instead. See GH-3408.
+            if (ReservedHeaderKeys.Contains(pair.Key))
             {
                 continue;
             }

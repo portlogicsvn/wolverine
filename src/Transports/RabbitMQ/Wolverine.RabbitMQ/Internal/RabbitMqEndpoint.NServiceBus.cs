@@ -1,14 +1,13 @@
 using System.Text;
 using Newtonsoft.Json;
 using RabbitMQ.Client;
-using Wolverine.Runtime.Serialization;
+using Wolverine.Newtonsoft;
 
 namespace Wolverine.RabbitMQ.Internal;
 
 public abstract partial class RabbitMqEndpoint
 {
-    #region sample_show_the_NServiceBus_mapping
-
+    #region sample_show_the_nservicebus_mapping
     public void UseNServiceBusInterop()
     {
         // We haven't tried to address this yet, but NSB can stick in some characters
@@ -36,7 +35,7 @@ public abstract partial class RabbitMqEndpoint
             {
                 if (props.Headers!.TryGetValue("NServiceBus.ReplyToAddress", out var raw))
                 {
-                    var queueName = (raw is byte[] b ? Encoding.Default.GetString(b) : raw!.ToString())!;
+                    var queueName = (raw is byte[] b ? Encoding.UTF8.GetString(b) : raw!.ToString())!;
                     e.ReplyUri = new Uri($"{_parent.Protocol}://queue/{queueName}");
                 }
             }

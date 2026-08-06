@@ -12,7 +12,6 @@ using Wolverine.Tracking;
 namespace MartenTests.Saga;
 
 #region sample_strong_typed_id_saga
-
 [StronglyTypedId(Template.Guid)]
 public readonly partial struct OrderSagaId;
 
@@ -85,11 +84,13 @@ public class strong_typed_id_saga : PostgresqlContext, IAsyncLifetime
 {
     private IHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery().IncludeType(typeof(OrderSagaWorkflow));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Services.AddMarten(m =>
                 {
                     m.DisableNpgsqlLogging = true;
@@ -101,7 +102,7 @@ public class strong_typed_id_saga : PostgresqlContext, IAsyncLifetime
             }).StartAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _host.StopAsync();
         _host.Dispose();
@@ -115,7 +116,7 @@ public class strong_typed_id_saga : PostgresqlContext, IAsyncLifetime
         await _host.InvokeMessageAndWaitAsync(new StartOrderSaga(orderId, "Han Solo"));
 
         using var session = _host.DocumentStore().QuerySession();
-        var saga = await session.LoadAsync<OrderSagaWorkflow>(orderId);
+        var saga = await session.LoadAsync<OrderSagaWorkflow>(orderId, TestContext.Current.CancellationToken);
 
         saga.ShouldNotBeNull();
         saga.Id.ShouldBe(orderId);
@@ -131,7 +132,7 @@ public class strong_typed_id_saga : PostgresqlContext, IAsyncLifetime
         await _host.InvokeMessageAndWaitAsync(new PickOrderItems(orderId));
 
         using var session = _host.DocumentStore().QuerySession();
-        var saga = await session.LoadAsync<OrderSagaWorkflow>(orderId);
+        var saga = await session.LoadAsync<OrderSagaWorkflow>(orderId, TestContext.Current.CancellationToken);
 
         saga.ShouldNotBeNull();
         saga.ItemsPicked.ShouldBeTrue();
@@ -148,7 +149,7 @@ public class strong_typed_id_saga : PostgresqlContext, IAsyncLifetime
         await _host.InvokeMessageAndWaitAsync(new ShipOrder(orderId));
 
         using var session = _host.DocumentStore().QuerySession();
-        var saga = await session.LoadAsync<OrderSagaWorkflow>(orderId);
+        var saga = await session.LoadAsync<OrderSagaWorkflow>(orderId, TestContext.Current.CancellationToken);
 
         // Saga should be deleted when completed
         saga.ShouldBeNull();
@@ -163,7 +164,7 @@ public class strong_typed_id_saga : PostgresqlContext, IAsyncLifetime
         await _host.InvokeMessageAndWaitAsync(new CancelOrderSaga(orderId));
 
         using var session = _host.DocumentStore().QuerySession();
-        var saga = await session.LoadAsync<OrderSagaWorkflow>(orderId);
+        var saga = await session.LoadAsync<OrderSagaWorkflow>(orderId, TestContext.Current.CancellationToken);
 
         // Saga should be deleted after cancel (MarkCompleted)
         saga.ShouldBeNull();
@@ -179,7 +180,7 @@ public class strong_typed_id_saga : PostgresqlContext, IAsyncLifetime
         await _host.InvokeMessageAndWaitAsync(new ProcessOrderPayment(orderId));
 
         using var session = _host.DocumentStore().QuerySession();
-        var saga = await session.LoadAsync<OrderSagaWorkflow>(orderId);
+        var saga = await session.LoadAsync<OrderSagaWorkflow>(orderId, TestContext.Current.CancellationToken);
 
         saga.ShouldNotBeNull();
         saga.ItemsPicked.ShouldBeTrue();

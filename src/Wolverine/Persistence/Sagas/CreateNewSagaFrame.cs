@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using JasperFx.CodeGeneration;
 using JasperFx.CodeGeneration.Frames;
 using JasperFx.CodeGeneration.Model;
@@ -7,7 +8,9 @@ namespace Wolverine.Persistence.Sagas;
 
 internal class CreateNewSagaFrame : SyncFrame
 {
-    public CreateNewSagaFrame(Type sagaType)
+    public CreateNewSagaFrame(
+        [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors | DynamicallyAccessedMemberTypes.NonPublicConstructors)]
+        Type sagaType)
     {
         if (!sagaType.HasDefaultConstructor())
         {
@@ -24,5 +27,11 @@ internal class CreateNewSagaFrame : SyncFrame
     {
         writer.Write($"var {Saga.Usage} = new {Saga.VariableType.FullNameInCode()}();");
         Next?.GenerateCode(method, writer);
+    }
+
+    public override void GenerateFSharpCode(GeneratedMethod method, ISourceWriter writer)
+    {
+        writer.Write($"{Saga.FSharpAssignmentUsage} = {Saga.VariableType.FSharpName()}()");
+        Next?.GenerateFSharpCode(method, writer);
     }
 }

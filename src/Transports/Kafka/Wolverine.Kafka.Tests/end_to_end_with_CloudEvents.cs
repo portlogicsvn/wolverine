@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using Confluent.Kafka;
 using IntegrationTests;
+using JasperFx.Core;
 using JasperFx.Core.Reflection;
 using JasperFx.Resources;
 using Microsoft.Extensions.Hosting;
@@ -18,13 +19,12 @@ internal static class CloudEventsKafkaTestConstants
     public const string ColorMessageTypeAlias = "wolverine.kafka.tests.color";
 }
 
-[Trait("Category", "Flaky")]
 public class end_to_end_with_CloudEvents : IAsyncLifetime
 {
     private IHost _receiver = null!;
     private IHost _sender = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _receiver = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -60,7 +60,7 @@ public class end_to_end_with_CloudEvents : IAsyncLifetime
             }).StartAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _sender.StopAsync();
         _sender.Dispose();
@@ -72,6 +72,7 @@ public class end_to_end_with_CloudEvents : IAsyncLifetime
     public async Task end_to_end()
     {
         var session = await _sender.TrackActivity()
+            .Timeout(60.Seconds())
             .AlsoTrack(_receiver)
             .WaitForMessageToBeReceivedAt<ColorMessage>(_receiver)
             .PublishMessageAndWaitAsync(new ColorMessage("yellow"));
@@ -81,13 +82,12 @@ public class end_to_end_with_CloudEvents : IAsyncLifetime
     }
 }
 
-[Trait("Category", "Flaky")]
 public class inline_end_to_end_with_CloudEvents : IAsyncLifetime
 {
     private IHost _receiver = null!;
     private IHost _sender = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _receiver = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -116,7 +116,7 @@ public class inline_end_to_end_with_CloudEvents : IAsyncLifetime
             }).StartAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _sender.StopAsync();
         _sender.Dispose();
@@ -128,6 +128,7 @@ public class inline_end_to_end_with_CloudEvents : IAsyncLifetime
     public async Task end_to_end_without_default_incoming_message_type()
     {
         var session = await _sender.TrackActivity()
+            .Timeout(60.Seconds())
             .AlsoTrack(_receiver)
             .WaitForMessageToBeReceivedAt<ColorMessage>(_receiver)
             .PublishMessageAndWaitAsync(new ColorMessage("yellow"));

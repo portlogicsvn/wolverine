@@ -9,6 +9,7 @@ using Wolverine.ErrorHandling;
 using Wolverine.Persistence.Durability;
 using Wolverine.RateLimiting;
 using Wolverine.RDBMS;
+using Wolverine.Runtime.Partitioning;
 using Wolverine.SqlServer.RateLimiting;
 using Wolverine.SqlServer.Schema;
 using Wolverine.SqlServer.Transport;
@@ -80,13 +81,15 @@ public static class SqlServerConfigurationExtensions
     /// <param name="connectionString"></param>
     /// <param name="schema"></param>
     /// <returns></returns>
-    [Obsolete("Prefer PersistMessagesWithSqlServer().EnableMessageTransport()")]
     public static SqlServerPersistenceExpression UseSqlServerPersistenceAndTransport(this WolverineOptions options,
         string connectionString,
         string? schema = null,
-        string? transportSchema = null)
+        string? transportSchema = null,
+        MessageStoreRole role = MessageStoreRole.Main)
     {
-        options.PersistMessagesWithSqlServer(connectionString, schema);
+        // GH-3226: forward the message-store role so apps that already have an event-store-backed Main
+        // (Marten / Polecat) can register this transport's persistence as Ancillary instead of a second Main.
+        options.PersistMessagesWithSqlServer(connectionString, schema, role);
 
         options.Services.AddTransient<IDatabase, SqlServerTransportDatabase>();
 
@@ -158,5 +161,58 @@ public static class SqlServerConfigurationExtensions
         publishing.To(queue.Uri);
 
         return new SqlServerSubscriberConfiguration(queue);
+    }
+
+    /// <summary>
+    /// Shard message publishing across a set of SQL Server queues named baseName1, baseName2, and so on
+    /// using the global message grouping rules. This is the publishing-only variant -- see
+    /// UseShardedSqlServerQueues() for the full global partitioning topology that also shards the
+    /// message *execution* across companion local queues.
+    /// </summary>
+    /// <param name="rules"></param>
+    /// <param name="baseName"></param>
+    /// <param name="numberOfEndpoints"></param>
+    /// <param name="configure"></param>
+    /// <returns></returns>
+    public static MessagePartitioningRules PublishToShardedSqlServerQueues(this MessagePartitioningRules rules,
+        string baseName, int numberOfEndpoints, Action<PartitionedMessageTopologyWithDatabaseQueues> configure)
+    {
+        rules.AddPublishingTopology((opts, _) =>
+        {
+            var topology =
+                new PartitionedMessageTopologyWithDatabaseQueues(opts, PartitionSlots.Five, baseName, numberOfEndpoints);
+            topology.ConfigureListening(x => { });
+            configure(topology);
+            topology.AssertValidity();
+
+            return topology;
+        });
+
+        return rules;
+    }
+
+    /// <summary>
+    /// Use sharded SQL Server queues for global partitioned message processing.
+    /// Queues will be named baseName1, baseName2, etc.
+    /// </summary>
+    /// <param name="topology"></param>
+    /// <param name="baseName"></param>
+    /// <param name="numberOfEndpoints"></param>
+    /// <param name="configure"></param>
+    /// <returns></returns>
+    public static GlobalPartitionedMessageTopology UseShardedSqlServerQueues(
+        this GlobalPartitionedMessageTopology topology, string baseName, int numberOfEndpoints,
+        Action<PartitionedMessageTopologyWithDatabaseQueues>? configure = null)
+    {
+        topology.SetExternalTopology(opts =>
+        {
+            var t = new PartitionedMessageTopologyWithDatabaseQueues(opts, PartitionSlots.Five, baseName,
+                numberOfEndpoints);
+            t.ConfigureListening(x => { });
+            configure?.Invoke(t);
+            return t;
+        }, baseName);
+
+        return topology;
     }
 }

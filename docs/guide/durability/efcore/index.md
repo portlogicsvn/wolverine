@@ -15,11 +15,13 @@ The first step is to just install the `WolverineFx.EntityFrameworkCore` Nuget:
 dotnet add package WolverineFx.EntityFrameworkCore
 ```
 
-::: warning
-For right now, it's perfectly possible to use multiple `DbContext` types with one Wolverine application and Wolverine
-is perfectly capable of using the correct `DbContext` type for `Saga` types. **But**, Wolverine can only use the transactional
-inbox/outbox with a single database registration. This limitation will be lifted later as folks are going to eventually hit
-this limitation with modular monolith approaches.
+::: tip
+It's perfectly possible to use multiple `DbContext` types with one Wolverine application, and Wolverine is perfectly
+capable of using the correct `DbContext` type for `Saga` types.
+
+Each `DbContext` can also have its own transactional inbox/outbox by enrolling it with an *ancillary* message store —
+`PersistMessagesWithSqlServer(connectionString, role: MessageStoreRole.Ancillary).Enroll<MyDbContext>()` — which is the
+supported approach for modular monolith applications. See [Ancillary Message Stores](/guide/durability/marten/ancillary-stores).
 :::
 
 With that in place, there's two basic things you need in order to fully use EF Core with Wolverine as shown below:
@@ -29,7 +31,7 @@ With that in place, there's two basic things you need in order to fully use EF C
 ```cs
 var builder = Host.CreateApplicationBuilder();
 
-var connectionString = builder.Configuration.GetConnectionString("sqlserver");
+var connectionString = builder.Configuration.GetConnectionString("sqlserver")!;
 
 // Register a DbContext or multiple DbContext types as normal
 builder.Services.AddDbContext<SampleDbContext>(
@@ -53,7 +55,7 @@ builder.UseWolverine(opts =>
 
 // Rest of your bootstrapping...
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/EfCoreTests/SampleUsageWithAutoApplyTransactions.cs#L40-L68' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_getting_started_with_efcore' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/EfCoreTests/SampleUsageWithAutoApplyTransactions.cs#L39-L66' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_getting_started_with_efcore' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Do note that I purposely configured the `ServiceLifetime` of the `DbContextOptions` for our `DbContext` type to be `Singleton`. 
@@ -66,7 +68,7 @@ Or alternatively, you can do this in one step with this equivalent approach:
 ```cs
 var builder = Host.CreateApplicationBuilder();
 
-var connectionString = builder.Configuration.GetConnectionString("sqlserver");
+var connectionString = builder.Configuration.GetConnectionString("sqlserver")!;
 
 builder.UseWolverine(opts =>
 {
@@ -82,9 +84,96 @@ builder.UseWolverine(opts =>
         x => x.UseSqlServer(connectionString));
 });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/EfCoreTests/SampleUsageWithAutoApplyTransactions.cs#L74-L94' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_idiomatic_wolverine_registration_of_ef_core' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/EfCoreTests/SampleUsageWithAutoApplyTransactions.cs#L72-L91' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_idiomatic_wolverine_registration_of_ef_core' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 
 
 Right now, we've tested Wolverine with EF Core using both [SQL Server](/guide/durability/sqlserver) and [PostgreSQL](/guide/durability/postgresql) persistence. 
+
+## Combining EF Core with Marten <Badge type="tip" text="6.18" />
+
+It's completely valid to use both the EF Core and [Marten](/guide/durability/marten) integrations in
+the same application — say, Marten for event sourcing and EF Core for flat relational tables. When
+Wolverine needs a persistence provider for an entity (for [storage side effects](/guide/handlers/side-effects),
+`[Entity]` loading, or [saga](/guide/durability/sagas.html) persistence), the EF Core integration is
+always consulted **before** Marten, no matter which integration was registered first in your
+`Program.cs`: an entity mapped in one of your registered `DbContext` models deterministically
+resolves to EF Core, and every other document falls through to Marten. Marten can genuinely persist
+*any* document, so it acts as the catch-all; EF Core only claims the types its `DbContext` models
+actually map.
+
+## Development-time usage <Badge type="tip" text="5.32" />
+
+Wolverine + EF Core is designed to keep the dev loop short: fast schema iteration, cheap per-test database resets, declarative seed data. The three pillars below all work together — and all come for free the moment you call `UseEntityFrameworkCoreTransactions()`.
+
+### Weasel-managed schema migrations
+
+`UseEntityFrameworkCoreWolverineManagedMigrations()` hands schema management to [Weasel](https://weasel.jasperfx.net/efcore/migrations.html) rather than EF Core's migration-chain tooling. The shape of the story:
+
+| | EF Core migrations | Weasel migrations |
+|---|---|---|
+| Model | Ordered chain of up/down scripts checked in alongside code | Diff the live database against the current `DbContext` model at startup |
+| Authoring | Generate + edit migration classes | Nothing — just change your model |
+| Iteration cost | Slow (script regeneration, merge conflicts on parallel branches) | None — restart the app |
+| Best for | Production deployments with a change audit | Local dev, integration tests, short-lived branches |
+
+Register it on `WolverineOptions`:
+
+```csharp
+builder.UseWolverine(opts =>
+{
+    opts.Services.AddDbContextWithWolverineIntegration<ItemsDbContext>(
+        x => x.UseSqlServer(connectionString));
+
+    // Diff the DbContext against the live DB at startup and apply missing DDL.
+    opts.UseEntityFrameworkCoreWolverineManagedMigrations();
+});
+```
+
+The [Weasel docs](https://weasel.jasperfx.net/efcore/migrations.html) go deeper on the diff engine, opt-outs, and how it handles schemas.
+
+### IInitialData — declarative seed data
+
+Implement `Weasel.EntityFrameworkCore.IInitialData<TContext>` (or register a lambda with `services.AddInitialData<TContext>(...)`) to declare data that should be present every time the database is reset:
+
+```csharp
+public class SeedItems : IInitialData<ItemsDbContext>
+{
+    public async Task Populate(ItemsDbContext context, CancellationToken cancellation)
+    {
+        context.Items.Add(new Item { Name = "Seed" });
+        await context.SaveChangesAsync(cancellation);
+    }
+}
+
+builder.Services.AddInitialData<ItemsDbContext, SeedItems>();
+```
+
+Multiple seeders run in registration order. See the [dedicated page on initial data](./initial-data) for patterns around layered seeders, lambda-based registration, and multi-tenant seeding.
+
+### Resetting data between tests
+
+Two knobs, finest-grained first:
+
+**Per-DbContext — `host.ResetAllDataAsync<T>()`** <Badge type="tip" text="5.32" />
+
+Wipes one `DbContext`'s tables in FK-safe order and reruns that context's `IInitialData<T>` seeders. This is the right default for most integration tests:
+
+```csharp
+[Fact]
+public async Task ordering_flow()
+{
+    await _host.ResetAllDataAsync<ItemsDbContext>();
+
+    // arrange ... act ... assert
+}
+```
+
+The underlying `DatabaseCleaner<T>` is registered automatically by `UseEntityFrameworkCoreTransactions()` — no `services.AddDatabaseCleaner<T>()` needed.
+
+**Global — `host.ResetResourceState()`**
+
+Resets every `IStatefulResource` registered with the host — Wolverine's message store, every broker, every `DbContext` cleaner. Bigger hammer; right when a test writes to multiple stores or you've seen cross-test contamination you can't isolate.
+
+**Recommendation:** use the finest-grained mechanism the test actually needs. Resetting the world on every test multiplies your suite runtime for no benefit.

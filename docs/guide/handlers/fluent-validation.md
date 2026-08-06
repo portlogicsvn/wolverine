@@ -15,7 +15,7 @@ There is also an HTTP specific middleware for WolverineFx.Http that uses the `Pr
 ::: warning
 If you need to use IoC services in a Fluent Validation `IValidator` that might force Wolverine to use a service locator
 pattern in the generated code (basically from `AddScoped<T>(s => build it at runtime)`), we recommend instead using a
-more explicit `Validate` or `ValidateAsync()` method directly in your message handler~~~~ class for the data input.
+more explicit `Validate` or `ValidateAsync()` method directly in your message handler class for the data input.
 :::
 
 You will frequently want or need to validate the messages coming into your Wolverine system for correctness
@@ -43,7 +43,7 @@ using var host = await Host.CreateDefaultBuilder()
         opts.Services.AddSingleton<IDataService, DataService>();
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Extensions/Wolverine.FluentValidation.Tests/Samples.cs#L14-L30' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_bootstrap_with_fluent_validation' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Extensions/Wolverine.FluentValidation.Tests/Samples.cs#L14-L29' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_bootstrap_with_fluent_validation' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 And now to situate this within the greater application, let's say you have a message and handler
@@ -79,7 +79,7 @@ public static class CreateCustomerHandler
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Extensions/Wolverine.FluentValidation.Tests/Samples.cs#L75-L103' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_create_customer' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Extensions/Wolverine.FluentValidation.Tests/Samples.cs#L97-L124' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_create_customer' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 In the case above, the Fluent Validation check will happen at runtime *before* the call to the handler methods. If 
@@ -91,6 +91,23 @@ Some notes about the middleware:
 * Wolverine uses a slightly different version of the middleware based on whether or not there is a single validator or multiple
   validators in the underlying IoC container
 * The registration also adds an error handling policy to discard messages when a `ValidationException` is thrown
+
+::: warning
+Wolverine's code generation works best when validator types are **public**. If you need to use `internal` validators, you must
+enable `IncludeInternalTypes` in the FluentValidation configuration and register those validators with a **Singleton** scope
+for Wolverine to use them in generated code:
+
+```csharp
+opts.UseFluentValidation(fv =>
+{
+    fv.IncludeInternalTypes = true;
+});
+```
+
+Note that `internal` validators discovered this way that have no constructor dependencies will be registered as `Singleton`.
+Validators with constructor dependencies will be registered as `Scoped`, which may force Wolverine to use a service locator
+pattern in the generated code. Prefer `public` validators whenever possible.
+:::
 
 ## Customizing the Validation Failure Behavior
 
@@ -121,7 +138,7 @@ public class CustomFailureAction<T> : IFailureAction<T>
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Extensions/Wolverine.FluentValidation.Tests/Samples.cs#L56-L73' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_customizing_fluent_validation_failure_actions' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Extensions/Wolverine.FluentValidation.Tests/Samples.cs#L79-L95' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_customizing_fluent_validation_failure_actions' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 and with the corresponding override:
@@ -143,5 +160,16 @@ using var host = await Host.CreateDefaultBuilder()
         opts.Services.AddSingleton<IDataService, DataService>();
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Extensions/Wolverine.FluentValidation.Tests/Samples.cs#L36-L52' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_bootstrap_with_fluent_validation_and_custom_failure_condition' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Extensions/Wolverine.FluentValidation.Tests/Samples.cs#L60-L75' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_bootstrap_with_fluent_validation_and_custom_failure_condition' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
+
+## Trimming / AOT
+
+Applying the validation middleware is trim/AOT-safe: `FluentValidationPolicy` decides which handlers to wrap by querying the IoC container per message type, not by scanning assemblies. The one trim-hostile seam is validator **discovery** — `UseFluentValidation()` defaults to `RegistrationBehavior.DiscoverAndRegisterValidators`, which runs FluentValidation's `AssemblyScanner` at bootstrap. For trim/AOT publishing, opt out of the scan and register validators explicitly:
+
+```csharp
+opts.UseFluentValidation(RegistrationBehavior.ExplicitRegistration);
+opts.Services.AddScoped<IValidator<CreateCustomer>, CreateCustomerValidator>();
+```
+
+See the [AOT publishing guide](/guide/aot.html#validation-and-aot) for the full story.

@@ -10,7 +10,6 @@ public class disabling_all_external_transports
     public async Task disable_all_external_transports_from_extension_method()
     {
         #region sample_disabling_external_transports
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -22,7 +21,7 @@ public class disabling_all_external_transports
             // messages to run completely locally
             .ConfigureServices(services => services.DisableAllExternalWolverineTransports())
 
-            .StartAsync();
+            .StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         #endregion
 

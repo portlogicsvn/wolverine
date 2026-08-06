@@ -17,7 +17,7 @@ public class RabbitMqExchangeBindingTests
 
         await binding.DeclareAsync(channel, NullLogger.Instance);
 
-        await channel.Received().ExchangeBindAsync("destination", "source", "routing.key", (IDictionary<string, object?>)binding.Arguments);
+        await channel.Received().ExchangeBindAsync("destination", "source", "routing.key", (IDictionary<string, object?>)binding.Arguments, cancellationToken: Arg.Any<CancellationToken>());
         binding.HasDeclared.ShouldBeTrue();
     }
 
@@ -29,7 +29,7 @@ public class RabbitMqExchangeBindingTests
 
         await binding.TeardownAsync(channel);
 
-        await channel.Received().ExchangeUnbindAsync("destination", "source", "routing.key", (IDictionary<string, object?>)binding.Arguments);
+        await channel.Received().ExchangeUnbindAsync("destination", "source", "routing.key", (IDictionary<string, object?>)binding.Arguments, cancellationToken: Arg.Any<CancellationToken>());
     }
     
     public class when_adding_exchange_to_exchange_bindings
@@ -159,6 +159,29 @@ public class RabbitMqExchangeBindingTests
             var exchange = theTransport.Exchanges["dest"];
             Should.Throw<ArgumentNullException>(() => exchange.BindExchange(null!));
         }
+
+        [Fact]
+        public void bind_exchange_declare_passive_is_false_by_default()
+        {
+            new RabbitMqTransportExpression(theTransport, new WolverineOptions())
+                .DeclareExchange("destination");
+
+            var destExchange = theTransport.Exchanges["destination"];
+            destExchange.DeclarePassive.ShouldBe(false);
+        }
+
+        [Fact]
+        public void bind_exchange_declare_passive_is_settable()
+        {
+            new RabbitMqTransportExpression(theTransport, new WolverineOptions())
+                .DeclareExchange("destination", exchange =>
+                {
+                    exchange.DeclarePassive = true;
+                });
+
+            var destExchange = theTransport.Exchanges["destination"];
+            destExchange.DeclarePassive.ShouldBe(true);
+        }
     }
 
     public class exchange_declare_with_exchange_bindings
@@ -174,9 +197,8 @@ public class RabbitMqExchangeBindingTests
 
             await exchange.DeclareAsync(channel, NullLogger.Instance);
 
-            await channel.Received().ExchangeDeclareAsync("dest", "topic", true, false, (IDictionary<string, object?>)exchange.Arguments);
-            await channel.Received().ExchangeBindAsync("dest", "source", "routing.key",
-                Arg.Any<IDictionary<string, object?>>());
+            await channel.Received().ExchangeDeclareAsync("dest", "topic", true, false, (IDictionary<string, object?>)exchange.Arguments, cancellationToken: Arg.Any<CancellationToken>());
+            await channel.Received().ExchangeBindAsync("dest", "source", "routing.key", Arg.Any<IDictionary<string, object?>>(), cancellationToken: Arg.Any<CancellationToken>());
         }
     }
 }

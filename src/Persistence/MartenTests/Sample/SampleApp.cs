@@ -1,3 +1,4 @@
+using JasperFx;
 using IntegrationTests;
 using Marten;
 using Marten.Schema;
@@ -16,9 +17,9 @@ public class MessageInvocationTests : PostgresqlContext, IAsyncLifetime
 {
     private IHost theHost = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
-        theHost = WolverineHost.For(opts =>
+        theHost = await WolverineHost.ForAsync(opts =>
         {
             opts.PublishAllMessages().Locally();
 
@@ -26,16 +27,21 @@ public class MessageInvocationTests : PostgresqlContext, IAsyncLifetime
 
             opts.Services.AddMarten(Servers.PostgresConnectionString)
                 .IntegrateWithWolverine();
+
+            opts.Discovery.DisableConventionalDiscovery()
+                .IncludeType(typeof(UserHandler));
+            opts.Durability.Mode = DurabilityMode.Solo;
         });
 
         await theHost.Get<IDocumentStore>().Advanced.Clean.CompletelyRemoveAllAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         if (theHost != null)
         {
             await theHost.StopAsync();
+            theHost.Dispose();
         }
     }
 
@@ -47,7 +53,7 @@ public class MessageInvocationTests : PostgresqlContext, IAsyncLifetime
 
         await using (var session = theHost.Get<IDocumentStore>().QuerySession())
         {
-            (await session.LoadAsync<User>("Tom")).ShouldNotBeNull();
+            (await session.LoadAsync<User>("Tom", TestContext.Current.CancellationToken)).ShouldNotBeNull();
         }
 
         theHost.Get<UserNames>()
@@ -61,7 +67,7 @@ public class MessageInvocationTests : PostgresqlContext, IAsyncLifetime
 
         await using (var session = theHost.Get<IDocumentStore>().QuerySession())
         {
-            (await session.LoadAsync<User>("Bill")).ShouldNotBeNull();
+            (await session.LoadAsync<User>("Bill", TestContext.Current.CancellationToken)).ShouldNotBeNull();
         }
 
         theHost.Get<UserNames>()
@@ -71,8 +77,7 @@ public class MessageInvocationTests : PostgresqlContext, IAsyncLifetime
 
 public class UserHandler
 {
-    #region sample_UserHandler_handle_CreateUser
-
+    #region sample_userhandler_handle_createuser
     [Transactional]
     public static UserCreated Handle(CreateUser message, IDocumentSession session)
     {

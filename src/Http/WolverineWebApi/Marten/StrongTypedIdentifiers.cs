@@ -1,4 +1,5 @@
 using Marten;
+using JasperFx.Events;
 using Marten.Events;
 using StronglyTypedIds;
 using Wolverine.Http;
@@ -9,7 +10,6 @@ namespace WolverineWebApi.Marten;
 public static class StrongLetterHandler
 {
     #region sample_using_strong_typed_id_as_route_argument
-
     [WolverineGet("/sti/aggregate/longhand/{id}")]
     public static async ValueTask<StrongLetterAggregate> Handle2(LetterId id, IDocumentSession session) =>
         (await session.Events.FetchLatest<StrongLetterAggregate>(id.Value))!;
@@ -83,7 +83,6 @@ public record FetchCounts(LetterId Id);
 
 
 #region sample_letter_id
-
 [StronglyTypedId(Template.Guid)]
 public readonly partial struct LetterId;
 

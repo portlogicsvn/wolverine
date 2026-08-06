@@ -1,6 +1,8 @@
 using System.Data.Common;
+using JasperFx;
 using JasperFx.Core;
 using JasperFx.Core.Reflection;
+using Microsoft.Extensions.Logging;
 using Weasel.Core;
 using Wolverine.Logging;
 using Wolverine.Persistence.Durability;
@@ -49,18 +51,47 @@ public abstract partial class MessageDatabase<T>
         }
     }
 
-    public async Task MigrateAsync()
+    public Task MigrateAsync()
     {
+        return MigrateAsync(null);
+    }
+
+    public async Task MigrateAsync(AutoCreate? overrideAutoCreate)
+    {
+        var autoCreate = overrideAutoCreate ?? _settings.AutoCreate;
+
         Func<Task> tryMigrate = async () =>
         {
             await using var conn = await DataSource.OpenConnectionAsync(_cancellation);
+            var typedConn = (T)conn;
+            var lockId = _settings.MigrationLockId;
+            var lockAcquired = false;
 
             try
             {
-                await migrateAsync(conn);
+                // Acquire a global advisory lock to serialize migrations across processes.
+                // Without this, concurrent CREATE SCHEMA IF NOT EXISTS statements can race
+                // and produce 23505 duplicate-key errors against pg_namespace_nspname_index
+                // (or equivalents on other engines). See GH-2518.
+                lockAcquired = await acquireMigrationLockAsync(lockId, typedConn, _cancellation);
+
+                await migrateAsync(conn, autoCreate);
             }
             finally
             {
+                if (lockAcquired)
+                {
+                    try
+                    {
+                        await releaseMigrationLockAsync(lockId, typedConn, _cancellation);
+                    }
+                    catch
+                    {
+                        // Best-effort release. The session-scoped lock will be cleaned up
+                        // when the connection closes regardless.
+                    }
+                }
+
                 await conn.CloseAsync();
             }
         };
@@ -84,31 +115,71 @@ public abstract partial class MessageDatabase<T>
         }
     }
 
+    /// <summary>
+    /// Attempt to acquire the migration advisory lock with bounded retries.
+    /// Returns true if acquired (caller is responsible for the migration and release),
+    /// false if not acquired after the retry budget — in which case another process
+    /// is presumably finishing the migration; we proceed and let our own SchemaMigration
+    /// detect "no changes" as a no-op.
+    ///
+    /// Providers whose advisory-lock primitive depends on schema that is itself part
+    /// of the migration (e.g., SQLite's row-based lock on <c>wolverine_locks</c>)
+    /// should override this with a primitive that does not depend on the schema —
+    /// for example, SQLite's <c>BEGIN EXCLUSIVE</c>.
+    /// </summary>
+    protected virtual async Task<bool> acquireMigrationLockAsync(int lockId, T conn, CancellationToken token)
+    {
+        const int maxAttempts = 10;
+        for (var attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            if (await TryAttainLockAsync(lockId, conn, token))
+            {
+                return true;
+            }
+
+            // Linear backoff: 100ms, 200ms, ..., 1000ms (~5.5s total worst case)
+            await Task.Delay(TimeSpan.FromMilliseconds(100 * (attempt + 1)), token);
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Release the lock previously acquired by <see cref="acquireMigrationLockAsync"/>.
+    /// Default implementation delegates to the polling-lock release path; providers
+    /// that override <see cref="acquireMigrationLockAsync"/> with a different primitive
+    /// (e.g., a transaction) must override this too.
+    /// </summary>
+    protected virtual Task releaseMigrationLockAsync(int lockId, T conn, CancellationToken token)
+    {
+        return ReleaseLockAsync(lockId, conn, token);
+    }
+
     public async Task<IReadOnlyList<Envelope>> AllIncomingAsync()
     {
         return await CreateCommand(
-                $"select {DatabaseConstants.IncomingFields} from {SchemaName}.{DatabaseConstants.IncomingTable}")
+                $"select {DatabaseConstants.IncomingFields} from {QuotedSchemaName}.{DatabaseConstants.IncomingTable}")
             .FetchListAsync(r => DatabasePersistence.ReadIncomingAsync(r, _cancellation), _cancellation);
     }
 
     public Task<IReadOnlyList<Envelope>> AllOutgoingAsync()
     {
         return CreateCommand(
-                $"select {DatabaseConstants.OutgoingFields} from {SchemaName}.{DatabaseConstants.OutgoingTable}")
+                $"select {DatabaseConstants.OutgoingFields} from {QuotedSchemaName}.{DatabaseConstants.OutgoingTable}")
             .FetchListAsync(r => DatabasePersistence.ReadOutgoingAsync(r, _cancellation), _cancellation);
     }
 
     public Task ReleaseAllOwnershipAsync()
     {
         return CreateCommand(
-                $"update {SchemaName}.{DatabaseConstants.IncomingTable} set owner_id = 0;update {SchemaName}.{DatabaseConstants.OutgoingTable} set owner_id = 0")
+                $"update {QuotedSchemaName}.{DatabaseConstants.IncomingTable} set owner_id = 0;update {QuotedSchemaName}.{DatabaseConstants.OutgoingTable} set owner_id = 0")
             .ExecuteNonQueryAsync(_cancellation);
     }
 
     public Task ReleaseAllOwnershipAsync(int ownerId)
     {
         return CreateCommand(
-                $"update {SchemaName}.{DatabaseConstants.IncomingTable} set owner_id = 0 where owner_id = @id;update {SchemaName}.{DatabaseConstants.OutgoingTable} set owner_id = 0 where owner_id = @id")
+                $"update {QuotedSchemaName}.{DatabaseConstants.IncomingTable} set owner_id = 0 where owner_id = @id;update {QuotedSchemaName}.{DatabaseConstants.OutgoingTable} set owner_id = 0 where owner_id = @id")
             .With("id", ownerId)
             .ExecuteNonQueryAsync(_cancellation);
     }
@@ -119,13 +190,47 @@ public abstract partial class MessageDatabase<T>
         await conn.CloseAsync();
     }
 
-    private async Task migrateAsync(DbConnection conn)
+    public async Task AssertStorageExistsAsync(CancellationToken token)
+    {
+        await using var conn = await DataSource.OpenConnectionAsync(token);
+        try
+        {
+            // A reachable database is not enough — the schema/tables can be missing (e.g. never
+            // provisioned, or dropped). Reuse the same Weasel diff the migration path uses so that
+            // 'resources check' reports an un-provisioned schema as unhealthy.
+            var migration = await SchemaMigration.DetermineAsync(conn, token, Objects);
+            if (migration.Difference != SchemaPatchDifference.None)
+            {
+                throw new InvalidOperationException(
+                    $"The Wolverine message storage for database '{Name}' is missing or out of date (schema difference: {migration.Difference}). Run 'resources setup' or enable auto-provisioning.");
+            }
+        }
+        finally
+        {
+            await conn.CloseAsync();
+        }
+    }
+
+    private Task migrateAsync(DbConnection conn)
+    {
+        return migrateAsync(conn, _settings.AutoCreate);
+    }
+
+    private async Task migrateAsync(DbConnection conn, AutoCreate autoCreate)
     {
         var migration = await SchemaMigration.DetermineAsync(conn, _cancellation, Objects);
 
         if (migration.Difference != SchemaPatchDifference.None)
         {
-            await Migrator.ApplyAllAsync(conn, migration, _settings.AutoCreate, new MigrationLogger(Logger), ct: _cancellation);
+            if (autoCreate == AutoCreate.None)
+            {
+                Logger.LogWarning(
+                    "Message storage in database {Database} is out of date ({Difference}) but AutoCreate is None — no migration applied. Run 'resources setup' to provision it",
+                    Name, migration.Difference);
+                return;
+            }
+
+            await Migrator.ApplyAllAsync(conn, migration, autoCreate, new MigrationLogger(Logger), ct: _cancellation);
         }
     }
 
@@ -134,20 +239,30 @@ public abstract partial class MessageDatabase<T>
         try
         {
             var tx = await conn.BeginTransactionAsync(_cancellation);
-            await tx.CreateCommand($"delete from {SchemaName}.{DatabaseConstants.OutgoingTable}")
+            await tx.CreateCommand($"delete from {QuotedSchemaName}.{DatabaseConstants.OutgoingTable}")
                 .ExecuteNonQueryAsync(_cancellation);
-            await tx.CreateCommand($"delete from {SchemaName}.{DatabaseConstants.IncomingTable}")
+            await tx.CreateCommand($"delete from {QuotedSchemaName}.{DatabaseConstants.IncomingTable}")
                 .ExecuteNonQueryAsync(_cancellation);
-            await tx.CreateCommand($"delete from {SchemaName}.{DatabaseConstants.DeadLetterTable}")
+            await tx.CreateCommand($"delete from {QuotedSchemaName}.{DatabaseConstants.DeadLetterTable}")
                 .ExecuteNonQueryAsync(_cancellation);
 
             if (_settings.Role == MessageStoreRole.Main)
             {
-                await tx.CreateCommand($"delete from {SchemaName}.{DatabaseConstants.AgentRestrictionsTableName}")
+                await tx.CreateCommand($"delete from {QuotedSchemaName}.{DatabaseConstants.AgentRestrictionsTableName}")
                     .ExecuteNonQueryAsync(_cancellation);
-                
-                await tx.CreateCommand($"delete from {SchemaName}.{DatabaseConstants.NodeRecordTableName}")
+
+                await tx.CreateCommand($"delete from {QuotedSchemaName}.{DatabaseConstants.NodeRecordTableName}")
                     .ExecuteNonQueryAsync(_cancellation);
+
+                // Clear the dynamic-listener registry too, so test hosts that call
+                // ResetResourceState / ClearAllAsync get a truly clean slate. Only
+                // attempted when the registry is opted in, since otherwise the
+                // wolverine_listeners table doesn't exist.
+                if (Durability.EnableDynamicListeners)
+                {
+                    await tx.CreateCommand($"delete from {QuotedSchemaName}.{DatabaseConstants.ListenersTableName}")
+                        .ExecuteNonQueryAsync(_cancellation);
+                }
             }
 
             await tx.CommitAsync(_cancellation);

@@ -1,4 +1,5 @@
 using IntegrationTests;
+using JasperFx.Events.Projections;
 using JasperFx;
 using JasperFx.CodeGeneration;
 using JasperFx.Events;
@@ -17,11 +18,11 @@ namespace PolecatTests.AggregateHandlerWorkflow;
 
 public class always_enforce_consistency_workflow : IAsyncLifetime
 {
-    private IHost theHost;
-    private IDocumentStore theStore;
+    private IHost theHost = null!;
+    private IDocumentStore theStore = null!;
     private Guid theStreamId;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         theHost = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -43,7 +44,7 @@ public class always_enforce_consistency_workflow : IAsyncLifetime
         await ((DocumentStore)theStore).Database.ApplyAllConfiguredChangesToDatabaseAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await theHost.StopAsync();
         theHost.Dispose();
@@ -61,7 +62,9 @@ public class always_enforce_consistency_workflow : IAsyncLifetime
     private async Task<ConsistencyAggregate> LoadAggregate()
     {
         await using var session = theStore.LightweightSession();
-        return await session.LoadAsync<ConsistencyAggregate>(theStreamId);
+        var aggregate = await session.LoadAsync<ConsistencyAggregate>(theStreamId);
+        aggregate.ShouldNotBeNull();
+        return aggregate;
     }
 
     [Fact]
@@ -171,7 +174,6 @@ public record ConsistencyAEvent;
 #endregion
 
 #region Commands
-
 public record ConsistentIncrementA(Guid ConsistencyAggregateId);
 public record ConsistentDoNothing(Guid ConsistencyAggregateId);
 public record ConsistentHandlerIncrementA(Guid ConsistencyAggregateId);

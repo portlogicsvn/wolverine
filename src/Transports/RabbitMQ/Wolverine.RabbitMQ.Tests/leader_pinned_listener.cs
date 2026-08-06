@@ -12,8 +12,6 @@ using Wolverine.Postgresql;
 using Wolverine.Runtime.Agents;
 using Wolverine.Tracking;
 using Xunit;
-using Xunit.Abstractions;
-
 namespace Wolverine.RabbitMQ.Tests;
 
 public class leader_pinned_listener : IAsyncDisposable
@@ -104,7 +102,7 @@ public class leader_pinned_listener : IAsyncDisposable
         host3.GetRuntime().Endpoints.ActiveListeners().Where(x => x.Endpoint.Role == EndpointRole.Application).Any(x => x.Uri.Scheme == "rabbitmq").ShouldBeFalse();
         host4.GetRuntime().Endpoints.ActiveListeners().Where(x => x.Endpoint.Role == EndpointRole.Application).Any(x => x.Uri.Scheme == "rabbitmq").ShouldBeFalse();
 
-        await host.StopAsync();
+        await host.StopAsync(TestContext.Current.CancellationToken);
         host.Dispose();
         _hosts.Remove(host);
 

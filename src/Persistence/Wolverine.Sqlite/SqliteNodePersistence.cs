@@ -1,5 +1,6 @@
 using System.Data;
 using System.Data.Common;
+using System.Text.Json.Serialization;
 using JasperFx.Core;
 using Weasel.Core;
 using Weasel.Sqlite;
@@ -46,11 +47,15 @@ internal class SqliteNodePersistence : DatabaseConstants, INodeAgentPersistence
     public async Task<int> PersistAsync(WolverineNode node, CancellationToken cancellationToken)
     {
         // SQLite doesn't have RETURNING clause in the same way, we need to use last_insert_rowid()
-        var capabilitiesJson = System.Text.Json.JsonSerializer.Serialize(node.Capabilities.Select(x => x.ToString()).ToArray());
+        // Use the source-generated JsonSerializerContext for string[] (chunk N pattern) so the
+        // round-trip through System.Text.Json is AOT-clean — no leaf-site IL2026/IL3050 suppression.
+        var capabilitiesJson = System.Text.Json.JsonSerializer.Serialize(
+            node.Capabilities.Select(x => x.ToString()).ToArray(),
+            SqliteNodeCapabilitiesJsonContext.Default.StringArray);
 
         await using var conn = await _dataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
 
-        var cmd = conn.CreateCommand(
+        await using var cmd = conn.CreateCommand(
                 $"insert into {_nodeTable} (id, uri, capabilities, description, version, node_number) values (@id, @uri, @capabilities, @description, @version, @node_number)")
             .With("id", node.NodeId.ToString())
             .With("uri", (node.ControlUri ?? TransportConstants.LocalUri).ToString())
@@ -62,7 +67,7 @@ internal class SqliteNodePersistence : DatabaseConstants, INodeAgentPersistence
         await cmd.ExecuteNonQueryAsync(cancellationToken);
 
         // Get the node_number that was assigned
-        var numberCmd = conn.CreateCommand($"select node_number from {_nodeTable} where id = @id")
+        await using var numberCmd = conn.CreateCommand($"select node_number from {_nodeTable} where id = @id")
             .With("id", node.NodeId.ToString());
         var raw = await numberCmd.ExecuteScalarAsync(cancellationToken);
 
@@ -300,16 +305,36 @@ internal class SqliteNodePersistence : DatabaseConstants, INodeAgentPersistence
             .ExecuteNonQueryAsync();
     }
 
-    public async Task MarkHealthCheckAsync(WolverineNode node, CancellationToken token)
+    public async Task<bool> MarkHealthCheckAsync(WolverineNode node, CancellationToken token)
     {
         await using var conn = await _dataSource.OpenConnectionAsync(token).ConfigureAwait(false);
         var count = await conn.CreateCommand($"update {_nodeTable} set health_check = datetime('now') where id = @id")
             .With("id", node.NodeId.ToString()).ExecuteNonQueryAsync(token);
 
-        if (count == 0)
-        {
-            await PersistAsync(node, token);
-        }
+        // GH-3604 / D2: a miss means a peer deleted this still-live node's row; report it to the caller
+        // instead of blindly re-inserting a skeleton (empty capabilities) here.
+        return count != 0;
+    }
+
+    public async Task ReregisterNodeAsync(WolverineNode node, CancellationToken token)
+    {
+        // SQLite's node_number is a plain INTEGER that PersistAsync already fills explicitly, so preserving
+        // the existing number + capabilities is a straight upsert on the node id.
+        var capabilitiesJson = System.Text.Json.JsonSerializer.Serialize(
+            node.Capabilities.Select(x => x.ToString()).ToArray(),
+            SqliteNodeCapabilitiesJsonContext.Default.StringArray);
+
+        await using var conn = await _dataSource.OpenConnectionAsync(token).ConfigureAwait(false);
+
+        await conn.CreateCommand(
+                $"insert into {_nodeTable} (id, uri, capabilities, description, version, node_number, health_check) values (@id, @uri, @capabilities, @description, @version, @node_number, datetime('now')) on conflict(id) do update set uri = @uri, capabilities = @capabilities, description = @description, version = @version, node_number = @node_number, health_check = datetime('now')")
+            .With("id", node.NodeId.ToString())
+            .With("uri", (node.ControlUri ?? TransportConstants.LocalUri).ToString())
+            .With("description", node.Description)
+            .With("version", node.Version.ToString())
+            .With("capabilities", capabilitiesJson)
+            .With("node_number", node.AssignedNodeNumber)
+            .ExecuteNonQueryAsync(token);
     }
 
     public Task LogRecordsAsync(params NodeRecord[] records)
@@ -351,6 +376,20 @@ internal class SqliteNodePersistence : DatabaseConstants, INodeAgentPersistence
         return records;
     }
 
+    // GH-3701: the row cap that bounds the node record table alongside the age sweep. Without this the
+    // store fell through to the interface's no-op default and only the age bound applied.
+    public async Task DeleteOldNodeRecordsAsync(int retainCount)
+    {
+        if (retainCount <= 0) return;
+
+        await using var conn = await _dataSource.OpenConnectionAsync(CancellationToken.None).ConfigureAwait(false);
+        await using var cmd = conn.CreateCommand(
+                $"delete from {NodeRecordTableName} where id not in (select id from {NodeRecordTableName} order by id desc limit @retain)")
+            .With("retain", retainCount);
+
+        await cmd.ExecuteNonQueryAsync();
+    }
+
     public bool HasLeadershipLock()
     {
         return _database.AdvisoryLock.HasLock(_lockId);
@@ -388,7 +427,8 @@ internal class SqliteNodePersistence : DatabaseConstants, INodeAgentPersistence
         if (!(await reader.IsDBNullAsync(7)))
         {
             var capabilitiesJson = await reader.GetFieldValueAsync<string>(7);
-            var capabilities = System.Text.Json.JsonSerializer.Deserialize<string[]>(capabilitiesJson);
+            var capabilities = System.Text.Json.JsonSerializer.Deserialize(
+                capabilitiesJson, SqliteNodeCapabilitiesJsonContext.Default.StringArray);
             if (capabilities != null)
             {
                 node.Capabilities.AddRange(capabilities.Select(x => new Uri(x)));
@@ -397,4 +437,17 @@ internal class SqliteNodePersistence : DatabaseConstants, INodeAgentPersistence
 
         return node;
     }
+}
+
+/// <summary>
+/// Source-generated JSON context for the WolverineNode.Capabilities round-trip in
+/// <see cref="SqliteNodePersistence"/>. Lets the Persist/Read paths use the AOT-friendly
+/// <c>JsonTypeInfo</c> overloads instead of the reflection-based defaults — clearing
+/// IL2026/IL3050 in trim/AOT builds without leaf-site suppression. Same chunk N
+/// (NodeRecord) pattern; the type set is statically known (just <c>string[]</c>),
+/// so the source generator can emit fully-typed serializers.
+/// </summary>
+[JsonSerializable(typeof(string[]))]
+internal partial class SqliteNodeCapabilitiesJsonContext : JsonSerializerContext
+{
 }

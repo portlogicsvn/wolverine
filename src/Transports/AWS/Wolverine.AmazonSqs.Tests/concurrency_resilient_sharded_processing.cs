@@ -9,11 +9,9 @@ using Shouldly;
 using Wolverine.Configuration;
 using Wolverine.Marten;
 using Wolverine.Tracking;
-using Xunit.Abstractions;
-
+using Xunit;
 namespace Wolverine.AmazonSqs.Tests;
 
-[Trait("Category", "Flaky")]
 public class concurrency_resilient_sharded_processing
 {
     private readonly ITestOutputHelper _output;
@@ -71,7 +69,6 @@ public class concurrency_resilient_sharded_processing
                 opts.ListenToSqsQueue("from_external");
 
                 #region sample_partitioned_publishing_through_amazon_sqs
-
                 // Telling Wolverine how to assign a GroupId to a message, that we'll use
                 // to predictably sort into "slots" in the processing
                 opts.MessagePartitioning.ByMessage<ILetterMessage>(x => x.Id.ToString());
@@ -86,7 +83,7 @@ public class concurrency_resilient_sharded_processing
                 });
 
                 #endregion
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var tracked = await host
             .TrackActivity()
@@ -156,7 +153,7 @@ public static class LetterMessageHandler
 
 }
 
-public class SimpleAggregate : IRevisioned
+public partial class SimpleAggregate : IRevisioned
 {
     // This will be the aggregate version
     public int Version { get; set; }

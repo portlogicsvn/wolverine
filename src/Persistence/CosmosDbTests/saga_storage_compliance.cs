@@ -16,10 +16,13 @@ public class CosmosDbSagaHost : ISagaHost
     public CosmosDbSagaHost()
     {
         _fixture = new AppFixture();
+#pragma warning disable VSTHRD002 // Avoid problematic synchronous waits
         _fixture.InitializeAsync().GetAwaiter().GetResult();
+#pragma warning restore VSTHRD002 // Avoid problematic synchronous waits
+
     }
 
-    public IHost BuildHost<TSaga>()
+    public Task<IHost> BuildHostAsync<TSaga>()
     {
         return Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -35,25 +38,25 @@ public class CosmosDbSagaHost : ISagaHost
 
                 opts.Services.AddSingleton(_fixture.Client);
                 opts.UseCosmosDbPersistence(AppFixture.DatabaseName);
-            }).Start();
+            }).StartAsync();
     }
 
-    public Task<T> LoadState<T>(Guid id) where T : Saga
+    public Task<T?> LoadState<T>(Guid id) where T : Saga
     {
         throw new NotSupportedException();
     }
 
-    public Task<T> LoadState<T>(int id) where T : Saga
+    public Task<T?> LoadState<T>(int id) where T : Saga
     {
         throw new NotSupportedException();
     }
 
-    public Task<T> LoadState<T>(long id) where T : Saga
+    public Task<T?> LoadState<T>(long id) where T : Saga
     {
         throw new NotSupportedException();
     }
 
-    public async Task<T> LoadState<T>(string id) where T : Saga
+    public async Task<T?> LoadState<T>(string id) where T : Saga
     {
         try
         {
@@ -67,6 +70,10 @@ public class CosmosDbSagaHost : ISagaHost
     }
 }
 
+// CosmosDbSagaHost stands up real Wolverine hosts against the one shared emulator database, so this suite
+// has to be serialized with the rest of the CosmosDb tests. Left outside the collection it ran in parallel
+// and its node/durability churn intermittently released inbox ownership out from under other suites.
+[Collection("cosmosdb")]
 public class saga_storage_compliance : StringIdentifiedSagaComplianceSpecs<CosmosDbSagaHost>
 {
     public saga_storage_compliance()

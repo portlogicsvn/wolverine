@@ -14,13 +14,14 @@ public class conjoined_tenancy : PostgresqlContext, IAsyncLifetime
 {
     private IHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         #region sample_setup_with_conjoined_tenancy
-
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery().IncludeType(typeof(CreateTenantDocumentHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Services.AddMarten(Servers.PostgresConnectionString)
                     .IntegrateWithWolverine()
                     .UseLightweightSessions();
@@ -35,14 +36,13 @@ public class conjoined_tenancy : PostgresqlContext, IAsyncLifetime
         await store.Advanced.Clean.DeleteDocumentsByTypeAsync(typeof(CreateTenantDocument));
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _host.StopAsync();
         _host.Dispose();
     }
 
     #region sample_using_conjoined_tenancy
-
     [Fact]
     public async Task execute_with_tenancy()
     {
@@ -62,21 +62,21 @@ public class conjoined_tenancy : PostgresqlContext, IAsyncLifetime
         // Check the first tenant
         using (var session = store.LightweightSession("one"))
         {
-            var document = await session.LoadAsync<TenantedDocument>(id);
+            var document = await session.LoadAsync<TenantedDocument>(id, TestContext.Current.CancellationToken);
             document!.Location.ShouldBe("Andor");
         }
 
         // Check the second tenant
         using (var session = store.LightweightSession("two"))
         {
-            var document = await session.LoadAsync<TenantedDocument>(id);
+            var document = await session.LoadAsync<TenantedDocument>(id, TestContext.Current.CancellationToken);
             document!.Location.ShouldBe("Tear");
         }
 
         // Check the third tenant
         using (var session = store.LightweightSession("three"))
         {
-            var document = await session.LoadAsync<TenantedDocument>(id);
+            var document = await session.LoadAsync<TenantedDocument>(id, TestContext.Current.CancellationToken);
             document!.Location.ShouldBe("Illian");
         }
     }
@@ -85,7 +85,6 @@ public class conjoined_tenancy : PostgresqlContext, IAsyncLifetime
 }
 
 #region sample_conjoined_multi_tenancy_sample_code
-
 // Implementing Marten's ITenanted interface
 // also makes Marten treat this document type as
 // having "conjoined" multi-tenancy

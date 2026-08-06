@@ -9,7 +9,7 @@ public abstract partial class MessageDatabase<T>
     public async Task<DeadLetterEnvelope?> DeadLetterEnvelopeByIdAsync(Guid id, string? tenantId = null)
     {
         await using var reader = await CreateCommand(
-                $"select {DatabaseConstants.DeadLetterFields} from {SchemaName}.{DatabaseConstants.DeadLetterTable} where id = @id")
+                $"select {DatabaseConstants.DeadLetterFields} from {QuotedSchemaName}.{DatabaseConstants.DeadLetterTable} where id = @id")
             .With("id", id)
             .ExecuteReaderAsync(_cancellation);
 
@@ -19,7 +19,7 @@ public abstract partial class MessageDatabase<T>
             return null;
         }
 
-        var deadLetterEnvelope = await DatabasePersistence.ReadDeadLetterAsync(reader, _cancellation);
+        var deadLetterEnvelope = await DatabasePersistence.ReadDeadLetterAsync(reader, _cancellation, Logger);
         await reader.CloseAsync();
 
         return deadLetterEnvelope;

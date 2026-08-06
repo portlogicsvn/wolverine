@@ -9,6 +9,17 @@ namespace Wolverine.Persistence;
 
 public interface IPersistenceFrameProvider
 {
+    /// <summary>
+    ///     Whether this provider's <see cref="CanPersist"/> claims every entity type it is asked
+    ///     about — a "catch-all" document store like Marten that can genuinely persist any document —
+    ///     rather than checking the type against its own mapping or model (like EF Core, which only
+    ///     claims types mapped in a registered DbContext). Catch-all providers are consulted after
+    ///     selective providers regardless of registration order, so that an entity mapped by a
+    ///     selective provider deterministically resolves to that provider in mixed-persistence
+    ///     applications.
+    /// </summary>
+    bool IsCatchAll => false;
+
     void ApplyTransactionSupport(IChain chain, IServiceContainer container);
     void ApplyTransactionSupport(IChain chain, IServiceContainer container, Type entityType);
     bool CanApply(IChain chain, IServiceContainer container);
@@ -50,6 +61,36 @@ public interface IPersistenceFrameProvider
     Frame DetermineStorageActionFrame(Type entityType, Variable action, IServiceContainer container);
 
     Frame[] DetermineFrameToNullOutMaybeSoftDeleted(Variable entity);
+
+    /// <summary>
+    /// Attempt to build a codegen <see cref="Frame"/> that executes a query specification
+    /// (e.g. a Marten <c>ICompiledQuery&lt;,&gt;</c> or <c>IQueryPlan&lt;&gt;</c>, or a
+    /// Wolverine.EntityFrameworkCore <c>IQueryPlan&lt;TDbContext,TResult&gt;</c>) and produces
+    /// its materialized result as a new variable for downstream frames to consume.
+    ///
+    /// <para>
+    /// Return <c>true</c> if the provider recognizes the variable's type as one of its
+    /// specification contracts. The default implementation returns <c>false</c>, signaling
+    /// "this provider doesn't handle this spec type — try another".
+    /// </para>
+    /// <para>
+    /// Consumed by <see cref="FromQuerySpecificationAttribute"/> to dispatch cross-provider.
+    /// </para>
+    /// </summary>
+    /// <param name="specVariable">Variable holding the constructed specification instance.</param>
+    /// <param name="container">Active codegen service container.</param>
+    /// <param name="frame">The built frame, when the provider handles the spec type.</param>
+    /// <param name="result">The result variable produced by the frame, when built.</param>
+    bool TryBuildFetchSpecificationFrame(
+        Variable specVariable,
+        IServiceContainer container,
+        [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Frame? frame,
+        [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Variable? result)
+    {
+        frame = null;
+        result = null;
+        return false;
+    }
 }
 
 

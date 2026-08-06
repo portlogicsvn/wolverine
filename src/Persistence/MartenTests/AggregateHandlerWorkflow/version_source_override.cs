@@ -4,6 +4,7 @@ using JasperFx.CodeGeneration;
 using JasperFx.Resources;
 using Marten;
 using Marten.Events;
+using JasperFx.Events.Projections;
 using Marten.Events.Projections;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -20,11 +21,15 @@ public class version_source_override : PostgresqlContext, IAsyncLifetime
     private IDocumentStore theStore = null!;
     private Guid theStreamId;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         theHost = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery()
+                    .IncludeType(typeof(ParamVersionSourceHandler))
+                    .IncludeType(typeof(CustomVersionSourceHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Services.AddMarten(m =>
                     {
                         m.Connection(Servers.PostgresConnectionString);
@@ -41,7 +46,7 @@ public class version_source_override : PostgresqlContext, IAsyncLifetime
         theStore = theHost.Services.GetRequiredService<IDocumentStore>();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await theHost.StopAsync();
         theHost.Dispose();
@@ -110,7 +115,6 @@ public class version_source_override : PostgresqlContext, IAsyncLifetime
 }
 
 #region Types
-
 public class VersionSourceAggregate
 {
     public VersionSourceAggregate()
@@ -133,7 +137,6 @@ public record VersionSourceIncremented;
 #endregion
 
 #region Commands
-
 // Command with a non-standard version property name for AggregateHandler usage
 public record IncrementWithCustomVersion(Guid VersionSourceAggregateId, long ExpectedVersion);
 
@@ -143,7 +146,6 @@ public record IncrementWithParamVersionSource(Guid VersionSourceAggregateId, lon
 #endregion
 
 #region Handlers
-
 [AggregateHandler(VersionSource = nameof(IncrementWithCustomVersion.ExpectedVersion))]
 public static class CustomVersionSourceHandler
 {

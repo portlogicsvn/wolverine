@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using Wolverine.Configuration;
 using Wolverine.ErrorHandling;
 using Wolverine.Logging;
+using Wolverine.Persistence.Durability;
 using Wolverine.Runtime;
 using Wolverine.Runtime.Partitioning;
 using Wolverine.Runtime.WorkerQueues;
@@ -15,7 +16,26 @@ public interface IListenerCircuit
     Endpoint Endpoint { get; }
     int QueueCount { get; }
     ValueTask PauseAsync(TimeSpan pauseTime);
+    
+    /// <summary>
+    /// Pause the listener and fully drain any buffered messages before returning.
+    /// Unlike PauseAsync (which may skip the drain to avoid deadlocks when called from
+    /// within the handler pipeline), this method guarantees all queued messages are
+    /// processed before returning. Safe to call from background threads.
+    /// </summary>
+    ValueTask PauseWithDrainAsync(TimeSpan pauseTime);
+    
     ValueTask StartAsync();
+
+    /// <summary>
+    /// Force the listener to stop and rebuild its underlying transport listener even if it currently reports
+    /// <see cref="ListeningStatus.Accepting"/>. This is the remediation primitive for recovering a "stuck"
+    /// listener — e.g. a dead transport channel that the framework could not self-heal but that still reports
+    /// Accepting — without bouncing the process. When <paramref name="force"/> is <c>false</c> this behaves like
+    /// <see cref="StartAsync"/> (a no-op when already Accepting). The default implementation is the gentle
+    /// <see cref="StartAsync"/>; circuits backed by a real transport listener override it to tear down and rebuild.
+    /// </summary>
+    ValueTask RestartAsync(bool force = true) => StartAsync();
 
     Task EnqueueDirectlyAsync(IEnumerable<Envelope> envelopes);
 }
@@ -46,8 +66,10 @@ public class ListeningAgent : IAsyncDisposable, IDisposable, IListeningAgent
     private readonly WolverineRuntime _runtime;
     private IReceiver? _receiver;
     private IDisposable? _restarter;
+    private ListenerInboxRecoveryLoop? _inboxRecovery;
     private int _lastObservedQueueCount;
     private DateTimeOffset _lastQueueCountChangeAt = DateTimeOffset.UtcNow;
+    private bool _disposed;
 
     public ListeningAgent(Endpoint endpoint, WolverineRuntime runtime)
     {
@@ -76,7 +98,7 @@ public class ListeningAgent : IAsyncDisposable, IDisposable, IListeningAgent
 
         if (endpoint.ShouldEnforceBackPressure())
         {
-            _backPressureAgent = new BackPressureAgent(this, endpoint, runtime.Observer);
+            _backPressureAgent = new BackPressureAgent(this, endpoint, runtime.Observer, _logger);
             _backPressureAgent.Start();
         }
     }
@@ -85,8 +107,13 @@ public class ListeningAgent : IAsyncDisposable, IDisposable, IListeningAgent
 
     public async ValueTask DisposeAsync()
     {
+        if (_disposed)
+            return;
+        _disposed = true;
+
         _restarter?.SafeDispose();
         _backPressureAgent?.SafeDispose();
+        stopInboxRecovery();
 
         if (Listener != null)
         {
@@ -106,9 +133,15 @@ public class ListeningAgent : IAsyncDisposable, IDisposable, IListeningAgent
 
     public void Dispose()
     {
+        if (_disposed)
+            return;
+        _disposed = true;
+
         _receiver?.Dispose();
         _circuitBreaker?.SafeDisposeSynchronously();
         _backPressureAgent?.SafeDispose();
+        stopInboxRecovery();
+        _semaphore.Dispose();
     }
 
     public int QueueCount => _receiver is ILocalQueue q ? q.QueueCount : 0;
@@ -213,7 +246,11 @@ public class ListeningAgent : IAsyncDisposable, IDisposable, IListeningAgent
     /// </summary>
     private async ValueTask StopAndDrainCoreAsync(bool latchBeforeDrain)
     {
-        if (Status == ListeningStatus.Stopped || Status == ListeningStatus.GloballyLatched)
+        // GH-3590. Always tear the loop down first -- StartAsync() rebuilds it when this listener becomes
+        // the active one again.
+        stopInboxRecovery();
+
+        if (Status is ListeningStatus.Stopped or ListeningStatus.GloballyLatched or ListeningStatus.Paused)
         {
             return;
         }
@@ -283,6 +320,20 @@ public class ListeningAgent : IAsyncDisposable, IDisposable, IListeningAgent
         await _runtime.Observer.ListenerLatched(Endpoint);
     }
 
+    public async ValueTask RestartAsync(bool force = true)
+    {
+        if (force)
+        {
+            // Tear the listener down even when Status still reports Accepting — the underlying transport channel
+            // may be dead while the orchestration status is stale (the #3171-class state, or anything the framework
+            // can't self-heal). StopAndDrainAsync sets Status to Stopped, so the StartAsync() below is no longer a
+            // no-op and fully rebuilds the listener.
+            await StopAndDrainAsync();
+        }
+
+        await StartAsync();
+    }
+
     public async ValueTask StartAsync()
     {
         if (Status == ListeningStatus.Accepting)
@@ -316,11 +367,7 @@ public class ListeningAgent : IAsyncDisposable, IDisposable, IListeningAgent
                  && !Endpoint.UsedInShardedTopology
                  && Endpoint.Uri.Scheme != "local")
         {
-            _receiver = new GlobalPartitionedInterceptor(
-                _receiver,
-                new Runtime.MessageBus(_runtime),
-                _runtime.Options.MessagePartitioning.GlobalPartitionedTopologies,
-                _logger);
+            _receiver = new GlobalPartitionedInterceptor(_receiver, _runtime);
         }
 
         if (Endpoint.ListenerCount > 1)
@@ -344,19 +391,53 @@ public class ListeningAgent : IAsyncDisposable, IDisposable, IListeningAgent
 
         _logger.LogInformation("Started message listening at {Uri}", Uri);
 
+        startInboxRecoveryIfNecessary();
+    }
+
+    /// <summary>
+    /// GH-3590: a durable listener that is only ever active on a single node (Exclusive or PinnedToLeader) can
+    /// not rely on the per-database durability agent to recover its dormant inbox messages, because that agent
+    /// is assigned per database and routinely lands on a different node. Such a listener owns its own inbox
+    /// recovery for as long as it is the active listener.
+    /// </summary>
+    private void startInboxRecoveryIfNecessary()
+    {
+        if (Endpoint.Mode != EndpointMode.Durable) return;
+        if (Endpoint.ListenerScope == ListenerScope.CompetingConsumers) return;
+        if (!_runtime.Options.Durability.DurabilityAgentEnabled) return;
+        if (_runtime.Storage is NullMessageStore) return;
+
+        _inboxRecovery?.SafeDispose();
+        _inboxRecovery = new ListenerInboxRecoveryLoop(_runtime, this, _logger);
+    }
+
+    private void stopInboxRecovery()
+    {
+        _inboxRecovery?.SafeDispose();
+        _inboxRecovery = null;
     }
 
     public async ValueTask PauseAsync(TimeSpan pauseTime)
     {
+        // Do NOT pre-latch the receiver here. PauseAsync may be called from within the
+        // handler pipeline (e.g. via RateLimitContinuation → PauseListenerContinuation).
+        // Pre-latching causes DrainAsync to wait for the ActionBlock to drain, which
+        // deadlocks because the current message's execute frame is still on the call stack.
+        await PauseCoreAsync(pauseTime, latchBeforeDrain: false);
+    }
+
+    public async ValueTask PauseWithDrainAsync(TimeSpan pauseTime)
+    {
+        // Safe to fully drain here: this method is called from background threads
+        // (circuit breaker), never from within the handler pipeline call stack.
+        await PauseCoreAsync(pauseTime, latchBeforeDrain: true);
+    }
+
+    private async ValueTask PauseCoreAsync(TimeSpan pauseTime, bool latchBeforeDrain)
+    {
         try
         {
-            using var activity = WolverineTracing.ActivitySource.StartActivity(WolverineTracing.PausingListener);
-            activity?.SetTag(WolverineTracing.EndpointAddress, Uri);
-            // Do NOT pre-latch the receiver here. PauseAsync may be called from within the
-            // handler pipeline (e.g. via RateLimitContinuation → PauseListenerContinuation).
-            // Pre-latching causes DrainAsync to wait for the ActionBlock to drain, which
-            // deadlocks because the current message's execute frame is still on the call stack.
-            await StopAndDrainCoreAsync(latchBeforeDrain: false);
+            await StopAndDrainCoreAsync(latchBeforeDrain);
         }
         catch (Exception e)
         {
@@ -365,8 +446,14 @@ public class ListeningAgent : IAsyncDisposable, IDisposable, IListeningAgent
 
         _circuitBreaker?.Reset();
 
+        // GH-3832 — a deliberate pause is not the same state as merely stopped, and not the same
+        // as a back-pressure TooBusy latch. Both recover on their own, but on different triggers:
+        // this one on the Restarter installed below, TooBusy only once the queue drains. Keeping
+        // them distinct is what lets BackPressureAgent leave a paused listener alone.
+        Status = ListeningStatus.Paused;
+
         _logger.LogInformation("Pausing message listening at {Uri}", Uri);
-        _runtime.Tracker.Publish(new ListenerState(Uri, Endpoint.EndpointName, ListeningStatus.Stopped));
+        _runtime.Tracker.Publish(new ListenerState(Uri, Endpoint.EndpointName, ListeningStatus.Paused));
         _restarter = new Restarter(this, pauseTime);
     }
 
@@ -486,6 +573,7 @@ internal class Restarter : IDisposable
     public void Dispose()
     {
         _cancellation.Cancel();
+        _cancellation.Dispose();
         _task.SafeDispose();
     }
 }
@@ -531,6 +619,7 @@ internal class InboxHealthRestarter : IDisposable
     public void Dispose()
     {
         _cancellation.Cancel();
+        _cancellation.Dispose();
         _task.SafeDispose();
     }
 }

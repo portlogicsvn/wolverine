@@ -1,8 +1,6 @@
 using JasperFx.Core;
 using Microsoft.Extensions.Hosting;
 using Shouldly;
-using Wolverine.AzureServiceBus.Internal;
-using Wolverine.Configuration;
 using Wolverine.Tracking;
 using Xunit;
 
@@ -12,7 +10,7 @@ public class end_to_end_with_CloudEvents : IAsyncLifetime
 {
     private IHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -48,7 +46,7 @@ public class end_to_end_with_CloudEvents : IAsyncLifetime
             }).StartAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _host.StopAsync();
         _host.Dispose();
@@ -62,7 +60,7 @@ public class end_to_end_with_CloudEvents : IAsyncLifetime
 
         var session = await _host.TrackActivity()
             .IncludeExternalTransports()
-            .Timeout(5.Minutes())
+            .Timeout(30.Seconds())
             .SendMessageAndWaitAsync(message);
 
         session.Received.SingleMessage<AsbMessage1>()

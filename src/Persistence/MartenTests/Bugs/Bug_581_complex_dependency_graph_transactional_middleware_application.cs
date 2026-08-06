@@ -12,8 +12,7 @@ using Wolverine.Marten.Persistence.Sagas;
 using Wolverine.Runtime;
 using Wolverine.Runtime.Handlers;
 using Wolverine.Tracking;
-using Xunit.Abstractions;
-
+using Xunit;
 namespace MartenTests.Bugs;
 
 public class Bug_581_complex_dependency_graph_transactional_middleware_application : PostgresqlContext
@@ -31,6 +30,10 @@ public class Bug_581_complex_dependency_graph_transactional_middleware_applicati
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery()
+                    .IncludeType(typeof(CreateUserHandler))
+                    .IncludeType(typeof(CreateUser2Handler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Services.AddMarten(m =>
                 {
                     m.Connection(Servers.PostgresConnectionString);
@@ -44,7 +47,7 @@ public class Bug_581_complex_dependency_graph_transactional_middleware_applicati
 
                 opts.Policies.ForMessagesOfType<CreateUser2>()
                     .AddMiddleware<DoSomethingWithMartenMiddleware>();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var runtime = host.GetRuntime();
         var handlers = runtime.Handlers;

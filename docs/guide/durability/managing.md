@@ -5,7 +5,7 @@ Wolverine will automatically check for the existence of necessary database table
 configured message storage, and will also apply any necessary database changes to comply with the configuration automatically.
 :::
 
-Wolverine uses the [Oakton "Stateful Resource"](https://jasperfx.github.io/oakton/guide/host/resources.html) model for managing
+Wolverine uses the [JasperFx "Stateful Resource"](https://github.com/JasperFx/jasperfx) model for managing
 infrastructure configuration at development or even deployment time for configured items like the database-backed message storage or
 message broker queues.
 
@@ -24,8 +24,18 @@ using var host = await Host.CreateDefaultBuilder()
         opts.AutoBuildMessageStorageOnStartup = AutoCreate.None;
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/DisablingStorageConstruction.cs#L11-L21' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_disable_auto_build_envelope_storage' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/DisablingStorageConstruction.cs#L11-L20' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_disable_auto_build_envelope_storage' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
+
+::: tip
+Disabling the automatic migration only affects the *passive* paths — host startup and tenant store discovery. An
+explicit setup operation (`dotnet run -- resources setup` or `IHost.SetupResources()`) is treated as intent to
+provision the storage, so it always applies the message storage migration as `CreateOrUpdate` — even when
+`AutoBuildMessageStorageOnStartup` or the store's `AutoCreate` is `None`. `CreateOrUpdate` never drops existing
+data. This is the recommended production recipe: disable automatic migrations, then run `resources setup` as an
+explicit deployment step. When a schema difference is detected at runtime but `AutoCreate` is `None`, Wolverine
+now logs a warning telling you the storage is out of date instead of silently skipping the migration.
+:::
 
 ## Programmatic Management
 
@@ -61,9 +71,20 @@ public static async Task testing_setup_or_teardown(IHost host)
     await store.Admin.ClearAllAsync();
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/PersistenceTests/Samples/DocumentationSamples.cs#L21-L49' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_programmatic_management_of_message_storage' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/PersistenceTests/Samples/DocumentationSamples.cs#L22-L49' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_programmatic_management_of_message_storage' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
+::: tip
+`RebuildAsync()` and `ClearAllAsync()` operate on **envelope storage only** — the incoming, outgoing,
+and dead letter tables. They deliberately do not touch the tables owned by a
+[database-backed queue transport](/guide/messaging/transports/postgresql), because those are transport
+data rather than envelope storage, and the right scope is genuinely ambiguous per provider (SQL Server's
+rate-limit table, for instance, is registered the same way but has to survive a reset).
+
+If you want the whole Wolverine storage footprint wiped between integration test runs, use
+`IHost.ClearAllWolverineStorageAsync()` instead — see
+[Resetting All Wolverine Storage in Tests](/guide/testing.html#resetting-all-wolverine-storage-in-tests).
+:::
 
 ## Building Storage on Startup
 
@@ -75,13 +96,13 @@ To have any missing database schema objects built as needed on application start
 // This is rebuilding the persistent storage database schema on startup
 builder.Host.UseResourceSetupOnStartup();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/EFCoreSample/ItemService/Program.cs#L55-L60' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_resource_setup_on_startup' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/EFCoreSample/ItemService/Program.cs#L68-L72' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_resource_setup_on_startup' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Command Line Management
 
-Assuming that you are using [Oakton](https://jasperfx.github.io/oakton) as your command line parser in your Wolverine application as
-shown in this last line of a .NET 6/7 `Program` code file:
+Assuming that you are using [JasperFx](https://github.com/JasperFx/jasperfx) as your command line parser in your Wolverine application as
+shown in this last line of a `Program` code file:
 
 <!-- snippet: sample_using_jasperfx_for_command_line_parsing -->
 <a id='snippet-sample_using_jasperfx_for_command_line_parsing'></a>
@@ -89,7 +110,7 @@ shown in this last line of a .NET 6/7 `Program` code file:
 // Opt into using JasperFx for command parsing
 await app.RunJasperFxCommands(args);
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/EFCoreSample/ItemService/Program.cs#L85-L90' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_jasperfx_for_command_line_parsing' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/EFCoreSample/ItemService/Program.cs#L95-L99' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_jasperfx_for_command_line_parsing' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 And you're using the message persistence from either the `WolverineFx.SqlServer` or `WolverineFx.Postgresql`
@@ -106,6 +127,7 @@ The available commands are:
   db-apply    Applies all outstanding changes to the database(s) based on the current configuration
   db-assert   Assert that the existing database(s) matches the current configuration
   db-dump     Dumps the entire DDL for the configured Marten database
+  db-list     List all the databases as configured for this application
   db-patch    Evaluates the current configuration against the database and writes a patch and drop file if there are
               any differences
   describe    Writes out a description of your running application to either the console or a file
@@ -115,13 +137,24 @@ The available commands are:
   storage     Administer the envelope storage
 ```
 
-There's admittedly some duplication here with different options coming from [Oakton](https://jasperfx.github.io/oakton) itself, the [Weasel.CommandLine](https://github.com/JasperFx/weasel) library,
+There's admittedly some duplication here with different options coming from [JasperFx](https://github.com/JasperFx/jasperfx) itself, the [Weasel.CommandLine](https://weasel.jasperfx.net/cli/) library,
 and the `storage` command from Wolverine itself. To build out the schema objects for [message persistence](/guide/durability/), you
 can use this command to apply any outstanding database changes necessary to bring the database schema to the Wolverine configuration:
 
 ```bash
 dotnet run -- db-apply
 ```
+
+::: info
+The `db-apply`, `db-assert`, `db-patch`, `db-dump`, and `db-list` commands come from Weasel. See the per-command references at:
+
+- [`db-apply`](https://weasel.jasperfx.net/cli/db-apply.html) — apply all outstanding changes to the configured database(s)
+- [`db-assert`](https://weasel.jasperfx.net/cli/db-assert.html) — assert the live schema matches the configuration (good for CI deploy gates)
+- [`db-patch`](https://weasel.jasperfx.net/cli/db-patch.html) — emit a SQL patch + rollback file for pending changes
+- [`db-dump`](https://weasel.jasperfx.net/cli/db-dump.html) — dump the full DDL for the configured database(s)
+- [`db-list`](https://weasel.jasperfx.net/cli/db-list.html) — list configured databases
+:::
+
 > NOTE: See the [Exporting SQL Scripts](#exporting-sql-scripts) section down the page for details of applying migrations when integrating with Marten
 
 or this option -- but just know that this will also clear out any existing message data:
@@ -209,5 +242,5 @@ using var host = await AlbaHost.For<WolverineWebApi.Program>(builder =>
     });
 });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/Wolverine.Http.Tests/bootstrap_with_no_persistence.cs#L14-L26' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_bootstrap_with_no_persistence' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/Wolverine.Http.Tests/bootstrap_with_no_persistence.cs#L14-L25' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_bootstrap_with_no_persistence' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->

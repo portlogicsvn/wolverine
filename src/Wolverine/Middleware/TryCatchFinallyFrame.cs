@@ -1,9 +1,11 @@
-using System.Reflection;
 using JasperFx;
 using JasperFx.CodeGeneration;
 using JasperFx.CodeGeneration.Frames;
 using JasperFx.CodeGeneration.Model;
 using JasperFx.Core.Reflection;
+using System.Diagnostics.CodeAnalysis;
+using System.Reflection;
+using Wolverine.Configuration;
 
 namespace Wolverine.Middleware;
 
@@ -12,6 +14,10 @@ namespace Wolverine.Middleware;
 /// Catch blocks are ordered by exception type specificity (most derived first).
 /// Finally blocks execute cleanup code regardless of exceptions.
 /// </summary>
+[FSharpEmit(Skip = true,
+    Reason = "Imperatively rewires child frames' Next pointers and renders multiple inheritance-ordered " +
+             "catch blocks; porting to F#'s try/with-as-an-expression model is deferred past Phase A. " +
+             "Unreachable in a minimal in-process F# handler chain.")]
 public class TryCatchFinallyFrame : Frame
 {
     private readonly List<CatchBlock> _catchBlocks = [];
@@ -37,7 +43,7 @@ public class TryCatchFinallyFrame : Frame
 
     private void SortCatchBlocks()
     {
-        // Sort by inheritance depth descending — most specific exception types first
+        // Sort by inheritance depth descending - most specific exception types first
         _catchBlocks.Sort((a, b) => InheritanceDepth(b.ExceptionType).CompareTo(InheritanceDepth(a.ExceptionType)));
     }
 
@@ -114,7 +120,7 @@ public class TryCatchFinallyFrame : Frame
             {
                 foreach (var variable in frame.FindVariables(wrappedChain))
                 {
-                    // Skip the exception variable itself — it's provided by the catch clause
+                    // Skip the exception variable itself - it's provided by the catch clause
                     if (variable == catchBlock.ExceptionVariable) continue;
                     yield return variable;
                 }
@@ -174,7 +180,7 @@ internal class CatchBlockMethodVariables : IMethodVariables
         return _inner.FindVariableByName(dependency, name);
     }
 
-    public bool TryFindVariableByName(Type dependency, string name, out Variable? variable)
+    public bool TryFindVariableByName(Type dependency, string name, [NotNullWhen(true)] out Variable? variable)
     {
         if (name == _exceptionVariable.Usage &&
             (dependency == _exceptionVariable.VariableType || dependency.IsAssignableFrom(_exceptionVariable.VariableType)))

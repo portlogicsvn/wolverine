@@ -2,11 +2,15 @@ using JasperFx.Core;
 using JasperFx.Core.Reflection;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging.Abstractions;
 using JasperFx.Resources;
+using NSubstitute;
 using Shouldly;
 using Wolverine.Persistence.Durability;
 using Wolverine.Persistence.Durability.DeadLetterManagement;
 using Wolverine.Persistence.Durability.ScheduledMessageManagement;
+using Wolverine.RDBMS;
+using Wolverine.Runtime;
 using Wolverine.Runtime.Agents;
 using Wolverine.Transports;
 using Xunit;
@@ -20,7 +24,7 @@ public abstract class MessageStoreCompliance : IAsyncLifetime
     
     public abstract Task<IHost> BuildCleanHost();
     
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         theHost = await BuildCleanHost();
 
@@ -29,7 +33,7 @@ public abstract class MessageStoreCompliance : IAsyncLifetime
         thePersistence = theHost.Services.GetRequiredService<IMessageStore>();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await theHost.StopAsync();
         theHost.Dispose();
@@ -156,6 +160,35 @@ public abstract class MessageStoreCompliance : IAsyncLifetime
         {
             await thePersistence.Inbox.StoreIncomingAsync(envelope);
         });
+    }
+
+    [Fact]
+    public async Task bulk_store_intra_batch_duplicate_reports_only_actual_duplicates()
+    {
+        var existing = ObjectMother.Envelope();
+        existing.Destination = new Uri("stub://incoming-bulk-dup");
+        existing.Status = EnvelopeStatus.Incoming;
+        await thePersistence.Inbox.StoreIncomingAsync(existing);
+
+        var fresh1 = ObjectMother.Envelope();
+        fresh1.Destination = existing.Destination;
+        fresh1.Status = EnvelopeStatus.Incoming;
+
+        var fresh2 = ObjectMother.Envelope();
+        fresh2.Destination = existing.Destination;
+        fresh2.Status = EnvelopeStatus.Incoming;
+
+        var batch = new[] { fresh1, existing, fresh2 };
+
+        var ex = await Should.ThrowAsync<DuplicateIncomingEnvelopeException>(
+            () => thePersistence.Inbox.StoreIncomingAsync(batch));
+
+        // Only the actually-existing envelope is reported as a duplicate.
+        // Fresh envelopes must NOT appear in Duplicates — otherwise DurableReceiver
+        // would route them straight to listener.CompleteAsync and the handler would
+        // never run for legitimate messages.
+        ex.Duplicates.Count.ShouldBe(1);
+        ex.Duplicates.Single().Id.ShouldBe(existing.Id);
     }
 
     [Fact]
@@ -1033,5 +1066,227 @@ public abstract class MessageStoreCompliance : IAsyncLifetime
         stored.ExceptionMessage.ShouldBe("Kaboom!");
         stored.ExceptionType.ShouldBe(typeof(DivideByZeroException).FullName);
     }
+
+    /// <summary>
+    /// Contract test for https://github.com/JasperFx/wolverine/issues/2576.
+    ///
+    /// When a scheduled message is loaded from a store via
+    /// <see cref="IMessageDatabase.PollForScheduledMessagesAsync"/>, the
+    /// resulting in-memory envelope passed to
+    /// <see cref="IWolverineRuntime.EnqueueDirectlyAsync"/> must have its
+    /// <c>Store</c> property stamped with the originating store. Without this,
+    /// downstream pipeline components (DelegatingMessageInbox,
+    /// DurableReceiver._markAsHandled, FlushOutgoingMessagesOnCommit) cannot
+    /// route their writes back to the correct store, and ancillary-store rows
+    /// get stuck in <c>Incoming</c> status forever because the
+    /// "mark as handled" SQL targets the main store instead.
+    /// </summary>
+    [Fact]
+    public virtual async Task scheduled_poll_stamps_envelope_with_originating_store()
+    {
+        if (thePersistence is not IMessageDatabase database)
+        {
+            // Non-database stores (e.g. RavenDb, CosmosDb) wire scheduled
+            // dispatch through their own durability agents, not through
+            // PollForScheduledMessagesAsync. Skip this contract there.
+            return;
+        }
+
+        // Persist a scheduled envelope into this store's incoming table.
+        var envelope = ObjectMother.Envelope();
+        envelope.Status = EnvelopeStatus.Incoming;
+        envelope.ScheduledTime = DateTimeOffset.UtcNow.AddMinutes(-1); // already due
+        await thePersistence.Inbox.StoreIncomingAsync(envelope);
+        await thePersistence.Inbox.ScheduleExecutionAsync(envelope);
+
+        // Spy runtime that captures whatever PollForScheduledMessagesAsync
+        // hands to EnqueueDirectlyAsync.
+        var capturedEnvelopes = new List<Envelope>();
+        var spyRuntime = Substitute.For<IWolverineRuntime>();
+        spyRuntime
+            .EnqueueDirectlyAsync(Arg.Do<IReadOnlyList<Envelope>>(es => capturedEnvelopes.AddRange(es)))
+            .Returns(ValueTask.CompletedTask);
+
+        var durabilitySettings = theHost.Services.GetRequiredService<DurabilitySettings>();
+
+        await database.PollForScheduledMessagesAsync(
+            spyRuntime, NullLogger.Instance, durabilitySettings, CancellationToken.None);
+
+        capturedEnvelopes.ShouldNotBeEmpty(
+            "Expected the just-scheduled envelope to be picked up by the poller.");
+
+        var captured = capturedEnvelopes.SingleOrDefault(x => x.Id == envelope.Id);
+        captured.ShouldNotBeNull(
+            "Expected the polled envelope to match the one we scheduled.");
+
+        captured.Store.ShouldBe(thePersistence,
+            "Polled envelopes must be stamped with the store they came from so " +
+            "downstream mark-as-handled / inbox writes route back to the correct store. " +
+            "See GH-2576.");
+    }
+
+    /// <summary>
+    /// Sister contract test to <see cref="scheduled_poll_stamps_envelope_with_originating_store"/>:
+    /// the inbox-recovery path (which DLQ replay funnels through) must stamp
+    /// <c>envelope.Store</c> so downstream mark-as-handled writes route to the
+    /// right database.
+    ///
+    /// Whenever <c>RecoverIncomingMessagesCommand</c> picks up an orphaned
+    /// (<c>owner_id == AnyNode</c>) envelope via
+    /// <see cref="IMessageStore.LoadPageOfGloballyOwnedIncomingAsync"/>, it
+    /// applies <c>envelope.Store ??= _store</c>. Without that stamp, an
+    /// ancillary-owned envelope would be marked Handled in the main store and
+    /// stay stuck Incoming. The existing fix lives at
+    /// <c>RecoverIncomingMessagesCommand:48</c>; this test pins the behavior
+    /// down so the GH-2576 fix doesn't accidentally regress it.
+    ///
+    /// The DLQ replay flow is one producer of orphaned-incoming rows (via
+    /// <c>MoveReplayableErrorMessagesToIncomingOperation</c>), but durability
+    /// also generates them when nodes crash mid-handle. We exercise the
+    /// recovery contract directly by persisting an envelope with
+    /// <c>OwnerId == AnyNode</c>, sidestepping any database-specific quirks
+    /// in the move-from-dead-letter SQL.
+    /// </summary>
+    [Fact]
+    public virtual async Task orphaned_incoming_recovery_stamps_envelope_with_originating_store()
+    {
+        if (thePersistence is not IMessageDatabase)
+        {
+            return;
+        }
+
+        // Persist an envelope as if a previous owner crashed mid-handle —
+        // status Incoming, owner_id == AnyNode marks it as orphaned and
+        // visible to LoadPageOfGloballyOwnedIncomingAsync.
+        var envelope = ObjectMother.Envelope();
+        envelope.Status = EnvelopeStatus.Incoming;
+        envelope.OwnerId = TransportConstants.AnyNode;
+        await thePersistence.Inbox.StoreIncomingAsync(envelope);
+
+        // Recovery loop reads the orphaned incoming envelopes back into memory.
+        var recovered = await thePersistence.LoadPageOfGloballyOwnedIncomingAsync(
+            envelope.Destination!, 100);
+
+        recovered.ShouldNotBeEmpty(
+            "Expected the orphaned envelope to be visible to the recovery loader.");
+
+        var match = recovered.SingleOrDefault(x => x.Id == envelope.Id);
+        match.ShouldNotBeNull("Expected the recovered envelope to match the one we persisted.");
+
+        // RecoverIncomingMessagesCommand applies envelope.Store ??= _store
+        // immediately after this load. Simulate that step here so the contract
+        // test captures what the runtime path actually guarantees.
+        foreach (var e in recovered)
+        {
+            e.Store ??= thePersistence;
+        }
+
+        match.Store.ShouldBe(thePersistence,
+            "Recovered envelopes must carry their originating store so " +
+            "mark-as-handled SQL targets the right database. See GH-2318 / GH-2576.");
+    }
+
+    #region IListenerStore compliance — see GH-2685
+
+    /// <summary>
+    /// Provider opts into the dynamic-listener registry by setting
+    /// <c>Durability.EnableDynamicListeners = true</c> in its <see cref="BuildCleanHost"/>.
+    /// Tests below short-circuit when <c>Listeners</c> is the no-op store so providers
+    /// can adopt the contract incrementally — once a provider opts in, the same suite
+    /// validates real persistence end-to-end.
+    /// </summary>
+    private bool listenersAreSupported => thePersistence.Listeners is not NullListenerStore;
+
+    [Fact]
+    public async Task all_listeners_returns_empty_on_a_clean_store()
+    {
+        if (!listenersAreSupported) return;
+
+        var listeners = await thePersistence.Listeners.AllListenersAsync();
+        listeners.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task register_listener_persists_uri()
+    {
+        if (!listenersAreSupported) return;
+
+        var uri = new Uri("mqtt://topic/devices/foo/status");
+        await thePersistence.Listeners.RegisterListenerAsync(uri);
+
+        var all = await thePersistence.Listeners.AllListenersAsync();
+        all.ShouldContain(uri);
+    }
+
+    [Fact]
+    public async Task register_listener_is_idempotent()
+    {
+        if (!listenersAreSupported) return;
+
+        var uri = new Uri("mqtt://topic/devices/dup");
+        await thePersistence.Listeners.RegisterListenerAsync(uri);
+        await thePersistence.Listeners.RegisterListenerAsync(uri); // no-op, no exception
+
+        var all = await thePersistence.Listeners.AllListenersAsync();
+        all.Count(x => x == uri).ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task remove_listener_removes_the_uri()
+    {
+        if (!listenersAreSupported) return;
+
+        var uri = new Uri("mqtt://topic/devices/removable");
+        await thePersistence.Listeners.RegisterListenerAsync(uri);
+        await thePersistence.Listeners.RemoveListenerAsync(uri);
+
+        var all = await thePersistence.Listeners.AllListenersAsync();
+        all.ShouldNotContain(uri);
+    }
+
+    [Fact]
+    public async Task remove_listener_is_idempotent_on_unknown_uri()
+    {
+        if (!listenersAreSupported) return;
+
+        // Should not throw — the registry tolerates removing a uri that was
+        // never registered (matches the "register then crash mid-handler"
+        // recovery shape the runtime API depends on).
+        await thePersistence.Listeners.RemoveListenerAsync(new Uri("mqtt://topic/never-registered"));
+    }
+
+    [Fact]
+    public async Task register_then_remove_then_re_register_works()
+    {
+        if (!listenersAreSupported) return;
+
+        var uri = new Uri("mqtt://topic/devices/cycle");
+        await thePersistence.Listeners.RegisterListenerAsync(uri);
+        await thePersistence.Listeners.RemoveListenerAsync(uri);
+        await thePersistence.Listeners.RegisterListenerAsync(uri);
+
+        var all = await thePersistence.Listeners.AllListenersAsync();
+        all.ShouldContain(uri);
+    }
+
+    [Fact]
+    public async Task all_listeners_includes_every_registered_uri()
+    {
+        if (!listenersAreSupported) return;
+
+        var a = new Uri("mqtt://topic/a");
+        var b = new Uri("mqtt://topic/b");
+        var c = new Uri("mqtt://topic/c");
+        await thePersistence.Listeners.RegisterListenerAsync(a);
+        await thePersistence.Listeners.RegisterListenerAsync(b);
+        await thePersistence.Listeners.RegisterListenerAsync(c);
+
+        var all = await thePersistence.Listeners.AllListenersAsync();
+        all.ShouldContain(a);
+        all.ShouldContain(b);
+        all.ShouldContain(c);
+    }
+
+    #endregion
 
 }

@@ -23,7 +23,7 @@ public class routing_rules
     public async Task local_routing_is_applied_automatically()
     {
         using var host = await Host.CreateDefaultBuilder()
-            .UseWolverine().StartAsync();
+            .UseWolverine().StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var bus = host.MessageBus();
         bus.PreviewSubscriptions(new BlueMessage())
@@ -34,7 +34,7 @@ public class routing_rules
     public async Task create_descriptor()
     {
         using var host = await Host.CreateDefaultBuilder()
-            .UseWolverine().StartAsync();
+            .UseWolverine().StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var runtime = host.GetRuntime();
 
@@ -52,7 +52,7 @@ public class routing_rules
             .UseWolverine(opts =>
             {
                 opts.Policies.DisableConventionalLocalRouting();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var bus = host.MessageBus();
         bus.PreviewSubscriptions(new BlueMessage())
@@ -63,7 +63,7 @@ public class routing_rules
     public async Task respect_local_queue()
     {
         using var host = await Host.CreateDefaultBuilder()
-            .UseWolverine().StartAsync();
+            .UseWolverine().StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var bus = host.MessageBus();
         bus.PreviewSubscriptions(new GreenMessage())
@@ -80,7 +80,7 @@ public class routing_rules
             .UseWolverine(opts =>
             {
                 opts.PublishMessage<BlueMessage>().ToLocalQueue("purple");
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var bus = host.MessageBus();
         bus.PreviewSubscriptions(new BlueMessage())
@@ -94,14 +94,13 @@ public class routing_rules
             .UseWolverine(opts =>
             {
                 opts.PublishMessage<BlueMessage>().ToLocalQueue("purple");
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
         
         host.GetRuntime().Options.HandlerGraph.AllMessageTypes().ShouldContain(typeof(BlueMessage));
     }
 
     #region sample_using_preview_subscriptions
-
-    public static void using_preview_subscriptions(IMessageBus bus)
+    private static void using_preview_subscriptions(IMessageBus bus)
     {
         // Preview where Wolverine is wanting to send a message
         var outgoing = bus.PreviewSubscriptions(new BlueMessage());
@@ -124,7 +123,7 @@ public class routing_rules
             .UseWolverine(opts =>
             {
                 opts.PublishMessage<BlueMessage>().ToPort(port);
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var bus = host.MessageBus();
         bus.PreviewSubscriptions(new BlueMessage())
@@ -147,7 +146,7 @@ public class routing_rules
             .UseWolverine(opts =>
             {
                 opts.RouteWith(convention);
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var bus = host.MessageBus();
         bus.PreviewSubscriptions(new BlueMessage())
@@ -170,7 +169,7 @@ public class routing_rules
             .UseWolverine(opts =>
             {
                 opts.RouteWith(convention);
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var bus = host.MessageBus();
         bus.PreviewSubscriptions(new RedMessage())
@@ -181,7 +180,7 @@ public class routing_rules
     public async Task use_local_invoker_if_local_exists()
     {
         using var host = await Host.CreateDefaultBuilder()
-            .UseWolverine().StartAsync();
+            .UseWolverine().StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var collection = host.Services.GetRequiredService<IWolverineRuntime>();
         var local = collection.FindInvoker(typeof(BlueMessage)).ShouldBeOfType<Wolverine.Runtime.Handlers.Executor>();
@@ -198,7 +197,7 @@ public class routing_rules
             .UseWolverine(opts =>
             {
                 opts.PublishMessage<RedMessage>().ToPort(port);
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var collection = host.Services.GetRequiredService<IWolverineRuntime>();
         var local = collection.FindInvoker(typeof(BlueMessage)).ShouldBeOfType<Wolverine.Runtime.Handlers.Executor>();
@@ -215,7 +214,7 @@ public class routing_rules
             .UseWolverine(opts =>
             {
                 opts.PublishMessage<RedMessage>().ToPort(port);
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var collection = host.Services.GetRequiredService<IWolverineRuntime>();
         var remote = collection.FindInvoker(typeof(RedMessage)).ShouldBeOfType<MessageRoute>();
@@ -231,7 +230,7 @@ public class routing_rules
             .UseWolverine(opts =>
             {
 
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var collection = host.Services.GetRequiredService<IWolverineRuntime>();
         collection.FindInvoker(typeof(RedMessage))
@@ -249,7 +248,7 @@ public class routing_rules
                 //opts.Discovery.IncludeAssembly(typeof(Module2Message1).Assembly);
                 opts.Publish().MessagesFromAssembly(typeof(Module2Message1).Assembly).ToPort(port);
 
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
         
         var bus = host.MessageBus();
         var envelopes = bus.PreviewSubscriptions(new Module2Message1());
@@ -266,7 +265,7 @@ public class routing_rules
             {
                 opts.PublishMessage<GroupedMessage>().ToPort(port);
                 opts.MessagePartitioning.ByMessage<GroupedMessage>(x => x.GroupId);
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
         
                 
         var bus = host.MessageBus();

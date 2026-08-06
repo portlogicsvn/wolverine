@@ -13,14 +13,14 @@ public class RabbitMqTransportFixture : TransportComplianceFixture, IAsyncLifeti
     {
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         var queueName = RabbitTesting.NextQueueName();
         OutboundAddress = $"rabbitmq://queue/{queueName}".ToUri();
 
         await SenderIs(opts =>
         {
-            var listener = $"listener{RabbitTesting.Number}";
+            var listener = RabbitTesting.NextListenerName();
 
             opts.Durability.Mode = DurabilityMode.Solo;
 
@@ -61,10 +61,6 @@ public class RabbitMqTransportFixture : TransportComplianceFixture, IAsyncLifeti
         });
     }
 
-    public new async Task DisposeAsync()
-    {
-        await base.DisposeAsync();
-    }
 }
 
 public class durable_compliance : TransportCompliance<RabbitMqTransportFixture>;

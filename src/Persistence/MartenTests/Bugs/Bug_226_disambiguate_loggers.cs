@@ -9,7 +9,6 @@ using Microsoft.Extensions.Logging;
 using Wolverine;
 using Wolverine.Configuration;
 using Wolverine.Marten;
-using Wolverine.Runtime;
 using Wolverine.Runtime.Handlers;
 using Wolverine.Tracking;
 
@@ -29,8 +28,14 @@ public class Bug_226_disambiguate_loggers : PostgresqlContext
                 services.AddMarten(Servers.PostgresConnectionString)
                     .IntegrateWithWolverine();
             })
-            .UseWolverine(opts => { opts.Policies.Add<RequiringLoggerPolicy>(); })
-            .StartAsync();
+            .UseWolverine(opts => 
+            { 
+                opts.Policies.Add<RequiringLoggerPolicy>();
+                opts.Discovery.DisableConventionalDiscovery()
+                    .IncludeType<StoreSomethingHandler>();
+                opts.Durability.Mode = DurabilityMode.Solo;
+            })
+            .StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var id = Guid.NewGuid();
 

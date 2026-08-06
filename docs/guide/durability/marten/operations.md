@@ -13,7 +13,7 @@ model when using Marten~~~~ with Wolverine.
 The `Wolverine.Marten` library includes some helpers for Wolverine [side effects](/guide/handlers/side-effects) using
 Marten with the `IMartenOp` interface:
 
-<!-- snippet: sample_IMartenOp -->
+<!-- snippet: sample_imartenop -->
 <a id='snippet-sample_imartenop'></a>
 ```cs
 /// <summary>
@@ -24,7 +24,7 @@ public interface IMartenOp : ISideEffect
     void Execute(IDocumentSession session);
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/Wolverine.Marten/IMartenOp.cs#L18-L28' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_imartenop' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/Wolverine.Marten/IMartenOp.cs#L19-L28' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_imartenop' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 The built in side effects can all be used from the `MartenOps` static class like this HTTP endpoint example:
@@ -39,11 +39,91 @@ public static IMartenOp Pay([Document] Invoice invoice)
     return MartenOps.Store(invoice);
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/Documents.cs#L43-L52' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_marten_op_from_http_endpoint' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/Documents.cs#L42-L50' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_marten_op_from_http_endpoint' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
-There are existing Marten ops for storing, inserting, updating, and deleting a document. There's also a specific
-helper for starting a new event stream as shown below:
+There are existing Marten ops for storing, inserting, updating, and deleting a document.
+
+### Storing Multiple Documents
+
+Use `MartenOps.StoreMany()` to store multiple documents of the same type, or `MartenOps.StoreObjects()` to store
+multiple documents of different types in a single side effect:
+
+```csharp
+// Store multiple documents of the same type
+public static StoreManyDocs<Invoice> Handle(BatchInvoiceCommand command)
+{
+    var invoices = command.Items.Select(i => new Invoice { Id = i.Id, Amount = i.Amount });
+    return MartenOps.StoreMany(invoices.ToArray());
+}
+
+// Store multiple documents of different types
+public static StoreObjects Handle(CreateOrderCommand command)
+{
+    var order = new Order { Id = command.OrderId, Total = command.Total };
+    var audit = new AuditLog { Action = "OrderCreated", EntityId = command.OrderId };
+    return MartenOps.StoreObjects(order, audit);
+}
+```
+
+Both `StoreMany()` and `StoreObjects()` support fluent `With()` methods to incrementally add documents:
+
+```csharp
+public static StoreObjects Handle(ComplexCommand command)
+{
+    return MartenOps.StoreObjects(new Order { Id = command.OrderId })
+        .With(new AuditLog { Action = "Created" })
+        .With(new Notification { Message = "Order created" });
+}
+```
+
+### Tenant-Scoped Operations
+
+Every `MartenOps` factory method has an overload that accepts a `tenantId` parameter. When provided, the
+operation uses `IDocumentSession.ForTenant(tenantId)` to scope the write to a specific tenant. This is
+useful in multi-tenant systems where a handler processing a message for one tenant needs to write data
+to a different tenant's storage:
+
+```csharp
+// Store a document in a specific tenant
+public static StoreDoc<Invoice> Handle(CreateInvoiceForTenant command)
+{
+    var invoice = new Invoice { Id = command.InvoiceId, Amount = command.Amount };
+    return MartenOps.Store(invoice, command.TenantId);
+}
+
+// Insert a document in a specific tenant
+public static InsertDoc<AuditRecord> Handle(CrossTenantAudit command)
+{
+    var record = new AuditRecord { Action = command.Action };
+    return MartenOps.Insert(record, command.TargetTenantId);
+}
+
+// Delete by id in a specific tenant
+public static DeleteDocById<Invoice> Handle(CancelInvoice command)
+{
+    return MartenOps.Delete<Invoice>(command.InvoiceId, command.TenantId);
+}
+
+// Store many documents in a specific tenant
+public static StoreManyDocs<LineItem> Handle(BatchLineItems command)
+{
+    return MartenOps.StoreMany(command.TenantId, command.Items.ToArray());
+}
+
+// Delete matching documents in a specific tenant
+public static DeleteDocWhere<TempRecord> Handle(CleanupTenant command)
+{
+    return MartenOps.DeleteWhere<TempRecord>(
+        x => x.CreatedAt < DateTimeOffset.UtcNow.AddDays(-30),
+        command.TenantId
+    );
+}
+```
+
+All existing method signatures are unchanged — the tenant overloads are purely additive.
+
+There's also a specific helper for starting a new event stream as shown below:
 
 <!-- snippet: sample_using_start_stream_side_effect -->
 <a id='snippet-sample_using_start_stream_side_effect'></a>
@@ -63,7 +143,7 @@ public static class TodoListEndpoint
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/TodoWebService/TodoWebService/TodoListEndpoint.cs#L15-L32' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_start_stream_side_effect' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/TodoWebService/TodoWebService/TodoListEndpoint.cs#L15-L31' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_start_stream_side_effect' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 The major advantage of using a Marten side effect is to help keep your Wolverine handlers or HTTP endpoints 
@@ -89,7 +169,7 @@ public static IEnumerable<IMartenOp> Handle(AppendManyNamedDocuments command)
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/MartenTests/handler_actions_with_implied_marten_operations.cs#L342-L354' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_ienumerable_of_martenop_as_side_effect' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/MartenTests/handler_actions_with_implied_marten_operations.cs#L349-L360' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_ienumerable_of_martenop_as_side_effect' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Wolverine will pick up on any return type that can be cast to `IEnumerable<IMartenOp>`, so for example:

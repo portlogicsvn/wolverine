@@ -3,6 +3,7 @@ using Raven.Client;
 using Raven.Client.Documents.Operations;
 using Raven.Client.Documents.Queries;
 using Raven.Client.Exceptions;
+using Raven.Client.Exceptions.Documents.Session;
 using Wolverine.Persistence.Durability;
 using Wolverine.Transports;
 
@@ -87,16 +88,47 @@ public partial class RavenDbMessageStore : IMessageInbox
     {
         using var session = _store.OpenAsyncSession();
         session.Advanced.UseOptimisticConcurrency = true;
-        
+
+        try
+        {
+            foreach (var envelope in envelopes)
+            {
+                var incoming = new IncomingMessage(envelope, this);
+                await session.StoreAsync(incoming);
+            }
+
+            await session.SaveChangesAsync();
+        }
+        catch (NonUniqueObjectException)
+        {
+            // Same envelope identity appeared twice in this batch (e.g. broker
+            // redelivery race). Identify which envelopes already exist so
+            // DurableReceiver only completes the actual duplicates and
+            // re-pipelines the fresh ones.
+            throw new DuplicateIncomingEnvelopeException(await findDuplicatesAsync(envelopes));
+        }
+        catch (ConcurrencyException)
+        {
+            // At least one envelope is already in the inbox; same fallback contract.
+            throw new DuplicateIncomingEnvelopeException(await findDuplicatesAsync(envelopes));
+        }
+    }
+
+    private async Task<IReadOnlyList<Envelope>> findDuplicatesAsync(IReadOnlyList<Envelope> envelopes)
+    {
+        var duplicates = new List<Envelope>();
         foreach (var envelope in envelopes)
         {
-            var incoming = new IncomingMessage(envelope, this);
-            await session.StoreAsync(incoming);
+            if (await ExistsAsync(envelope, CancellationToken.None).ConfigureAwait(false))
+            {
+                duplicates.Add(envelope);
+            }
         }
 
-        // It's okay if it does fail here with the duplicate detection, because that
-        // will force the DurableReceiver to try envelope at a time to get at the actual differences
-        await session.SaveChangesAsync();
+        // Backend reported a duplicate but no envelope id matches an existing
+        // row (e.g. intra-batch collision with no prior insert). Surface every
+        // envelope so the per-envelope retry path can sort it out.
+        return duplicates.Count > 0 ? duplicates : envelopes;
     }
 
     public async Task<bool> ExistsAsync(Envelope envelope, CancellationToken cancellation)

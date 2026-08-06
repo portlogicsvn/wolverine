@@ -30,7 +30,7 @@ public class dead_letter_queue_recovery_listener : IAsyncLifetime
     private readonly string _queueName = $"dlq-recovery-{Guid.NewGuid():N}";
     private IHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -59,10 +59,14 @@ public class dead_letter_queue_recovery_listener : IAsyncLifetime
         await _host.ResetResourceState();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
-        _host?.TeardownResources();
-        _host?.Dispose();
+        if (_host != null)
+        {
+            await _host.TeardownResources();
+            await _host.StopAsync();
+            _host.Dispose();
+        }
     }
 
     [Fact]
@@ -89,7 +93,7 @@ public class dead_letter_queue_recovery_listener : IAsyncLifetime
         {
             results = await messageStore.DeadLetters.QueryAsync(query, CancellationToken.None);
             if (results.Envelopes.Any()) break;
-            await Task.Delay(500);
+            await Task.Delay(500, TestContext.Current.CancellationToken);
         }
 
         results.ShouldNotBeNull();
@@ -103,7 +107,6 @@ public class dead_letter_queue_recovery_listener : IAsyncLifetime
     }
 
     [Fact]
-    [Trait("Category", "Flaky")]
     public async Task recovers_multiple_messages()
     {
         // Send messages that will all fail — use the bus directly
@@ -124,7 +127,7 @@ public class dead_letter_queue_recovery_listener : IAsyncLifetime
         {
             results = await messageStore.DeadLetters.QueryAsync(query, CancellationToken.None);
             if (results.Envelopes.Count() >= 3) break;
-            await Task.Delay(2.Seconds());
+            await Task.Delay(2.Seconds(), TestContext.Current.CancellationToken);
         }
 
         results.ShouldNotBeNull();
@@ -142,7 +145,7 @@ public class dead_letter_queue_recovery_with_custom_queues : IAsyncLifetime
     private readonly string _customDlqName = $"custom-dlq-{Guid.NewGuid():N}";
     private IHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -170,10 +173,14 @@ public class dead_letter_queue_recovery_with_custom_queues : IAsyncLifetime
         await _host.ResetResourceState();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
-        _host?.TeardownResources();
-        _host?.Dispose();
+        if (_host != null)
+        {
+            await _host.TeardownResources();
+            await _host.StopAsync();
+            _host.Dispose();
+        }
     }
 
     [Fact]
@@ -195,7 +202,7 @@ public class dead_letter_queue_recovery_with_custom_queues : IAsyncLifetime
         {
             results = await messageStore.DeadLetters.QueryAsync(query, CancellationToken.None);
             if (results.Envelopes.Any()) break;
-            await Task.Delay(500);
+            await Task.Delay(500, TestContext.Current.CancellationToken);
         }
 
         results.ShouldNotBeNull();

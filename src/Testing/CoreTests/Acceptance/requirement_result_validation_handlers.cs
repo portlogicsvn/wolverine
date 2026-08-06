@@ -12,7 +12,7 @@ public class requirement_result_validation_handlers
     {
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine()
-            .StartAsync();
+            .StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         RequirementResultHandler.Handled = false;
 
@@ -26,7 +26,7 @@ public class requirement_result_validation_handlers
     {
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine()
-            .StartAsync();
+            .StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         RequirementResultHandler.Handled = false;
 
@@ -40,7 +40,7 @@ public class requirement_result_validation_handlers
     {
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine()
-            .StartAsync();
+            .StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         AsyncRequirementResultHandler.Handled = false;
 
@@ -54,7 +54,7 @@ public class requirement_result_validation_handlers
     {
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine()
-            .StartAsync();
+            .StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         AsyncRequirementResultHandler.Handled = false;
 
@@ -68,7 +68,7 @@ public class requirement_result_validation_handlers
     {
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine()
-            .StartAsync();
+            .StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         EmptyMessagesRequirementResultHandler.Handled = false;
 
@@ -79,7 +79,6 @@ public class requirement_result_validation_handlers
 }
 
 #region sample_requirement_result_validation
-
 public record RequirementResultMessage(int Number);
 
 public static class RequirementResultHandler
@@ -106,7 +105,6 @@ public static class RequirementResultHandler
 #endregion
 
 #region sample_requirement_result_validation_async
-
 public record AsyncRequirementResultMessage(int Number);
 
 public static class AsyncRequirementResultHandler
@@ -133,7 +131,6 @@ public static class AsyncRequirementResultHandler
 #endregion
 
 #region sample_requirement_result_validation_empty_messages
-
 public record EmptyMessagesRequirementResultMessage(int Number);
 
 public static class EmptyMessagesRequirementResultHandler

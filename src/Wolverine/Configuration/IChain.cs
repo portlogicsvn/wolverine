@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Linq.Expressions;
 using System.Reflection;
 using JasperFx;
@@ -50,7 +51,13 @@ public static class ChainMiddlewareExtensions
     /// <param name="chain">The chain to add middleware to</param>
     /// <param name="middlewareType">The middleware class type</param>
     /// <param name="methodName">The name of the method to call</param>
-    public static void AddMiddleware(this IChain chain, Type middlewareType, string methodName)
+    [RequiresUnreferencedCode(
+        "MethodCall reflects over middlewareType.GetMethod(methodName); the named method must survive trimming. " +
+        "AOT-publishing apps should use the strongly-typed AddMiddleware<T>(Expression) overload or pre-generate " +
+        "handlers via TypeLoadMode.Static.")]
+    public static void AddMiddleware(this IChain chain,
+        [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicMethods | DynamicallyAccessedMemberTypes.NonPublicMethods)]
+        Type middlewareType, string methodName)
     {
         chain.Middleware.Add(new MethodCall(middlewareType, methodName));
     }
@@ -72,14 +79,19 @@ public static class ChainMiddlewareExtensions
     /// <param name="chain">The chain to add the postprocessor to</param>
     /// <param name="middlewareType">The middleware class type</param>
     /// <param name="methodName">The name of the method to call</param>
-    public static void AddPostprocessor(this IChain chain, Type middlewareType, string methodName)
+    [RequiresUnreferencedCode(
+        "MethodCall reflects over middlewareType.GetMethod(methodName); the named method must survive trimming. " +
+        "AOT-publishing apps should use the strongly-typed AddPostprocessor<T>(Expression) overload or pre-generate " +
+        "handlers via TypeLoadMode.Static.")]
+    public static void AddPostprocessor(this IChain chain,
+        [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicMethods | DynamicallyAccessedMemberTypes.NonPublicMethods)]
+        Type middlewareType, string methodName)
     {
         chain.Postprocessors.Add(new MethodCall(middlewareType, methodName));
     }
 }
 
-#region sample_IChain
-
+#region sample_ichain
 /// <summary>
 ///     Models the middleware arrangement for either an HTTP route execution
 ///     or the execution of a message
@@ -118,6 +130,15 @@ public interface IChain
     /// incoming durable inbox envelopes to the correct store for transactional atomicity.
     /// </summary>
     Type? AncillaryStoreType { get; set; }
+
+    /// <summary>
+    /// <see langword="true"/> when this chain's compiled code resolves at least one
+    /// dependency via service location rather than constructor / parameter injection.
+    /// Recorded at codegen time. When set, the generated code creates a child scope that
+    /// Wolverine primes so service-located <see cref="IMessageContext"/> / <see cref="IMessageBus"/>
+    /// resolve to the same context the handler received rather than a duplicate. See GH-3001.
+    /// </summary>
+    bool UsesServiceLocation { get; }
 
     /// <summary>
     ///     Strategy for dealing with any return values from the handler methods

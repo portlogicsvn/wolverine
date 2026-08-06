@@ -4,6 +4,7 @@ using JasperFx.Core.Reflection;
 using Wolverine.Configuration;
 using Wolverine.Persistence.Durability;
 using Wolverine.Postgresql.Transport;
+using Wolverine.Runtime.Partitioning;
 
 
 namespace Wolverine.Postgresql;
@@ -15,18 +16,25 @@ public static class PostgresqlConfigurationExtensions
     {
         if (schemaName.IsEmpty())
             throw new ArgumentNullException(nameof(schemaName), "Schema Name cannot be empty or null");
-        
+
         if (schemaName.IsNotEmpty() && schemaName != schemaName.ToLowerInvariant())
         {
             throw new ArgumentOutOfRangeException(nameof(schemaName),
                 "The schema name must be in all lower case characters");
         }
+    }
 
-        if (schemaName.Contains("-"))
-        {
-            throw new ArgumentOutOfRangeException(nameof(schemaName),
-                "PostgreSQL schema names cannot include dashes. Use underscores instead");
-        }
+    /// <summary>
+    /// Quotes a PostgreSQL identifier (schema, table, column name) with double quotes.
+    /// Internal double quotes are escaped by doubling them.
+    /// </summary>
+    internal static string QuoteIdentifier(this string? identifier)
+    {
+        if (identifier.IsEmpty()) return identifier ?? string.Empty;
+
+        // Escape any internal double quotes by doubling them
+        var escaped = identifier.Replace("\"", "\"\"");
+        return $"\"{escaped}\"";
     }
     
     /// <summary>
@@ -93,13 +101,15 @@ public static class PostgresqlConfigurationExtensions
     /// <param name="connectionString"></param>
     /// <param name="schema"></param>
     /// <returns></returns>
-    [Obsolete("Prefer PersistMessagesWithPostgresql().EnableMessageTransport()")]
     public static PostgresqlPersistenceExpression UsePostgresqlPersistenceAndTransport(this WolverineOptions options,
         string connectionString,
         string? schema = null,
-        string? transportSchema = "wolverine_queues")
+        string? transportSchema = "wolverine_queues",
+        MessageStoreRole role = MessageStoreRole.Main)
     {
-        options.PersistMessagesWithPostgresql(connectionString, schema);
+        // GH-3226: forward the message-store role so apps that already have an event-store-backed Main
+        // (Marten / Polecat) can register this transport's persistence as Ancillary instead of a second Main.
+        options.PersistMessagesWithPostgresql(connectionString, schema, role);
 
         if (transportSchema != null)
         {
@@ -176,5 +186,58 @@ public static class PostgresqlConfigurationExtensions
         publishing.To(queue.Uri);
 
         return new PostgresqlSubscriberConfiguration(queue);
+    }
+
+    /// <summary>
+    /// Shard message publishing across a set of PostgreSQL queues named baseName1, baseName2, and so on
+    /// using the global message grouping rules. This is the publishing-only variant -- see
+    /// UseShardedPostgresqlQueues() for the full global partitioning topology that also shards the
+    /// message *execution* across companion local queues.
+    /// </summary>
+    /// <param name="rules"></param>
+    /// <param name="baseName"></param>
+    /// <param name="numberOfEndpoints"></param>
+    /// <param name="configure"></param>
+    /// <returns></returns>
+    public static MessagePartitioningRules PublishToShardedPostgresqlQueues(this MessagePartitioningRules rules,
+        string baseName, int numberOfEndpoints, Action<PartitionedMessageTopologyWithDatabaseQueues> configure)
+    {
+        rules.AddPublishingTopology((opts, _) =>
+        {
+            var topology =
+                new PartitionedMessageTopologyWithDatabaseQueues(opts, PartitionSlots.Five, baseName, numberOfEndpoints);
+            topology.ConfigureListening(x => { });
+            configure(topology);
+            topology.AssertValidity();
+
+            return topology;
+        });
+
+        return rules;
+    }
+
+    /// <summary>
+    /// Use sharded PostgreSQL queues for global partitioned message processing.
+    /// Queues will be named baseName1, baseName2, etc.
+    /// </summary>
+    /// <param name="topology"></param>
+    /// <param name="baseName"></param>
+    /// <param name="numberOfEndpoints"></param>
+    /// <param name="configure"></param>
+    /// <returns></returns>
+    public static GlobalPartitionedMessageTopology UseShardedPostgresqlQueues(
+        this GlobalPartitionedMessageTopology topology, string baseName, int numberOfEndpoints,
+        Action<PartitionedMessageTopologyWithDatabaseQueues>? configure = null)
+    {
+        topology.SetExternalTopology(opts =>
+        {
+            var t = new PartitionedMessageTopologyWithDatabaseQueues(opts, PartitionSlots.Five, baseName,
+                numberOfEndpoints);
+            t.ConfigureListening(x => { });
+            configure?.Invoke(t);
+            return t;
+        }, baseName);
+
+        return topology;
     }
 }

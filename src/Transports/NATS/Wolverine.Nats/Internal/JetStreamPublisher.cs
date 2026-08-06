@@ -10,15 +10,45 @@ namespace Wolverine.Nats.Internal;
 /// </summary>
 internal class JetStreamPublisher : INatsPublisher
 {
+    /// <summary>
+    /// NATS JetStream deduplication header. When present, the server discards duplicate
+    /// messages carrying the same value within the stream's configured duplicate window.
+    /// </summary>
+    internal const string NatsMsgIdHeader = "Nats-Msg-Id";
+
     private readonly NatsConnection _connection;
     private readonly INatsJSContext _jetStreamContext;
     private readonly ILogger<NatsEndpoint> _logger;
+    private readonly string _scheduleSubjectSuffix;
+    private readonly Func<Envelope, string>? _msgIdSource;
 
-    public JetStreamPublisher(NatsConnection connection, ILogger<NatsEndpoint> logger)
+    public JetStreamPublisher(NatsConnection connection,
+        INatsJSContext jetStreamContext,
+        ILogger<NatsEndpoint> logger,
+        string scheduleSubjectSuffix = ".scheduled",
+        Func<Envelope, string>? msgIdSource = null)
     {
         _connection = connection;
+        _jetStreamContext = jetStreamContext;
         _logger = logger;
-        _jetStreamContext = connection.CreateJetStreamContext();
+        _scheduleSubjectSuffix = scheduleSubjectSuffix;
+        _msgIdSource = msgIdSource;
+    }
+
+    /// <summary>
+    /// Resolve the JetStream <c>Nats-Msg-Id</c> deduplication key for an outgoing message:
+    /// an explicit <c>Nats-Msg-Id</c> header wins (return null so we don't override it), then
+    /// the configured <c>MsgIdSource</c>, else the Wolverine envelope Id.
+    /// </summary>
+    private NatsJSPubOpts? buildDedupOptions(Envelope envelope, NatsHeaders headers)
+    {
+        if (headers.ContainsKey(NatsMsgIdHeader))
+        {
+            return null;
+        }
+
+        var msgId = _msgIdSource?.Invoke(envelope) ?? envelope.Id.ToString();
+        return string.IsNullOrEmpty(msgId) ? null : new NatsJSPubOpts { MsgId = msgId };
     }
 
     public async ValueTask<bool> PingAsync(CancellationToken cancellation)
@@ -70,29 +100,41 @@ internal class JetStreamPublisher : INatsPublisher
         }
         else
         {
-            // Check if this is a scheduled message
+            var publishSubject = subject;
+
+            // Server-side dedup only applies to the direct publish path; the native scheduling
+            // control message is materialized server-side and is not deduplicated by this key.
+            var pubOpts = envelope.ScheduledTime.HasValue
+                ? null
+                : buildDedupOptions(envelope, headers);
+
             if (envelope.ScheduledTime.HasValue)
             {
-                // Add NATS scheduling headers
-                // Format: @at <RFC3339 timestamp>
+                // NATS rejects a scheduled publish whose subject equals Nats-Schedule-Target ("message
+                // schedules target is invalid", err 10190). So the target stays the real destination
+                // (where the consumer listens and the server materializes the message), and the control
+                // message goes to a derived subject that must still be covered by the same stream.
                 var scheduledTime = envelope.ScheduledTime.Value.ToUniversalTime();
                 headers["Nats-Schedule"] = $"@at {scheduledTime:O}";
                 headers["Nats-Schedule-Target"] = subject;
-                
+                publishSubject = subject + _scheduleSubjectSuffix;
+
                 if (_logger.IsEnabled(LogLevel.Debug))
                 {
                     _logger.LogDebug(
-                        "Scheduling message {MessageId} for delivery at {ScheduledTime} to {Subject}",
+                        "Scheduling message {MessageId} for delivery at {ScheduledTime} to {Target} via schedule subject {ScheduleSubject}",
                         envelope.Id,
                         scheduledTime,
-                        subject
+                        subject,
+                        publishSubject
                     );
                 }
             }
-            
+
             var ack = await _jetStreamContext.PublishAsync(
-                subject,
+                publishSubject,
                 data,
+                opts: pubOpts,
                 headers: headers,
                 cancellationToken: cancellation
             );

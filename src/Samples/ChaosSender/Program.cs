@@ -11,7 +11,6 @@ using Wolverine.Marten;
 using Wolverine.RabbitMQ;
 
 #region sample_integrating_wolverine_with_marten
-
 var builder = WebApplication.CreateBuilder(args);
 builder.Host.ApplyJasperFxExtensions();
 
@@ -43,14 +42,12 @@ builder.Host.UseWolverine(opts =>
 
 #endregion
 
-// Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
-builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
-
+builder.Services.AddOpenApi();
 
 var app = builder.Build();
 
-app.MapGet("/", () => Results.Redirect("/swagger"));
+app.MapOpenApi();
+app.MapGet("/", () => Results.Redirect("/openapi/v1.json"));
 
 app.MapPost("/send", async (MessageBatch batch, IMessageBus bus) =>
 {
@@ -66,28 +63,21 @@ app.MapGet("/status", async (IMessageRecordRepository repository) =>
 
 app.MapWolverineAdminApiEndpoints();
 
-app.UseSwagger();
-app.UseSwaggerUI();
-
 // Lot of Wolverine and Marten diagnostics and administrative tools
 // come through JasperFx command line support
 return await app.RunJasperFxCommands(args);
-
 
 public record MessageBatch(int BatchSize, int Milliseconds)
 {
     public async Task PublishAsync(IMessageBus bus)
     {
-        var task = Task.Factory.StartNew(async () =>
-        {
-            var timer = new Stopwatch();
-            timer.Start();
+        var timer = new Stopwatch();
+        timer.Start();
 
-            while (timer.ElapsedMilliseconds < Milliseconds)
-            {
-                await bus.PublishAsync(new SendMessages(BatchSize));
-                await Task.Delay(100.Milliseconds());
-            }
-        });
+        while (timer.ElapsedMilliseconds < Milliseconds)
+        {
+            await bus.PublishAsync(new SendMessages(BatchSize));
+            await Task.Delay(100.Milliseconds());
+        }
     }
 }

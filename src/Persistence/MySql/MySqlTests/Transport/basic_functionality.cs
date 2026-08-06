@@ -13,8 +13,7 @@ using Wolverine.Persistence.Durability;
 using Wolverine.Runtime;
 using Wolverine.Runtime.WorkerQueues;
 using Wolverine.Tracking;
-using Xunit.Abstractions;
-
+using Xunit;
 namespace MySqlTests.Transport;
 
 [Collection("mysql")]
@@ -33,7 +32,7 @@ public class basic_functionality : IAsyncLifetime
     private IMessageStore theMessageStore = null!;
     private WolverineRuntime theRuntime = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         // Clean up the schema first
         await using var conn = new MySqlConnection(Servers.MySqlConnectionString);
@@ -65,7 +64,7 @@ public class basic_functionality : IAsyncLifetime
         theRuntime = theHost.GetRuntime();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await theHost.StopAsync();
         theHost.Dispose();
@@ -75,7 +74,7 @@ public class basic_functionality : IAsyncLifetime
     public async Task expected_tables_exist_for_queue()
     {
         await using var conn = new MySqlConnection(Servers.MySqlConnectionString);
-        await conn.OpenAsync();
+        await conn.OpenAsync(TestContext.Current.CancellationToken);
 
         var tables = new List<string>();
         await using var cmd = conn.CreateCommand();
@@ -84,8 +83,8 @@ SELECT table_name
 FROM information_schema.tables
 WHERE table_schema = 'wolverine_transports'
 AND table_name LIKE 'wolverine_queue_%'";
-        await using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        await using var reader = await cmd.ExecuteReaderAsync(TestContext.Current.CancellationToken);
+        while (await reader.ReadAsync(TestContext.Current.CancellationToken))
         {
             tables.Add(reader.GetString(0));
         }

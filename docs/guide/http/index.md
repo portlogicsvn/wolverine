@@ -57,13 +57,13 @@ public class CreateTodoHandler
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Samples/TodoController.cs#L61-L78' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_create_todo_handler' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Samples/TodoController.cs#L58-L74' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_create_todo_handler' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Okay, but we still need to expose a web service endpoint for this functionality. We *could* utilize Wolverine within an MVC controller
 as a "mediator" tool like so:
 
-<!-- snippet: sample_TodoController_delegating_to_Wolverine -->
+<!-- snippet: sample_todocontroller_delegating_to_wolverine -->
 <a id='snippet-sample_todocontroller_delegating_to_wolverine'></a>
 ```cs
 public class TodoController : ControllerBase
@@ -81,7 +81,7 @@ public class TodoController : ControllerBase
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Samples/TodoController.cs#L14-L31' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_todocontroller_delegating_to_wolverine' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Samples/TodoController.cs#L14-L30' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_todocontroller_delegating_to_wolverine' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Or we could do the same thing with Minimal API:
@@ -96,7 +96,7 @@ app.MapPost("/todoitems", async (CreateTodo command, IMessageBus bus) =>
     return Results.Created($"/todoitems/{todo.Id}", todo);
 }).Produces<Todo>(201);
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Samples/TodoController.cs#L37-L46' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_wolverine_within_minimal_api' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Samples/TodoController.cs#L36-L44' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_wolverine_within_minimal_api' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 While the code above is certainly functional, and many teams are succeeding today using a similar strategy with older tools like
@@ -121,7 +121,7 @@ efficient delegation to the underlying Wolverine message handler:
 // code of 200 instead of 201. If you care about that anyway.
 app.MapPostToWolverine<CreateTodo, Todo>("/todoitems");
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Samples/TodoController.cs#L51-L57' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_map_route_to_wolverine_handler' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Samples/TodoController.cs#L49-L54' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_map_route_to_wolverine_handler' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 The code up above is very close to a functional equivalent to our early Minimal API or MVC Controller usage, but there's a 
@@ -173,7 +173,7 @@ public static class TodoCreationEndpoint
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Samples/TodoController.cs#L84-L116' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_wolverine_endpoint_for_create_todo' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Samples/TodoController.cs#L80-L111' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_wolverine_endpoint_for_create_todo' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 The code above will actually generate the exact same OpenAPI documentation as the MVC Controller or Minimal API samples 
@@ -201,7 +201,7 @@ app.MapWolverineEndpoints(x => x.WarmUpRoutes = RouteWarmup.Eager);
     
 return await app.RunJasperFxCommands(args);
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/CrazyStartingWebApp/Program.cs#L21-L29' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_eager_http_warmup' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/CrazyStartingWebApp/Program.cs#L21-L28' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_eager_http_warmup' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Using the HttpContext.RequestServices <Badge type="tip" text="5.0" />
@@ -216,7 +216,7 @@ by MVC Core or Minimal API or even some other kind of AspNetCore `Endpoint`.
 :::
 
 By default, any time [Wolverine has to revert to using a service locator](/guide/codegen.html#wolverine-code-generation-and-ioc) 
-to generate the adapter code for an HTTP endpoint, Wolverine is using an isolated `IServiceScope` (or Lamar `INestedContainer`) within the generated code.
+to generate the adapter code for an HTTP endpoint, Wolverine is using an isolated `IServiceScope` within the generated code.
 
 But, with Wolverine 5.0+ you can opt into Wolverine just using the `HttpContext.RequestServices` so that you
 can share services with AspNetCore middleware. You can also configure *some* service types to be pulled from
@@ -260,7 +260,7 @@ app.MapWolverineEndpoints(opts =>
 
 return await app.RunJasperFxCommands(args);
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/Wolverine.Http.Tests/CodeGeneration/service_location_assertions.cs#L397-L433' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_bootstrapping_with_httpcontext_request_services' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/Wolverine.Http.Tests/CodeGeneration/service_location_assertions.cs#L432-L467' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_bootstrapping_with_httpcontext_request_services' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Notice the call to `SourceServiceFromHttpContext<T>()`. That directs Wolverine.HTTP to always pull the service
@@ -272,5 +272,11 @@ The Wolverine team believes that smuggling important state between upstream midd
 leads to code that is hard to reason about and hence, potentially buggy in real life usage. Alas, you could easily
 need this functionality in the real world, so here you go. 
 :::
+
+## API Versioning <Badge type="tip" text="5.36" />
+
+Wolverine.Http has native support for versioning your HTTP APIs over time using URL-segment strategies (e.g.
+`/v1/orders`, `/v2/orders`), per-version sunset and deprecation policies with RFC 9745/8594 response headers,
+and automatic OpenAPI document partitioning. See the [HTTP API Versioning guide](./versioning.md) for full details.
 
 

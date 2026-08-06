@@ -6,14 +6,13 @@ using Wolverine.Runtime.Routing;
 
 namespace Wolverine.AmazonSqs.Tests.ConventionalRouting;
 
-[Trait("Category", "Flaky")]
 public class when_discovering_a_sender_with_all_defaults : ConventionalRoutingContext
 {
-    private readonly MessageRoute theRoute;
+    private MessageRoute theRoute = null!;
 
-    public when_discovering_a_sender_with_all_defaults()
+    public override async ValueTask InitializeAsync()
     {
-        theRoute = PublishingRoutesFor<PublishedMessage>().Single().As<MessageRoute>();
+        theRoute = (await PublishingRoutesFor<PublishedMessage>()).Single().As<MessageRoute>();
     }
 
     [Fact]

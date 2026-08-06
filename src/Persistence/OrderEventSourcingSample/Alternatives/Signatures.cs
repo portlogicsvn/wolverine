@@ -1,3 +1,5 @@
+using JasperFx;
+using JasperFx.Events;
 using Marten.Events;
 using Marten.Schema;
 using Wolverine;
@@ -6,8 +8,7 @@ using Wolverine.Marten;
 
 namespace OrderEventSourcingSample.Alternatives;
 
-#region sample_MarkItemReady_with_explicit_identity
-
+#region sample_markitemready_with_explicit_identity
 public class MarkItemReady
 {
     // This attribute tells Wolverine that this property will refer to the
@@ -23,8 +24,7 @@ public static class MarkItemReadyHandler
 {
     [WolverineIgnore] // just keeping this out of codegen and discovery
 
-    #region sample_MarkItemReadyHandler_with_explicit_stream
-
+    #region sample_markitemreadyhandler_with_explicit_stream
     [AggregateHandler]
     public static void Handle(OrderEventSourcingSample.MarkItemReady command, IEventStream<Order> stream)
     {
@@ -60,8 +60,7 @@ public static class MarkItemReadyHandler3
 {
     [WolverineIgnore] // just keeping this out of codegen and discovery
 
-    #region sample_MarkItemReadyHandler_with_response_for_updated_aggregate
-
+    #region sample_markitemreadyhandler_with_response_for_updated_aggregate
     [AggregateHandler]
     public static (
         // Just tells Wolverine to use Marten's FetchLatest API to respond with
@@ -100,8 +99,7 @@ public static class MarkItemReadyHandler3
 
     #endregion
 
-    #region sample_using_UpdatedAggregate_with_invoke_async
-
+    #region sample_using_updatedaggregate_with_invoke_async
     public static Task<Order> update_and_get_latest(IMessageBus bus, MarkItemReady command)
     {
         // This will return the updated version of the Order

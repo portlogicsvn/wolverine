@@ -12,18 +12,22 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.OpenApi.Models;
+using Scalar.AspNetCore;
 using Wolverine;
 using Wolverine.AdminApi;
 using Wolverine.EntityFrameworkCore;
 using Wolverine.ErrorHandling;
 using Wolverine.FluentValidation;
 using Wolverine.Http;
+using Wolverine.Http.ApiVersioning;
 using Wolverine.Http.FluentValidation;
 using Wolverine.Http.Marten;
 using Wolverine.Http.Tests.DifferentAssembly.Validation;
 using Wolverine.Http.Transport;
 using Wolverine.Marten;
 using WolverineWebApi;
+using WolverineWebApi.ApiVersioning;
 using WolverineWebApi.Bugs;
 using WolverineWebApi.Marten;
 using WolverineWebApi.Samples;
@@ -38,7 +42,6 @@ public class Program
     public static async Task<int> Main(string[] args)
     {
         #region sample_adding_http_services
-
         var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
@@ -55,10 +58,19 @@ public class Program
         builder.Services.AddEndpointsApiExplorer();
 
         #region sample_register_custom_swashbuckle_filter
-
         builder.Services.AddSwaggerGen(x =>
         {
+            x.SwaggerDoc("default", new OpenApiInfo { Title = "Wolverine Web API", Version = "default" });
+            x.SwaggerDoc("v1", new OpenApiInfo { Title = "Wolverine Web API v1", Version = "v1" });
+            x.SwaggerDoc("v2", new OpenApiInfo { Title = "Wolverine Web API v2", Version = "v2" });
+            x.SwaggerDoc("v3", new OpenApiInfo { Title = "Wolverine Web API v3", Version = "v3" });
+            // v4 has no options.Deprecate("4.0") — used by integration tests to prove the
+            // attribute-driven [ApiVersion("4.0", Deprecated = true)] is honoured on its own.
+            x.SwaggerDoc("v4", new OpenApiInfo { Title = "Wolverine Web API v4", Version = "v4" });
             x.OperationFilter<WolverineOperationFilter>();
+            x.OperationFilter<WolverineApiVersioningSwaggerOperationFilter>();
+            x.DocInclusionPredicate((docName, api) =>
+                docName == "default" || api.GroupName == docName);
             x.ResolveConflictingActions(apiDescriptions => apiDescriptions.First());
         });
 
@@ -70,7 +82,6 @@ public class Program
         builder.Services.AddAuthorization();
 
         #region sample_adding_output_cache_services
-
         builder.Services.AddOutputCache(options =>
         {
             options.AddPolicy("short", builder => builder.Expire(TimeSpan.FromSeconds(5)));
@@ -97,6 +108,8 @@ public class Program
         builder.Services.AddKeyedSingleton<IThing, RedThing>("Red");
         builder.Services.AddKeyedScoped<IThing, BlueThing>("Blue");
         builder.Services.AddKeyedTransient<IThing, GreenThing>("Green");
+        builder.Services.AddScoped<IRandomService>(_ => new RandomService());
+        builder.Services.AddScoped<IServiceWithDbContextReference, ServiceWithDbContextReference>();
 
         builder.Services.AddMarten(opts =>
         {
@@ -129,6 +142,8 @@ public class Program
 // Need this.
         builder.Host.UseWolverine(opts =>
         {
+            opts.ServiceLocationPolicy = JasperFx.CodeGeneration.Model.ServiceLocationPolicy.AllowedButWarn;
+
             opts.Durability.MessageStorageSchemaName = "wolverine";
 
             // I'm speeding this up a lot for faster tests
@@ -191,8 +206,7 @@ public class Program
             o.SerializerOptions.WriteIndented = true;
         });
 
-        #region sample_calling_ApplyAsyncWolverineExtensions
-
+        #region sample_calling_applyasyncwolverineextensions
         var app = builder.Build();
 
 // In order for async Wolverine extensions to apply to Wolverine.HTTP configuration,
@@ -209,14 +223,50 @@ public class Program
 
         app.UseRequestLocalization(localizationOptions);
 
+        // Scoped UseExceptionHandler — only on the dedicated regression-test path. Pinning the
+        // documented out-of-scope: 5xx responses produced by the global ASP.NET Core exception
+        // handler bypass the chain pipeline and therefore must NOT carry versioning headers.
+        // Restricted to /v1/orders/throws so other tests that intentionally produce 5xx via
+        // Wolverine's own ProblemDetails OnException middleware are unaffected.
+        // Must be registered before MapWolverineEndpoints so it wraps the chain pipeline.
+        app.UseWhen(
+            ctx => ctx.Request.Path.StartsWithSegments("/v1/orders/throws"),
+            branch => branch.UseExceptionHandler(errorApp => errorApp.Run(async ctx =>
+            {
+                ctx.Response.StatusCode = 500;
+                ctx.Response.ContentType = "text/plain";
+                await ctx.Response.WriteAsync("global-exception-handler");
+            })));
+
 // Configure the HTTP request pipeline.
         app.UseSwagger();
-        app.UseSwaggerUI();
+        app.UseSwaggerUI(c =>
+        {
+            c.SwaggerEndpoint("/swagger/default/swagger.json", "default");
+            foreach (var description in app.DescribeWolverineApiVersions())
+            {
+                c.SwaggerEndpoint(
+                    $"/swagger/{description.DocumentName}/swagger.json",
+                    description.DisplayName + (description.IsDeprecated ? " (deprecated)" : ""));
+            }
+        });
+
+        app.MapScalarApiReference(options =>
+        {
+            options.AddDocument("default", "Wolverine Web API (all)",
+                $"/swagger/default/swagger.json");
+            foreach (var description in app.DescribeWolverineApiVersions())
+            {
+                options.AddDocument(
+                    description.DocumentName,
+                    description.DisplayName + (description.IsDeprecated ? " (deprecated)" : ""),
+                    $"/swagger/{description.DocumentName}/swagger.json");
+            }
+        });
 
         app.UseAuthorization();
 
         #region sample_using_output_cache_middleware
-
         app.UseOutputCache();
 
         #region sample_use_rate_limiter_middleware
@@ -240,7 +290,6 @@ public class Program
         app.MapWolverineAdminApiEndpoints();
 
         #region sample_register_dead_letter_endpoints
-
         app.MapDeadLettersEndpoints()
 
             // It's a Minimal API endpoint group,
@@ -253,9 +302,18 @@ public class Program
         #endregion
 
         #region sample_using_configure_endpoints
-
         app.MapWolverineEndpoints(opts =>
         {
+            opts.UseApiVersioning(v =>
+            {
+                // Existing unversioned endpoints are left unchanged
+                v.UnversionedPolicy = UnversionedPolicy.PassThrough;
+                v.Sunset("3.0").On(DateTimeOffset.Parse("2027-01-01T00:00:00Z"))
+                    .WithLink(new Uri("https://example.com/migrate-to-v2"), "Migration guide", "text/html");
+                v.Deprecate("1.0").On(DateTimeOffset.Parse("2026-12-31T00:00:00Z"))
+                    .WithLink(new Uri("https://example.com/sunset-v1"));
+            });
+
             // This is strictly to test the endpoint policy
 
             opts.ConfigureEndpoints(httpChain =>
@@ -287,20 +345,17 @@ public class Program
             opts.AddPolicy<LoadTodoPolicy>();
 
             #region sample_user_marten_compiled_query_policy
-
             opts.UseMartenCompiledQueryResultPolicy();
 
             #endregion
 
             #region sample_register_http_middleware_by_type
-
             opts.AddMiddlewareByMessageType(typeof(FakeAuthenticationMiddleware));
             opts.AddMiddlewareByMessageType(typeof(CanShipOrderMiddleWare));
 
             #endregion
 
             #region sample_register_resource_writer_policy
-
             opts.AddResourceWriterPolicy<CustomResourceWriterPolicy>();
 
             #endregion
@@ -322,21 +377,20 @@ public class Program
             opts.AddPolicy<FrameRearrangeMiddleware.HttpPolicy>();
 
             #region sample_adding_custom_parameter_handling
-
             // Customizing parameter handling
             opts.AddParameterHandlingStrategy<NowParameterStrategy>();
 
             #endregion
+
+            opts.ServiceProviderSource = ServiceProviderSource.FromHttpContextRequestServices;
         });
 
-        #region sample_MapWolverineHttpTransportEndpoints
-
+        #region sample_mapwolverinehttptransportendpoints
         app.MapWolverineHttpTransportEndpoints();
 
         #endregion
 
         #region sample_optimized_mediator_usage
-
 // Functional equivalent to MapPost(pattern, (command, IMessageBus) => bus.Invoke(command))
         app.MapPostToWolverine<HttpMessage1>("/wolverine");
         app.MapPutToWolverine<HttpMessage2>("/wolverine");

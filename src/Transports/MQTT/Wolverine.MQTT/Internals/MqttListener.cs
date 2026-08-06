@@ -3,12 +3,13 @@ using JasperFx.Blocks;
 using JasperFx.Core;
 using Microsoft.Extensions.Logging;
 using MQTTnet.Client;
+using MQTTnet.Extensions.ManagedClient;
 using Wolverine.Runtime;
 using Wolverine.Transports;
 
 namespace Wolverine.MQTT.Internals;
 
-internal class MqttListener : IListener
+internal class MqttListener : IListener, IReportConnectionState
 {
     private readonly MqttTransport _broker;
     private readonly CancellationTokenSource _cancellation = new();
@@ -18,13 +19,24 @@ internal class MqttListener : IListener
     private readonly IReceiver _receiver;
     private readonly MqttTopic _topic;
 
+    // Broker-per-tenant (GH-3307): the managed client this listener consumes from — the default/shared client
+    // for the untenanted listener, or a tenant's own dedicated client. ConnectionState reports on this specific
+    // connection so a dropped tenant connection is surfaced independently of the default one.
+    private readonly IManagedMqttClient _client;
 
-    public MqttListener(MqttTransport broker, ILogger logger, MqttTopic topic, IReceiver receiver)
+    // GH-3231: surface the managed MQTT client's connection state so external monitors can detect a listener whose
+    // broker connection has dropped (and not resubscribed) while it still reports Accepting.
+    public TransportConnectionState ConnectionState =>
+        _client.IsConnected ? TransportConnectionState.Connected : TransportConnectionState.Disconnected;
+
+    public MqttListener(MqttTransport broker, ILogger logger, MqttTopic topic, IReceiver receiver,
+        IManagedMqttClient client)
     {
         _broker = broker;
         _logger = logger;
         _topic = topic;
         _receiver = receiver;
+        _client = client;
         Address = topic.Uri;
 
         TopicName = topic.ListeningTopic;
@@ -76,13 +88,12 @@ internal class MqttListener : IListener
         return ValueTask.CompletedTask;
     }
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
-        _cancellation.Cancel();
+        await _cancellation.CancelAsync();
+        _cancellation.Dispose();
         _complete.SafeDispose();
         _defer.SafeDispose();
-
-        return ValueTask.CompletedTask;
     }
 
     public async Task ReceiveAsync(MqttApplicationMessageReceivedEventArgs args)
@@ -99,9 +110,47 @@ internal class MqttListener : IListener
         catch (Exception e)
         {
             _logger.LogError(e, "Error trying to map an incoming MQTT message {MessageId} to an Envelope",
-                Encoding.Default.GetString(args.ApplicationMessage.CorrelationData));
-            await _complete.PostAsync(envelope);
+                args.ApplicationMessage.CorrelationData != null
+                    ? Encoding.UTF8.GetString(args.ApplicationMessage.CorrelationData)
+                    : "(none)");
 
+            // MoveToErrorsAsync keys the envelope by Id; the mapper threw before
+            // setting one, so synthesize a Guid to satisfy the dead-letter store contract.
+            // MqttEnvelope already populates Data and Destination in its constructor.
+            if (envelope.Id == Guid.Empty)
+            {
+                envelope.Id = Guid.NewGuid();
+            }
+
+            var dlq = _receiver as ISupportDeadLetterQueue;
+            if (dlq is not null)
+            {
+                try
+                {
+                    await dlq.MoveToErrorsAsync(envelope, e);
+                }
+                catch (Exception moveEx)
+                {
+                    _logger.LogError(moveEx,
+                        "Failed to move un-mappable MQTT message {MessageId} to the dead-letter store; falling back to ack to avoid poison redelivery",
+                        envelope.Id);
+                }
+            }
+
+            // Always PUBACK. If MoveToErrorsAsync succeeded, the dead-letter store has
+            // the record. If not (no durable inbox, or it threw), acking is still the
+            // best available option because MQTT has no broker DLQ and leaving the
+            // message unacked would cause a poison-redelivery loop.
+            try
+            {
+                await _complete.PostAsync(envelope);
+            }
+            catch (Exception ackEx)
+            {
+                _logger.LogError(ackEx,
+                    "Failed to ack un-mappable MQTT message {MessageId}",
+                    envelope.Id);
+            }
             return;
         }
 

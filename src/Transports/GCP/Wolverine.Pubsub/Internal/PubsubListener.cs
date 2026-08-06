@@ -10,7 +10,7 @@ using Wolverine.Transports;
 
 namespace Wolverine.Pubsub.Internal;
 
-public abstract class PubsubListener : IListener, ISupportDeadLetterQueue
+public abstract class PubsubListener : IListener, ISupportDeadLetterQueue, IReportConnectionState
 {
     protected readonly CancellationTokenSource _cancellation = new();
     protected readonly RetryBlock<Envelope> _deadLetter;
@@ -23,16 +23,29 @@ public abstract class PubsubListener : IListener, ISupportDeadLetterQueue
     protected readonly PubsubTransport _transport;
 
     protected Task _task;
+
+    // GH-3237: the Pub/Sub SDK hides the streaming-pull connection, so this state is derived only from the
+    // retry loop below and may only ever degrade (Reconnecting/Disconnected). Never Connected — the resting
+    // state for a healthy listener is Unknown; use LastQueueActivityAt/loop-health for liveness.
+    private volatile TransportConnectionState _connectionState = TransportConnectionState.Unknown;
+
+    public TransportConnectionState ConnectionState => _connectionState;
+
+    /// <summary>
+    /// The connection (default or per-tenant) this listener consumes and, for requeue/dead-letter, re-publishes over.
+    /// </summary>
+    protected readonly PubsubClientSet _clients;
     private readonly IPubsubEnvelopeMapper _mapper;
 
     public PubsubListener(
         PubsubEndpoint endpoint,
         PubsubTransport transport,
         IReceiver receiver,
-        IWolverineRuntime runtime
+        IWolverineRuntime runtime,
+        PubsubClientSet clients
     )
     {
-        if (transport.SubscriberApiClient is null)
+        if (clients.SubscriberApiClient is null)
         {
             throw new WolverinePubsubTransportNotConnectedException();
         }
@@ -43,6 +56,7 @@ public abstract class PubsubListener : IListener, ISupportDeadLetterQueue
         _transport = transport;
         _receiver = receiver;
         _runtime = runtime;
+        _clients = clients;
         _logger = runtime.LoggerFactory.CreateLogger<PubsubListener>();
 
         if (_endpoint.DeadLetterName.IsNotEmpty())
@@ -58,16 +72,21 @@ public abstract class PubsubListener : IListener, ISupportDeadLetterQueue
             {
                 return;
             }
-            await _deadLetterTopic.SendMessageAsync(e, _logger);
+            await _deadLetterTopic.SendMessageAsync(e, _logger, _clients);
         }, _logger, runtime.Cancellation);
 
         _requeue = new RetryBlock<Envelope>(async (e, _) =>
         {
-            await _endpoint.SendMessageAsync(e, _logger);
+            await _endpoint.SendMessageAsync(e, _logger, _clients);
         }, _logger, runtime.Cancellation);
 
         _task = StartAsync();
     }
+
+    /// <summary>
+    /// The subscription this listener pulls from, resolved for its connection's project (default or tenant).
+    /// </summary>
+    protected SubscriptionName ListeningSubscriptionName => _endpoint.SubscriptionNameFor(_clients.ProjectId);
 
     public Uri Address => _endpoint.Uri;
 
@@ -90,21 +109,18 @@ public abstract class PubsubListener : IListener, ISupportDeadLetterQueue
         return true;
     }
 
-    public ValueTask StopAsync()
+    public async ValueTask StopAsync()
     {
-        _cancellation.Cancel();
-
-        return new ValueTask(_task);
+        await _cancellation.CancelAsync();
     }
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
-        _cancellation.Cancel();
+         await _cancellation.CancelAsync();
+        _cancellation.Dispose();
         _task.SafeDispose();
         _requeue.SafeDispose();
         _deadLetter.SafeDispose();
-
-        return ValueTask.CompletedTask;
     }
 
     public bool NativeDeadLetterQueueEnabled { get; }
@@ -125,6 +141,9 @@ public abstract class PubsubListener : IListener, ISupportDeadLetterQueue
         {
             try
             {
+                // Back to the resting state for each fresh attempt; only a real failure below may degrade it
+                _connectionState = TransportConnectionState.Unknown;
+
                 await listenAsync();
             }
             catch (TaskCanceledException) when (_cancellation.IsCancellationRequested)
@@ -138,6 +157,8 @@ public abstract class PubsubListener : IListener, ISupportDeadLetterQueue
             // https://stackoverflow.com/questions/60012138/google-cloud-function-pulling-from-pub-sub-subscription-throws-exception-deadl
             catch (RpcException ex) when (ex.StatusCode == StatusCode.DeadlineExceeded)
             {
+                _connectionState = TransportConnectionState.Reconnecting;
+
                 _logger.LogError(ex,
                     "{Uri}: Google Cloud Platform Pub/Sub returned \"DEADLINE_EXCEEDED\", attempting to restart listener.",
                     _endpoint.Uri);
@@ -159,11 +180,15 @@ public abstract class PubsubListener : IListener, ISupportDeadLetterQueue
 
                 if (retryCount > _endpoint.Client.RetryPolicy.MaxRetryCount)
                 {
+                    _connectionState = TransportConnectionState.Disconnected;
+
                     _logger.LogError(ex, "{Uri}: Max retry attempts reached, unable to restart listener.",
                         _endpoint.Uri);
 
                     throw;
                 }
+
+                _connectionState = TransportConnectionState.Reconnecting;
 
                 _logger.LogError(
                     ex,

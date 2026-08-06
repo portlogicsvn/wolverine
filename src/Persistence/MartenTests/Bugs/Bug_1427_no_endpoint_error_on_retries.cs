@@ -2,6 +2,7 @@ using IntegrationTests;
 using JasperFx;
 using JasperFx.Core;
 using Marten;
+using Marten.Newtonsoft;
 using Marten.Exceptions;
 using Marten.Schema;
 using Microsoft.Extensions.Hosting;
@@ -18,7 +19,7 @@ public class Bug_1427_no_endpoint_error_on_retries : IAsyncLifetime
 {
     private IHost _host = null!;
 
-    public Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         var builder = Host.CreateApplicationBuilder();
         builder.Services.AddMarten(o =>
@@ -46,11 +47,10 @@ public class Bug_1427_no_endpoint_error_on_retries : IAsyncLifetime
 
             options.MultipleHandlerBehavior = MultipleHandlerBehavior.Separated;
 
-            if (builder.Environment.IsDevelopment())
-            {
-                options.Durability.Mode = DurabilityMode.Solo;
-            }
-    
+            options.Discovery.DisableConventionalDiscovery()
+                .IncludeType(typeof(StartBatchHandler));
+            options.Durability.Mode = DurabilityMode.Solo;
+
             // ISSUE: this attempt to retry the failed messages leads to the "Wolverine.Runtime.Handlers.NoHandlerForEndpointException"
             options
                 .OnException<ConcurrencyException>()
@@ -59,12 +59,13 @@ public class Bug_1427_no_endpoint_error_on_retries : IAsyncLifetime
         });
 
         _host = builder.Build();
-        return _host.StartAsync();
+        await _host.StartAsync();
     }
 
-    public Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
-        return _host.StopAsync();
+        await _host.StopAsync();
+        _host.Dispose();
     }
 
     [Fact]

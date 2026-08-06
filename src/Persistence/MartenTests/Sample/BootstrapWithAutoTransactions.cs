@@ -10,10 +10,11 @@ public class BootstrapWithAutoTransactions
     public static async Task bootstrap()
     {
         #region sample_using_auto_apply_transactions_with_marten
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery();
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Services.AddMarten("some connection string")
                     .IntegrateWithWolverine();
 

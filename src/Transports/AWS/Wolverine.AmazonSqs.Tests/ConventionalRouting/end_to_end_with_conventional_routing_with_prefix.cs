@@ -6,36 +6,41 @@ using Wolverine.Tracking;
 
 namespace Wolverine.AmazonSqs.Tests.ConventionalRouting;
 
-[Trait("Category", "Flaky")]
-public class end_to_end_with_conventional_routing_with_prefix : IDisposable
+public class end_to_end_with_conventional_routing_with_prefix : IAsyncLifetime
 {
-    private readonly IHost _receiver;
-    private readonly IHost _sender;
+    private IHost _receiver = null!;
+    private IHost _sender = null!;
 
-    public end_to_end_with_conventional_routing_with_prefix()
+    public async ValueTask InitializeAsync()
     {
-        _sender = WolverineHost.For(opts =>
+        _sender = await WolverineHost.ForAsync(opts =>
         {
-            opts.UseAmazonSqsTransport()
+            opts.UseAmazonSqsTransportLocally()
                 .PrefixIdentifiers("shazaam")
                 .UseConventionalRouting().AutoProvision().AutoPurgeOnStartup();
             opts.DisableConventionalDiscovery();
             opts.ServiceName = "Sender";
         });
 
-        _receiver = WolverineHost.For(opts =>
+        _receiver = await WolverineHost.ForAsync(opts =>
         {
-            opts.UseAmazonSqsTransport()
+            opts.UseAmazonSqsTransportLocally()
                 .PrefixIdentifiers("shazaam")
                 .UseConventionalRouting().AutoProvision().AutoPurgeOnStartup();
             opts.ServiceName = "Receiver";
         });
     }
 
-    public void Dispose()
+    // StopAsync, not just Dispose: IHost.Dispose() tears down the container without ever running
+    // IHostedService.StopAsync, so the SQS listeners keep polling and steal messages from the next
+    // class in this namespace. See GH-3763.
+    public async ValueTask DisposeAsync()
     {
-        _sender?.Dispose();
-        _receiver?.Dispose();
+        await _sender.StopAsync();
+        _sender.Dispose();
+
+        await _receiver.StopAsync();
+        _receiver.Dispose();
     }
 
     [Fact]

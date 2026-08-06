@@ -13,11 +13,13 @@ public class MartenOutbox_end_to_end : PostgresqlContext, IAsyncLifetime
 {
     private IHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery().IncludeType(typeof(OutboxedMessageHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Services.AddMarten(Servers.PostgresConnectionString)
                     .IntegrateWithWolverine();
 
@@ -27,7 +29,7 @@ public class MartenOutbox_end_to_end : PostgresqlContext, IAsyncLifetime
             }).StartAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _host.StopAsync();
         _host.Dispose();
@@ -50,7 +52,7 @@ public class MartenOutbox_end_to_end : PostgresqlContext, IAsyncLifetime
 
             await outbox.PublishAsync(new OutboxedMessage { Id = id });
 
-            await session.SaveChangesAsync();
+            await session.SaveChangesAsync(TestContext.Current.CancellationToken);
         }
 
         var message = await waiter;
@@ -59,7 +61,7 @@ public class MartenOutbox_end_to_end : PostgresqlContext, IAsyncLifetime
         await using var query = _host.Services.GetRequiredService<IDocumentStore>()
             .QuerySession();
         ;
-        (await query.LoadAsync<Item>(id)).ShouldNotBeNull();
+        (await query.LoadAsync<Item>(id, TestContext.Current.CancellationToken)).ShouldNotBeNull();
     }
 }
 

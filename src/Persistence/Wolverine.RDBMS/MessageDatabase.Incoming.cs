@@ -9,8 +9,8 @@ namespace Wolverine.RDBMS;
 
 public abstract partial class MessageDatabase<T>
 {
-    private readonly string _markEnvelopeAsHandledById;
-    private readonly string _incrementIncomingEnvelopeAttempts;
+    protected string _markEnvelopeAsHandledById;
+    protected string _incrementIncomingEnvelopeAttempts;
 
     public abstract Task<IReadOnlyList<Envelope>> LoadPageOfGloballyOwnedIncomingAsync(Uri listenerAddress, int limit);
 
@@ -22,7 +22,7 @@ public abstract partial class MessageDatabase<T>
         var builder = ToCommandBuilder();
         foreach (var envelope in incoming)
         {
-            builder.Append($"update {SchemaName}.{DatabaseConstants.IncomingTable} set owner_id = ");
+            builder.Append($"update {QuotedSchemaName}.{DatabaseConstants.IncomingTable} set owner_id = ");
             builder.AppendParameter(ownerId);
             builder.Append($" where {DatabaseConstants.Id} = ");
             builder.AppendParameter(envelope.Id);
@@ -34,14 +34,21 @@ public abstract partial class MessageDatabase<T>
         return executeCommandBatch(builder, _cancellation);
     }
 
-    public Task StoreIncomingAsync(DbTransaction tx, Envelope[] envelopes)
+    public async Task StoreIncomingAsync(DbTransaction tx, Envelope[] envelopes)
     {
-        var cmd = DatabasePersistence.BuildIncomingStorageCommand(envelopes, this);
+        await using var cmd = DatabasePersistence.BuildIncomingStorageCommand(envelopes, this);
 
         cmd.Transaction = tx;
         cmd.Connection = tx.Connection;
 
-        return cmd.ExecuteNonQueryAsync(_cancellation);
+        try
+        {
+            await cmd.ExecuteNonQueryAsync(_cancellation);
+        }
+        catch (Exception e) when (IsDuplicateEnvelopeException(e))
+        {
+            throw new DuplicateIncomingEnvelopeException(envelopes);
+        }
     }
 
     public async Task MoveToDeadLetterStorageAsync(Envelope envelope, Exception? exception)
@@ -56,7 +63,7 @@ public abstract partial class MessageDatabase<T>
         try
         {
             var builder = ToCommandBuilder();
-            builder.Append($"delete from {SchemaName}.{DatabaseConstants.IncomingTable} WHERE id = ");
+            builder.Append($"delete from {QuotedSchemaName}.{DatabaseConstants.IncomingTable} WHERE id = ");
             builder.AppendParameter(envelope.Id);
             builder.Append($" and {DatabaseConstants.ReceivedAt} = ");
             builder.AppendParameter(envelope.Destination!.ToString());
@@ -68,7 +75,7 @@ public abstract partial class MessageDatabase<T>
         }
         catch (Exception e)
         {
-            if (isExceptionFromDuplicateEnvelope(e)) return;
+            if (IsDuplicateEnvelopeException(e)) return;
             throw;
         }
     }
@@ -88,13 +95,13 @@ public abstract partial class MessageDatabase<T>
     {
         if (HasDisposed) return;
         var keepUntil = DateTimeOffset.UtcNow.Add(Durability.KeepAfterMessageHandling);
-        
+
         var builder = ToCommandBuilder();
         builder.AddNamedParameter("keepUntil", keepUntil);
 
         foreach (var envelope in envelopes)
         {
-            builder.Append($"update {SchemaName}.{DatabaseConstants.IncomingTable} set {DatabaseConstants.Status} = '{EnvelopeStatus.Handled}', {DatabaseConstants.KeepUntil} = @keepUntil where id = ");
+            builder.Append($"update {QuotedSchemaName}.{DatabaseConstants.IncomingTable} set {DatabaseConstants.Status} = '{EnvelopeStatus.Handled}', {DatabaseConstants.KeepUntil} = @keepUntil where id = ");
             builder.AppendParameter(envelope.Id);
             builder.Append(" and ");
             builder.Append(DatabaseConstants.ReceivedAt);
@@ -108,7 +115,7 @@ public abstract partial class MessageDatabase<T>
 
     private async Task executeCommandBatch(DbCommandBuilder builder, CancellationToken token)
     {
-        var cmd = builder.Compile();
+        await using var cmd = builder.Compile();
 
         await using var conn = await DataSource.OpenConnectionAsync(token);
         try
@@ -139,7 +146,7 @@ public abstract partial class MessageDatabase<T>
         var builder = ToCommandBuilder();
         DatabasePersistence.BuildIncomingStorageCommand(this, builder, envelope);
 
-        var cmd = builder.Compile();
+        await using var cmd = builder.Compile();
         try
         {
             await using var conn = await DataSource.OpenConnectionAsync(_cancellation);
@@ -155,7 +162,7 @@ public abstract partial class MessageDatabase<T>
         }
         catch (Exception e)
         {
-            if (isExceptionFromDuplicateEnvelope(e))
+            if (IsDuplicateEnvelopeException(e))
             {
                 throw new DuplicateIncomingEnvelopeException(envelope);
             }
@@ -166,21 +173,88 @@ public abstract partial class MessageDatabase<T>
 
     public async Task StoreIncomingAsync(IReadOnlyList<Envelope> envelopes)
     {
-        var cmd = DatabasePersistence.BuildIncomingStorageCommand(envelopes, this);
+        if (envelopes.Count == 0) return;
+
+        await using var cmd = DatabasePersistence.BuildIncomingStorageCommand(envelopes, this);
 
         await using var conn = await _dataSource.OpenConnectionAsync(_cancellation);
         try
         {
+            // Wrap the multi-statement batch in an explicit transaction so the
+            // semantics are uniform across drivers: SqlClient/MySqlConnector/
+            // Microsoft.Data.Sqlite autocommit per statement otherwise, which
+            // would partially persist the batch on a duplicate-key failure and
+            // leave the inbox in a state that is indistinguishable from
+            // "envelope was already there". Npgsql already does this implicitly,
+            // but being explicit costs nothing and removes a per-driver footgun.
+            await using var tx = await conn.BeginTransactionAsync(_cancellation);
+            try
+            {
+                cmd.Connection = conn;
+                cmd.Transaction = tx;
+                await cmd.ExecuteNonQueryAsync(_cancellation);
+                await tx.CommitAsync(_cancellation);
+            }
+            catch (Exception e) when (IsDuplicateEnvelopeException(e))
+            {
+                await tx.RollbackAsync(_cancellation);
 
-            cmd.Connection = conn;
+                // Now that the batch is guaranteed rolled back, identify exactly
+                // which envelopes were already present via id-existence. Callers
+                // can retry the rest per-envelope.
+                var duplicates = new List<Envelope>();
+                foreach (var envelope in envelopes)
+                {
+                    if (await ExistsAsync(envelope, _cancellation).ConfigureAwait(false))
+                    {
+                        duplicates.Add(envelope);
+                    }
+                }
 
-            await cmd.ExecuteNonQueryAsync(_cancellation);
+                if (duplicates.Count == 0)
+                {
+                    // Backend reported a duplicate-key error but no envelope id
+                    // matches an existing row. Surface the original failure
+                    // rather than silently swallowing it.
+                    throw;
+                }
+
+                throw new DuplicateIncomingEnvelopeException(duplicates);
+            }
         }
         finally
         {
             await conn.CloseAsync();
         }
     }
+
+    protected bool IsDuplicateEnvelopeException(Exception ex)
+    {
+        for (var current = ex; current != null; current = current.InnerException)
+        {
+            if (isExceptionFromDuplicateEnvelope(current)) return true;
+        }
+
+        if (ex is AggregateException agg)
+        {
+            foreach (var inner in agg.InnerExceptions)
+            {
+                if (IsDuplicateEnvelopeException(inner)) return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Internal alias on top of <see cref="IsDuplicateEnvelopeException"/> for use by
+    /// other components in this assembly that need cross-provider unique-constraint
+    /// violation detection on inserts they own (e.g. the dynamic listener registry).
+    /// The underlying exception shape is the same regardless of which table fired
+    /// the unique constraint, so the per-provider <c>isExceptionFromDuplicateEnvelope</c>
+    /// override is reused as-is.
+    /// </summary>
+    internal bool IsUniqueConstraintViolation(Exception ex) => IsDuplicateEnvelopeException(ex);
 
     protected abstract bool isExceptionFromDuplicateEnvelope(Exception ex);
 }

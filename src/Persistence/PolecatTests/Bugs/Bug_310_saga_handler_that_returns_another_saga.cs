@@ -13,9 +13,9 @@ namespace PolecatTests.Bugs;
 
 public class Bug_310_saga_handler_that_returns_another_saga : IAsyncLifetime
 {
-    private IHost _host;
+    private IHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -35,7 +35,7 @@ public class Bug_310_saga_handler_that_returns_another_saga : IAsyncLifetime
             .ApplyAllConfiguredChangesToDatabaseAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _host.StopAsync();
         _host.Dispose();
@@ -52,11 +52,11 @@ public class Bug_310_saga_handler_that_returns_another_saga : IAsyncLifetime
 
         await using var session = _host.Services.GetRequiredService<IDocumentStore>().LightweightSession();
 
-        var sagaA = await session.LoadAsync<PcSagaA>(id);
-        sagaA.One.ShouldBeTrue();
+        var sagaA = await session.LoadAsync<PcSagaA>(id, TestContext.Current.CancellationToken);
+        sagaA!.One.ShouldBeTrue();
 
-        var sagaB = await session.LoadAsync<PcSagaB>(id);
-        sagaB.Two.ShouldBeTrue();
+        var sagaB = await session.LoadAsync<PcSagaB>(id, TestContext.Current.CancellationToken);
+        sagaB!.Two.ShouldBeTrue();
         sagaB.Three.ShouldBeTrue();
     }
 }

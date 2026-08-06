@@ -11,9 +11,11 @@ using Wolverine.Configuration;
 using Wolverine.Configuration.Capabilities;
 using Wolverine.Runtime;
 using Wolverine.Runtime.Routing;
+using Wolverine.Runtime.Serialization;
 using Wolverine.Transports;
 using Wolverine.Transports.Local;
 using Wolverine.Transports.Sending;
+using Wolverine.Transports.Tcp;
 using Xunit;
 
 namespace CoreTests;
@@ -29,6 +31,16 @@ public class WolverineOptionsTests
     }
 
     [Fact]
+    public void envelope_reader_limit_defaults_match_the_record()
+    {
+        var opts = new WolverineOptions();
+        opts.MaxIncomingEnvelopeBatchSize.ShouldBe(EnvelopeReaderLimits.Default.MaxBatchSize);
+        opts.MaxIncomingEnvelopeDataSize.ShouldBe(EnvelopeReaderLimits.Default.MaxDataSize);
+        opts.MaxIncomingEnvelopeHeaderCount.ShouldBe(EnvelopeReaderLimits.Default.MaxHeaderCount);
+        opts.MaxIncomingTcpFrameSize.ShouldBe(WireProtocol.DefaultMaxFrameSize);
+    }
+
+    [Fact]
     public void do_not_disable_external_listeners_by_default()
     {
         new WolverineOptions().DisableAllExternalListeners.ShouldBeFalse();
@@ -41,9 +53,12 @@ public class WolverineOptionsTests
     }
 
     [Fact]
-    public void default_service_location_policy_should_be_allowed_by_warn()
+    public void default_service_location_policy_should_be_not_allowed()
     {
-        new WolverineOptions().ServiceLocationPolicy.ShouldBe(ServiceLocationPolicy.AllowedButWarn);
+        // Wolverine 6.0 flipped the default from AllowedButWarn to NotAllowed.
+        // Apps that need service location for a specific type must opt in
+        // explicitly via opts.CodeGeneration.AlwaysUseServiceLocationFor<T>().
+        new WolverineOptions().ServiceLocationPolicy.ShouldBe(ServiceLocationPolicy.NotAllowed);
     }
 
     [Fact]
@@ -114,7 +129,7 @@ public class WolverineOptionsTests
     {
         using var runtime = await Host.CreateDefaultBuilder()
             .UseWolverine()
-            .StartAsync();
+            .StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         runtime.Services.GetRequiredService<IWolverineRuntime>()
             .Endpoints.EndpointFor(TransportConstants.DurableLocalUri)!
@@ -122,9 +137,9 @@ public class WolverineOptionsTests
     }
 
     [Fact]
-    public void sets_up_the_container_with_services()
+    public async Task sets_up_the_container_with_services()
     {
-        using var runtime = WolverineHost.For(registry =>
+        using var runtime = await WolverineHost.ForAsync(registry =>
         {
             registry.DisableConventionalDiscovery();
             registry.Services.AddScoped<IFoo, Foo>();

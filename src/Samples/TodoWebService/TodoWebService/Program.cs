@@ -1,5 +1,4 @@
 #region sample_bootstrapping_wolverine_http
-
 using Marten;
 using JasperFx;
 using JasperFx.Resources;
@@ -31,19 +30,15 @@ builder.Host.UseWolverine(opts =>
     opts.Policies.UseDurableLocalQueues();
 });
 
-// Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
-builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddOpenApi();
 
 builder.Services.AddWolverineHttp();
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
 {
-    app.UseSwagger();
-    app.UseSwaggerUI();
+    app.MapOpenApi();
 }
 
 // Let's add in Wolverine HTTP endpoints to the routing tree

@@ -1,4 +1,5 @@
 using System.Data.Common;
+using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
 using JasperFx;
 using JasperFx.Core.Reflection;
@@ -13,6 +14,15 @@ using Wolverine.RDBMS.Sagas;
 
 namespace Wolverine.Sqlite.Sagas;
 
+// AOT note (#2746): Reflection-based STJ over runtime saga state type T.
+// Same chunk D / chunk AE (Postgresql) / AF (SqlServer) pattern: AOT consumers
+// using lightweight Sqlite saga storage supply a JsonSerializerContext for their
+// saga state types or preserve via TrimmerRootDescriptor. T is statically rooted
+// via the saga registration (SagaTableDefinition).
+[UnconditionalSuppressMessage("Trimming", "IL2026",
+    Justification = "Reflection-based STJ over runtime saga state type; AOT consumers supply a JsonSerializerContext. See AOT guide.")]
+[UnconditionalSuppressMessage("AOT", "IL3050",
+    Justification = "Reflection-based STJ over runtime saga state type; AOT consumers supply a JsonSerializerContext. See AOT guide.")]
 public class DatabaseSagaSchema<T, TId> : IDatabaseSagaSchema<TId, T> where T : Saga
 {
     private readonly DatabaseSettings _settings;
@@ -134,7 +144,7 @@ public class DatabaseSagaSchema<T, TId> : IDatabaseSagaSchema<TId, T> where T : 
     {
         await ensureStorageExistsAsync(tx, cancellationToken);
 
-        var cmd = tx.CreateCommand(_loadSql)
+        await using var cmd = tx.CreateCommand(_loadSql)
             .With("id", id?.ToString() ?? throw new InvalidOperationException("Saga id cannot be null"));
 
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);

@@ -1,8 +1,8 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using JasperFx.CodeGeneration;
 using JasperFx.Core;
 using JasperFx.Core.Reflection;
-using JasperFx.RuntimeCompiler;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Metadata;
@@ -22,6 +22,16 @@ public partial class HttpChain : IEndpointConventionBuilder
     /// </summary>
     // ReSharper disable once InconsistentNaming
     public RouteHandlerBuilder Metadata { get; }
+
+    /// <summary>
+    /// Indicates whether the endpoint builder for this chain requires access to the application's
+    /// service provider. Default value is <see langword="false"/>.
+    /// </summary>
+    /// <remarks>
+    /// If <see langword="true"/>, the <c>RouteEndpointBuilder</c> used to build this chain's endpoint
+    /// will be instantiated with the service provider exposed by the parent <see cref="HttpGraph"/>.
+    /// </remarks>
+    internal bool RequiresApplicationServices { get; set; }
 
     public void Add(Action<EndpointBuilder> convention)
     {
@@ -46,6 +56,12 @@ public partial class HttpChain : IEndpointConventionBuilder
         return false;
     }
 
+    [UnconditionalSuppressMessage("Trimming", "IL2026",
+        Justification = "QuickBuild closes [FromKeyedServices] parameters via CloseAndBuildAs. _handlerType is populated from the generated handler assembly's ExportedTypes; constructors are emitted by codegen. AOT consumers pre-generate handlers via TypeLoadMode.Static.")]
+    [UnconditionalSuppressMessage("Trimming", "IL2077",
+        Justification = "_handlerType is populated from the generated handler assembly; constructors are emitted by codegen so they survive trimming in any practical setup.")]
+    [UnconditionalSuppressMessage("AOT", "IL3050",
+        Justification = "QuickBuild closes IFinder<TParameter> via MakeGenericType + Activator.CreateInstance; AOT consumers run pre-generated handlers via TypeLoadMode.Static.")]
     private HttpHandler buildHandler()
     {
         this.InitializeSynchronously(_parent.Rules, _parent, _parent.Container.Services);
@@ -88,7 +104,10 @@ public partial class HttpChain : IEndpointConventionBuilder
 
         var builder = new RouteEndpointBuilder(requestDelegate, RoutePattern!, Order)
         {
-            DisplayName = DisplayName
+            DisplayName = DisplayName,
+            ApplicationServices = RequiresApplicationServices
+                ? _parent.Container.Services
+                : EmptyServiceProvider.Instance // equivalent to not passing a value at all
         };
 
         establishResourceTypeMetadata(builder);
@@ -118,6 +137,21 @@ public partial class HttpChain : IEndpointConventionBuilder
         if (RouteName.IsNotEmpty())
         {
             builder.Metadata.Add(new RouteNameMetadata(RouteName));
+        }
+
+        if (HasExplicitOperationId)
+        {
+            builder.Metadata.Add(new EndpointNameMetadata(OperationId));
+        }
+
+        if (EndpointSummary.IsNotEmpty())
+        {
+            builder.Metadata.Add(new EndpointSummaryAttribute(EndpointSummary));
+        }
+
+        if (EndpointDescription.IsNotEmpty())
+        {
+            builder.Metadata.Add(new EndpointDescriptionAttribute(EndpointDescription));
         }
 
         Endpoint = (RouteEndpoint?)builder.Build();
@@ -161,6 +195,15 @@ public partial class HttpChain : IEndpointConventionBuilder
         {
             T.PopulateMetadata(method, builder);
         }
+    }
+
+    // Copied directly from `Microsoft.AspNetCore.Builder.EndpointBuilder`. Serves as the default
+    // value of `RouteEndpointBuilder.ApplicationServices` when the endpoint does not require the
+    // application's service provider.
+    private sealed class EmptyServiceProvider : IServiceProvider
+    {
+        public static EmptyServiceProvider Instance { get; } = new EmptyServiceProvider();
+        public object? GetService(Type serviceType) => null;
     }
 }
 

@@ -1,6 +1,3 @@
-// NOTE: This file requires Polecat 1.1+ (public ITenancy, ConnectionFactory, PolecatDatabase.ConnectionString)
-// Uncomment #if POLECAT_1_1 / #endif when ready, or remove the guards after upgrading the Polecat NuGet
-#if POLECAT_1_1
 using ImTools;
 using JasperFx;
 using JasperFx.Core.Reflection;
@@ -111,6 +108,12 @@ internal class PolecatMessageDatabaseSource : ITenantedMessageSource
         {
             await store.Admin.MigrateAsync();
         }
+        else
+        {
+            _runtime.LoggerFactory.CreateLogger<PolecatMessageDatabaseSource>().LogInformation(
+                "Skipping message storage migration for tenant message database {Database} because AutoCreate is None",
+                identifier);
+        }
 
         return store;
     }
@@ -183,4 +186,3 @@ internal class PolecatMessageDatabaseSource : ITenantedMessageSource
         return store;
     }
 }
-#endif

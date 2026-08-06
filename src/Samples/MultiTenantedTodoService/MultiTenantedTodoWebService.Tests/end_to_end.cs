@@ -24,7 +24,7 @@ public class end_to_end : IAsyncLifetime
         }
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         await using var conn = new NpgsqlConnection("Host=localhost;Port=5433;Database=postgres;Username=postgres;password=postgres");
         await conn.OpenAsync();
@@ -43,9 +43,9 @@ public class end_to_end : IAsyncLifetime
         await store.Advanced.Clean.DeleteAllDocumentsAsync();
     }
 
-    public Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
-        return _host.DisposeAsync().AsTask();
+        await _host.DisposeAsync().AsTask();
     }
 
     [Fact]
@@ -78,7 +78,7 @@ public class end_to_end : IAsyncLifetime
             x.Get.Url("/todoitems/tenant2");
         });
 
-        var results = result.ReadAsJson<Todo[]>();
+        var results = await result.ReadAsJsonAsync<Todo[]>();
         results.ShouldBeEmpty();
     }
 
@@ -93,8 +93,7 @@ public class end_to_end : IAsyncLifetime
     }
 
     #region sample_invoking_by_tenant
-
-    public static async Task invoking_by_tenant(IMessageBus bus)
+    private static async Task invoking_by_tenant(IMessageBus bus)
     {
         // Invoke inline
         await bus.InvokeForTenantAsync("tenant1", new CreateTodo("Release Wolverine 1.0"));
@@ -107,8 +106,7 @@ public class end_to_end : IAsyncLifetime
     #endregion
 
     #region sample_publish_by_tenant
-
-    public static async Task publish_by_tenant(IMessageBus bus)
+    private static async Task publish_by_tenant(IMessageBus bus)
     {
         await bus.PublishAsync(new CreateTodo("Fix that last broken test"),
             new DeliveryOptions { TenantId = "tenant3" });

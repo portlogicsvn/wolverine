@@ -14,6 +14,7 @@ internal partial class TrackedSession
         _otherHosts.AddRange(parent._otherHosts);
         _primaryLogger = parent._primaryLogger;
         _ignoreMessageRules.AddRange(parent._ignoreMessageRules);
+        _ignoreSystemCommands = parent._ignoreSystemCommands;
         _source = new();
 
         AssertAnyFailureAcknowledgements = parent.AssertAnyFailureAcknowledgements;
@@ -27,7 +28,7 @@ internal partial class TrackedSession
     {
         await using var scope = _primaryHost.Services.CreateAsyncScope();
         var context = scope.ServiceProvider.GetRequiredService<IMessageContext>();
-        await execution(context).WaitAsync(Timeout);
+        await execution(context).WaitAsync(Timeout).ConfigureAwait(false);
     }
     
     public async Task ExecuteAndTrackAsync()
@@ -36,14 +37,14 @@ internal partial class TrackedSession
         
         foreach (var before in Befores)
         {
-            await before(_primaryLogger, _cancellation.Token);
+            await before(_primaryLogger, _cancellation.Token).ConfigureAwait(false);
         }
 
         _stopwatch.Start();
 
         try
         {
-            await executeStageAsync(Execution);
+            await executeStageAsync(Execution).ConfigureAwait(false);
             _executionComplete = true;
         }
         catch (TimeoutException e)
@@ -69,13 +70,13 @@ internal partial class TrackedSession
         else
         {
             startTimeoutTracking();
-            await _source.Task;
+            await _source.Task.ConfigureAwait(false);
         }
 
         while (SecondaryStages.Any())
         {
             var child = SecondaryStages.Dequeue();
-            await child.ExecuteAsync();
+            await child.ExecuteAsync().ConfigureAwait(false);
         }
         
         cleanUp();
@@ -114,7 +115,7 @@ internal partial class TrackedSession
 
         public async Task ExecuteAsync()
         {
-            await _func(_parent._primaryLogger, _parent._cancellation.Token);
+            await _func(_parent._primaryLogger, _parent._cancellation.Token).ConfigureAwait(false);
         }
     }
 
@@ -132,7 +133,7 @@ internal partial class TrackedSession
         public async Task ExecuteAsync()
         {
             var child = new TrackedSession(_parent, _func);
-            await child.ExecuteAndTrackAsync();
+            await child.ExecuteAndTrackAsync().ConfigureAwait(false);
 
             // Copy in children data
             foreach (var envelopeHistory in child._envelopes)

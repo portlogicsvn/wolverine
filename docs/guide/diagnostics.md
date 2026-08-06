@@ -4,11 +4,11 @@ Wolverine can be configuration intensive, allows for quite a bit of customizatio
 quite a bit of external infrastructure. All of those things can be problematic, so Wolverine tries to provide diagnostic tools
 to unwind what's going on inside the application and the application's configuration. 
 
-Many of the diagnostics explained in this page are part of the [JasperFx command line integration](https://jasperfx.github.io/oakton) <== NOT SURE OF THE RIGHT URL. As a reminder,
+Many of the diagnostics explained in this page are part of the [JasperFx command line integration](/guide/command-line). As a reminder,
 to utilize this command line integration, you need to apply JasperFx as your command line parser as shown in the last line of the quickstart
 sample `Program.cs` file:
 
-<!-- snippet: sample_Quickstart_Program -->
+<!-- snippet: sample_quickstart_program -->
 <a id='snippet-sample_quickstart_program'></a>
 ```cs
 using JasperFx;
@@ -17,9 +17,8 @@ using Wolverine;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// The almost inevitable inclusion of Swashbuckle:)
-builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+// The almost inevitable inclusion of OpenApi:)
+builder.Services.AddOpenApi();
 
 // For now, this is enough to integrate Wolverine into
 // your application, but there'll be *many* more
@@ -40,9 +39,7 @@ app.MapPost("/issues/create", (CreateIssue body, IMessageBus bus) => bus.InvokeA
 // An endpoint to assign an issue to an existing user that delegates to Wolverine as a mediator
 app.MapPost("/issues/assign", (AssignIssue body, IMessageBus bus) => bus.InvokeAsync(body));
 
-// Swashbuckle inclusion
-app.UseSwagger();
-app.UseSwaggerUI();
+app.MapOpenApi();
 
 app.MapGet("/", () => Results.Redirect("/swagger"));
 
@@ -51,7 +48,7 @@ app.MapGet("/", () => Results.Redirect("/swagger"));
 // your Wolverine application
 return await app.RunJasperFxCommands(args);
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/Quickstart/Program.cs#L1-L43' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_quickstart_program' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/Quickstart/Program.cs#L1-L39' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_quickstart_program' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Command Line Description
@@ -108,7 +105,7 @@ dotnet run -- check-env
 Or even at startup, you can use:
 
 ```bash
-dotnet run -- check-env
+dotnet run -- run --check
 ```
 
 to have the environment checks executed at application startup, but just realize that the application will shutdown if any
@@ -133,8 +130,19 @@ using var host = await Host.CreateDefaultBuilder()
         Console.WriteLine(opts.DescribeHandlerMatch(typeof(MyMissingMessageHandler)));
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/HandlerDiscoverySamples.cs#L148-L160' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_describe_handler_match' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/HandlerDiscoverySamples.cs#L140-L151' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_describe_handler_match' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
+
+You can get the same report from the command line without editing any code, using the
+[`describe-handlers`](/guide/command-line#describe-handlers) diagnostics command <Badge type="tip" text="6.0" />:
+
+```bash
+dotnet run -- wolverine-diagnostics describe-handlers MyMissingMessageHandler
+```
+
+The type name is fuzzy-matched against the types in your application, so if more than one type matches you
+get a report for each. The command builds the host and compiles the handler graph without starting it, so
+no database or broker connection is required.
 
 ## Troubleshooting Message Routing
 
@@ -154,7 +162,7 @@ be helpful:
 <!-- snippet: sample_using_preview_subscriptions -->
 <a id='snippet-sample_using_preview_subscriptions'></a>
 ```cs
-public static void using_preview_subscriptions(IMessageBus bus)
+private static void using_preview_subscriptions(IMessageBus bus)
 {
     // Preview where Wolverine is wanting to send a message
     var outgoing = bus.PreviewSubscriptions(new BlueMessage());
@@ -166,6 +174,59 @@ public static void using_preview_subscriptions(IMessageBus bus)
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/CoreTests/Runtime/Routing/routing_rules.cs#L102-L116' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_preview_subscriptions' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/CoreTests/Runtime/Routing/routing_rules.cs#L102-L115' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_preview_subscriptions' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
+
+### Explaining *Why* a Message Routes Where It Does <Badge type="tip" text="6.0" />
+
+`PreviewSubscriptions` tells you *where* a message goes; `IWolverineRuntime.ExplainRoutingFor(Type)`
+tells you *why*. It returns a structured `RoutingExplanation` that walks Wolverine's route source
+chain in order and records what each source did:
+
+```csharp
+var runtime = host.Services.GetRequiredService<IWolverineRuntime>();
+
+RoutingExplanation explanation = runtime.ExplainRoutingFor(typeof(CreateOrder));
+
+// Human- and AI-readable text rendering
+Console.WriteLine(explanation.ToText());
+
+// Or inspect the structure directly
+foreach (var step in explanation.Steps)
+{
+    // step.Source is a RouteSourceDescriptor (Name, Description, IsAdditive, Conventions)
+    if (step.SkipReason is not null)
+    {
+        // an earlier *terminating* source already produced routes, so this one never ran
+        Console.WriteLine($"{step.Source.Name}: skipped — {step.SkipReason}");
+    }
+    else
+    {
+        Console.WriteLine($"{step.Source.Name}: produced {step.Produced.Count} route(s)");
+    }
+}
+```
+
+Wolverine consults its route sources in a fixed order, and a **terminating** source (e.g.
+`ExplicitRouting`, `AgentCommands`) short-circuits the rest of the chain once any routes have been
+accumulated, while **additive** sources (e.g. `LocalRouting`, `ConventionalRouting`) let later
+sources keep contributing. `RoutingExplanation` makes that precedence visible:
+
+- `MessageType` and `IsSystemMessageType` — the latter is `true` for framework-internal types
+  (`IInternalMessage` / `IAgentCommand` / `INotToBeRouted`, or types from an
+  `[ExcludeFromServiceCapabilities]` assembly), which are filtered out of observers and service
+  capabilities.
+- `LocalRoutingConventionDisabled` — the current value of
+  `WolverineOptions.LocalRoutingConventionDisabled`; when `true` the `LocalRouting` source is
+  short-circuited, so it explains why a locally-handled message routes nowhere locally.
+- `Steps` — one `RouteSourceStep` per route source consulted, in order, each carrying the source's
+  descriptor, the routes it produced, and a `SkipReason` when a prior terminating source had
+  already short-circuited the chain.
+- `FinalRoutes` — the final, de-duplicated route set actually used.
+
+The same information is also available from the command line — see
+[`describe-routing --explain`](/guide/command-line#describe-routing) — and the route-source
+descriptors are surfaced in Wolverine's service capabilities so external tooling (e.g. CritterWatch)
+can reason about routing decisions. The text output is deliberately stable and labeled so it is
+useful for both humans and AI agents.
 

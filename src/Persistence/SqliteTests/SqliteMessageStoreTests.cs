@@ -30,12 +30,17 @@ public class SqliteMessageStoreTests : MessageStoreCompliance, IAsyncLifetime
                 opts.PersistMessagesWithSqlite(_database.ConnectionString);
 
                 opts.ListenAtPort(2345).UseDurableInbox();
+
+                // Exercise the real RdbmsListenerStore impl in the IListenerStore
+                // compliance tests (GH-2685). When this flag is off the suite falls
+                // back to the NullListenerStore short-circuit in MessageStoreCompliance.
+                opts.Durability.EnableDynamicListeners = true;
             }).StartAsync();
 
         return host;
     }
 
-    async Task IAsyncLifetime.DisposeAsync()
+    async ValueTask IAsyncDisposable.DisposeAsync()
     {
         await base.DisposeAsync();
         _database.Dispose();
@@ -93,11 +98,11 @@ public class SqliteMessageStoreTests : MessageStoreCompliance, IAsyncLifetime
         await theHost.InvokeAsync(new DatabaseOperationBatch(messageDatabase, [log]));
 
         using var dataSource = new SqliteDataSource(_database.ConnectionString);
-        await using var conn = await dataSource.OpenConnectionAsync();
+        await using var conn = await dataSource.OpenConnectionAsync(TestContext.Current.CancellationToken);
         await conn.CreateCommand(
                 $"update {DatabaseConstants.NodeRecordTableName} set timestamp = @time where node_number = 2")
             .With("time", DateTimeOffset.UtcNow.Subtract(10.Days()).ToString("o"))
-            .ExecuteNonQueryAsync();
+            .ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
 
         var recent2 = await thePersistence.Nodes.FetchRecentRecordsAsync(100);
 

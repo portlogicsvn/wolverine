@@ -43,6 +43,7 @@ public class OutboxedSessionFactory
     protected ISessionFactory _factory;
     private readonly IDocumentStore _store;
     private readonly bool _shouldPublishEvents;
+    private readonly bool _shouldTrackAppends;
 
     private readonly Func<MessageContext, IDocumentSession> _builder;
 
@@ -50,8 +51,9 @@ public class OutboxedSessionFactory
     {
         _factory = factory;
         _store = store;
-        
+
         _shouldPublishEvents = runtime.TryFindExtension<MartenIntegration>()?.UseFastEventForwarding ?? false;
+        _shouldTrackAppends = runtime.Options.Tracking.EnableEventAppendTracking;
 
         MessageStore = runtime.Storage;
         
@@ -137,8 +139,20 @@ public class OutboxedSessionFactory
     private void configureSession(MessageContext context, IDocumentSession session)
     {
         context.OverrideStorage(MessageStore);
-        
-        if (context.ConversationId != Guid.Empty)
+
+        // Per-message CausationId override supplied via
+        // DeliveryOptions.CausationId (envelope header "causation-id") takes
+        // precedence over the default Wolverine ConversationId-based causation
+        // chain. This is how a projection that calls
+        // slice.PublishMessage(cmd, metadata with CausationId = ...) gets the
+        // overridden id onto the events the command's handler writes.
+        if (context.Envelope is { } env
+            && env.Headers.TryGetValue(EnvelopeConstants.CausationIdKey, out var headerCausationId)
+            && !string.IsNullOrEmpty(headerCausationId))
+        {
+            session.CausationId = headerCausationId;
+        }
+        else if (context.ConversationId != Guid.Empty)
         {
             session.CausationId = context.ConversationId.ToString();
         }
@@ -160,6 +174,11 @@ public class OutboxedSessionFactory
         if (_shouldPublishEvents)
         {
             session.Listeners.Add(new PublishIncomingEventsBeforeCommit(context));
+        }
+
+        if (_shouldTrackAppends)
+        {
+            session.Listeners.Add(new NotifyObserverOfAppendedEvents(context));
         }
 
         session.Listeners.Add(new FlushOutgoingMessagesOnCommit(context, transaction.Store));

@@ -1,4 +1,5 @@
 using System.Data;
+using JasperFx.Events.Daemon;
 using System.Data.Common;
 using JasperFx.Core;
 using Microsoft.Extensions.Logging;
@@ -49,7 +50,7 @@ internal class PostgresqlNodePersistence : DatabaseConstants, INodeAgentPersiste
 
     public async Task<int> PersistAsync(WolverineNode node, CancellationToken cancellationToken)
     {
-        var cmd = _dataSource.CreateCommand(
+        await using var cmd = _dataSource.CreateCommand(
                 $"insert into {_nodeTable} (id, uri, capabilities, description, version) values (:id, :uri, :capabilities, :description, :version) returning node_number")
             .With("id", node.NodeId)
             .With("uri", (node.ControlUri ?? TransportConstants.LocalUri).ToString())
@@ -71,8 +72,9 @@ internal class PostgresqlNodePersistence : DatabaseConstants, INodeAgentPersiste
             return Task.CompletedTask;
         }
 
+        var quotedSchema = _settings.SchemaName.QuoteIdentifier();
         return _dataSource.CreateCommand(
-                $"delete from {_nodeTable} where id = :id;update {_settings.SchemaName}.{IncomingTable} set {OwnerId} = 0 where {OwnerId} = :number;update {_settings.SchemaName}.{OutgoingTable} set {OwnerId} = 0 where {OwnerId} = :number;")
+                $"delete from {_nodeTable} where id = :id;update {quotedSchema}.{IncomingTable} set {OwnerId} = 0 where {OwnerId} = :number;update {quotedSchema}.{OutgoingTable} set {OwnerId} = 0 where {OwnerId} = :number;")
             .With("id", nodeId)
             .With("number", assignedNodeNumber)
             .ExecuteNonQueryAsync();
@@ -111,6 +113,11 @@ internal class PostgresqlNodePersistence : DatabaseConstants, INodeAgentPersiste
     public async Task PersistAgentRestrictionsAsync(IReadOnlyList<AgentRestriction> restrictions,
         CancellationToken cancellationToken)
     {
+        // No changes to persist. Compiling/executing an empty BatchBuilder yields a single command with
+        // an empty CommandText, which throws "CommandText property has not been initialized" — so no-op
+        // instead. The empty case happens on an idempotent restriction apply (no delta). See wolverine#3252.
+        if (restrictions.Count == 0) return;
+
         var builder = new BatchBuilder();
         foreach (var restriction in restrictions)
         {
@@ -131,7 +138,7 @@ internal class PostgresqlNodePersistence : DatabaseConstants, INodeAgentPersiste
             }
         }
         
-        var batch = builder.Compile();
+        await using var batch = builder.Compile();
         await using var conn = await _dataSource.OpenConnectionAsync(cancellationToken);
         batch.Connection = conn;
         await batch.ExecuteNonQueryAsync(cancellationToken);
@@ -229,7 +236,7 @@ internal class PostgresqlNodePersistence : DatabaseConstants, INodeAgentPersiste
                 $"insert into {_assignmentTable} (id, node_id) values (:{parameter.ParameterName}, :{nodeParameter.ParameterName}) on conflict (id) do update set node_id = :{nodeParameter.ParameterName};");
         }
 
-        var command = builder.Compile();
+        await using var command = builder.Compile();
         command.Connection = conn;
         await command.ExecuteNonQueryAsync(cancellationToken);
 
@@ -261,15 +268,31 @@ internal class PostgresqlNodePersistence : DatabaseConstants, INodeAgentPersiste
             .ExecuteNonQueryAsync();
     }
 
-    public async Task MarkHealthCheckAsync(WolverineNode node, CancellationToken token)
+    public async Task<bool> MarkHealthCheckAsync(WolverineNode node, CancellationToken token)
     {
         var count = await _dataSource.CreateCommand($"update {_nodeTable} set health_check = now() where id = :id")
             .With("id", node.NodeId).ExecuteNonQueryAsync(token);
 
-        if (count == 0)
-        {
-            await PersistAsync(node, token);
-        }
+        // GH-3604 / D2: a miss means a peer deleted this still-live node's row; report it to the caller
+        // instead of blindly re-inserting a skeleton (fresh node_number, empty capabilities) here.
+        return count != 0;
+    }
+
+    public async Task ReregisterNodeAsync(WolverineNode node, CancellationToken token)
+    {
+        // Preserve the existing node_number (SERIAL default is overridden by the explicit value) and
+        // capabilities so the resurrected row matches the identity the process still uses in memory.
+        var strings = node.Capabilities.Select(x => x.ToString()).ToArray();
+
+        await _dataSource.CreateCommand(
+                $"insert into {_nodeTable} (id, node_number, uri, capabilities, description, version, health_check) values (:id, :number, :uri, :capabilities, :description, :version, now()) on conflict (id) do update set node_number = :number, uri = :uri, capabilities = :capabilities, description = :description, version = :version, health_check = now()")
+            .With("id", node.NodeId)
+            .With("number", node.AssignedNodeNumber)
+            .With("uri", (node.ControlUri ?? TransportConstants.LocalUri).ToString())
+            .With("capabilities", strings)
+            .With("description", node.Description)
+            .With("version", node.Version.ToString())
+            .ExecuteNonQueryAsync(token);
     }
 
     public Task LogRecordsAsync(params NodeRecord[] records)
@@ -301,9 +324,10 @@ internal class PostgresqlNodePersistence : DatabaseConstants, INodeAgentPersiste
             };
         };
 
+        var quotedSchema = _settings.SchemaName.QuoteIdentifier();
         return await _dataSource
             .CreateCommand(
-                $"select node_number, event_name, timestamp, description from {_settings.SchemaName}.{NodeRecordTableName} order by id desc LIMIT :limit")
+                $"select node_number, event_name, timestamp, description from {quotedSchema}.{NodeRecordTableName} order by id desc LIMIT :limit")
             .With("limit", count)
             .FetchListAsync(readRecord);
     }
@@ -312,8 +336,9 @@ internal class PostgresqlNodePersistence : DatabaseConstants, INodeAgentPersiste
     {
         if (retainCount <= 0) return Task.CompletedTask;
 
+        var quotedSchema = _settings.SchemaName.QuoteIdentifier();
         return _dataSource.CreateCommand(
-                $"delete from {_settings.SchemaName}.{NodeRecordTableName} where id not in (select id from {_settings.SchemaName}.{NodeRecordTableName} order by id desc limit :retain)")
+                $"delete from {quotedSchema}.{NodeRecordTableName} where id not in (select id from {quotedSchema}.{NodeRecordTableName} order by id desc limit :retain)")
             .With("retain", retainCount)
             .ExecuteNonQueryAsync();
     }
@@ -390,15 +415,109 @@ internal class AdvisoryLock : IAdvisoryLock
 
     public bool HasLock(int lockId)
     {
-        return _conn is not { State: ConnectionState.Closed } && _locks.Contains(lockId);
+        if (_conn is null) return false;
+        if (!_locks.Contains(lockId)) return false;
+
+        // Postgres releases session-level advisory locks the moment the
+        // backend session ends — network blip, idle-connection cull,
+        // pg_terminate_backend, Postgres failover, Azure flexserver
+        // maintenance. Npgsql's NpgsqlConnection.State stays Open until
+        // we actually try to use it, so without this ping HasLock keeps
+        // claiming the lock long after another session has acquired it,
+        // and two nodes both believe they're the leader. See GH-2602.
+        //
+        // GH-3664: this ping is only safe because the connection never has
+        // an open transaction — the session reads state='idle' with
+        // xact_start NULL in pg_stat_activity, so Marten's event-gap
+        // liveness gate (marten#4953/#5057) never counts it as a possible
+        // sequence reserver. Do NOT copy this keepalive pattern into any
+        // code path that holds an open transaction: bumping state_change
+        // inside a transaction makes the session look active and
+        // legitimately re-promotes it to candidate reserver, freezing
+        // async-daemon progress behind dead gaps.
+        try
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "select 1";
+            cmd.CommandTimeout = 2;
+            cmd.ExecuteScalar();
+            return true;
+        }
+        catch (Exception e)
+        {
+            _logger.LogWarning(e,
+                "Lost advisory-lock connection for database {Database}; clearing held lock ids {Locks}",
+                _databaseName, _locks);
+
+            _locks.Clear();
+            try
+            {
+                _conn.Dispose();
+            }
+            catch
+            {
+                // Already broken; nothing to do.
+            }
+            _conn = null;
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// GH-3664: stamp the dedicated lock connection's <c>application_name</c> so an operator scanning
+    /// pg_stat_activity can tell at a glance what is holding the session — these connections live for the
+    /// process lifetime and otherwise look like anonymous idle sessions. Deliberately session-scoped SQL
+    /// (set_config) rather than a connection-string edit: the NpgsqlDataSource may carry auth plumbing
+    /// (e.g. Azure token callbacks) that a rebuilt connection string would lose. Best-effort — a tagging
+    /// failure must never cost us the lock connection.
+    /// </summary>
+    private async Task tagSessionAsync(NpgsqlConnection conn, CancellationToken token)
+    {
+        try
+        {
+            // application_name is capped at NAMEDATALEN-1 (63) chars; Postgres would truncate with a
+            // warning, so truncate quietly here instead.
+            var name = $"wolverine-advisory-lock:{_databaseName}";
+            if (name.Length > 63)
+            {
+                name = name[..63];
+            }
+
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "select set_config('application_name', @name, false)";
+            cmd.Parameters.AddWithValue("name", name);
+            await cmd.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        }
+        catch (Exception e)
+        {
+            _logger.LogDebug(e, "Unable to tag the advisory-lock session for database {Database}",
+                _databaseName);
+        }
     }
 
     public async Task<bool> TryAttainLockAsync(int lockId, CancellationToken token)
     {
+        // Idempotent against repeated calls on the same session. Postgres
+        // session-level advisory locks STACK ("Multiple lock requests stack,
+        // so that if the same resource is locked three times it must then be
+        // unlocked three times to be released" — Postgres docs). Since the
+        // a84d6a262 heartbeat-renewal change calls TryAttainLeadershipLockAsync
+        // every tick — including ticks where the leader already holds the
+        // lock — without this short-circuit the leader's lock count grows by
+        // one per heartbeat. The single ReleaseLeadershipLockAsync call
+        // during DisableAgentsAsync or stepDownAsync then only decrements
+        // once, leaving the lock still held server-side and silently
+        // blocking failover (no error logged, just a stalled election).
+        if (_locks.Contains(lockId) && HasLock(lockId))
+        {
+            return true;
+        }
+
         if (_conn == null)
         {
             _conn = _source.CreateConnection();
             await _conn.OpenAsync(token).ConfigureAwait(false);
+            await tagSessionAsync(_conn, token).ConfigureAwait(false);
         }
 
         if (_conn.State == ConnectionState.Closed)
@@ -445,7 +564,7 @@ internal class AdvisoryLock : IAdvisoryLock
 
         try
         {
-            var cancellation = new CancellationTokenSource();
+            using var cancellation = new CancellationTokenSource();
             cancellation.CancelAfter(1.Seconds());
 
             await _conn.ReleaseGlobalLock(lockId, cancellation.Token).ConfigureAwait(false);

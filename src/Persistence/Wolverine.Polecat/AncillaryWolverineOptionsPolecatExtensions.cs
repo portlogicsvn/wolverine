@@ -1,15 +1,14 @@
-// NOTE: This file requires Polecat 1.1+ (AddPolecatStore<T>, IConfigurePolecat<T>, PolecatStoreExpression<T>)
-// Uncomment #if POLECAT_1_1 / #endif when ready, or remove the guards after upgrading the Polecat NuGet
-#if POLECAT_1_1
 using JasperFx;
 using JasperFx.Core;
 using JasperFx.Core.Reflection;
+using JasperFx.Events;
 using JasperFx.Events.Subscriptions;
 using Polecat;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Weasel.Core;
 using Wolverine.Polecat.Distribution;
+using Wolverine.Runtime.Agents;
 using Wolverine.Polecat.Publishing;
 using Wolverine.Polecat.Subscriptions;
 using Wolverine.Persistence;
@@ -61,6 +60,13 @@ public static class AncillaryWolverineOptionsPolecatExtensions
 
         expression.Services.AddSingleton<IConfigurePolecat<T>, PolecatOverrides<T>>();
 
+        // GH-3219: bridge the store-agnostic JasperFx.Events.IEventStore for the ancillary store type T,
+        // mirroring the primary store (WolverineOptionsPolecatExtensions) and core Marten's ancillary
+        // registration. Without it the ancillary Polecat store is invisible to anything that discovers
+        // stores via GetServices<IEventStore>() — the EventSubscriptionAgentFamily (so ancillary async
+        // projections never distribute) and downstream tooling like CritterWatch's projection explorer.
+        expression.Services.AddSingleton<IEventStore>(s => (IEventStore)s.GetRequiredService<T>());
+
         expression.Services.AddSingleton<AncillaryMessageStore>(s =>
         {
             var store = s.GetRequiredService<T>();
@@ -71,8 +77,12 @@ public static class AncillaryWolverineOptionsPolecatExtensions
                              runtime.Options.Durability.MessageStorageSchemaName ??
                              "wolverine";
 
+            // Dispatch on database cardinality rather than the tenancy's exact type name — the
+            // name check breaks for DefaultTenancy subclasses (see the Marten twin of this seam,
+            // where marten#4864's TenantPartitionedSingleDatabaseTenancy was misrouted to the
+            // multi-tenanted path and startup failed for lack of a master database).
             if (store.Options.Tenancy != null &&
-                store.Options.Tenancy.GetType().Name != "DefaultTenancy")
+                store.Options.Tenancy.Cardinality != JasperFx.Descriptors.DatabaseCardinality.Single)
             {
                 return BuildMultiTenantedMessageDatabase<T>(schemaName, integration.AutoCreate,
                     integration.MainConnectionString, store, runtime);
@@ -317,7 +327,27 @@ internal class PolecatOverrides<T> : IConfigurePolecat<T> where T : IDocumentSto
     public void Configure(IServiceProvider services, StoreOptions options)
     {
         // Polecat's DocumentMapping automatically detects IRevisioned types
-        // and enables numeric revisions
+        // and enables numeric revisions.
+
+        // GH-3109: replace this ancillary store's default NulloMessageOutbox with the Wolverine
+        // bridge so a projection author who calls slice.PublishMessage(...) from a RaiseSideEffects
+        // override on THIS store has the message delivered through the Wolverine outbox after the
+        // projection batch commits — parity with the primary store (PolecatOverrides above) and the
+        // Marten ancillary side. Without this the ancillary store silently drops projection-published
+        // messages.
+        options.Events.MessageOutbox = new PolecatToWolverineOutbox(services);
+
+        // GH-3290: mirror the primary store (PolecatOverrides) — the ancillary managed
+        // distribution flag lives on the main PolecatIntegration (see the
+        // IProjectionCoordinator<T> factory registration above), so defer to it here too.
+        // ExternallyManaged keeps the runtime posture of Disabled (nothing Polecat-hosted
+        // starts) while recording that the async projections DO run under Wolverine's
+        // distribution. Only upgrades from Disabled — never overrides an explicit user choice.
+        var integration = services.GetService<PolecatIntegration>();
+        if (integration is { UseWolverineManagedEventSubscriptionDistribution: true }
+            && options.DaemonSettings.AsyncMode == JasperFx.Events.Daemon.DaemonMode.Disabled)
+        {
+            options.DaemonSettings.AsyncMode = JasperFx.Events.Daemon.DaemonMode.ExternallyManaged;
+        }
     }
 }
-#endif

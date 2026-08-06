@@ -2,6 +2,7 @@ using IntegrationTests;
 using JasperFx.Events;
 using JasperFx.Resources;
 using Marten;
+using JasperFx.Events.Projections;
 using Marten.Events.Projections;
 using Microsoft.Extensions.Hosting;
 using Shouldly;
@@ -19,6 +20,7 @@ public class override_of_event_metadata
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Discovery.DisableConventionalDiscovery().IncludeType(typeof(AEventHandler))
                     .IncludeType(typeof(EmitEventsWithMetadataHandler));
 
@@ -40,17 +42,17 @@ public class override_of_event_metadata
 
 
                 opts.Services.AddResourceSetupOnStartup();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var id = Guid.NewGuid();
         
         using var session = host.DocumentStore().LightweightSession();
         session.Events.StartStream<LetterAggregate>(id, new AEvent());
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         await host.InvokeMessageAndWaitAsync(new EmitEventsWithMetadata(id));
 
-        var stream = await session.Events.FetchStreamAsync(id);
+        var stream = await session.Events.FetchStreamAsync(id, token: TestContext.Current.CancellationToken);
 
         foreach (var e in stream)
         {

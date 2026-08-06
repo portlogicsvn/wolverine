@@ -2,8 +2,6 @@ using Alba;
 using Shouldly;
 using WolverineWebApi;
 using Xunit;
-using Xunit.Abstractions;
-
 namespace Wolverine.Http.Tests;
 
 public class ContentNegotiationTests : IntegrationContext
@@ -25,7 +23,7 @@ public class ContentNegotiationTests : IntegrationContext
             x.StatusCodeShouldBeOk();
         });
 
-        var text = result.ReadAsText();
+        var text = await result.ReadAsTextAsync();
         text.ShouldBe("Widget: 42");
     }
 
@@ -39,7 +37,7 @@ public class ContentNegotiationTests : IntegrationContext
             x.StatusCodeShouldBeOk();
         });
 
-        var text = result.ReadAsText();
+        var text = await result.ReadAsTextAsync();
         text.ShouldBe("Name,Value\nWidget,42");
     }
 
@@ -53,7 +51,7 @@ public class ContentNegotiationTests : IntegrationContext
             x.StatusCodeShouldBeOk();
         });
 
-        var item = result.ReadAsJson<ConnegItem>();
+        var item = await result.ReadAsJsonAsync<ConnegItem>();
         item.ShouldNotBeNull();
         item!.Name.ShouldBe("Widget");
         item.Value.ShouldBe(42);
@@ -69,7 +67,7 @@ public class ContentNegotiationTests : IntegrationContext
             x.StatusCodeShouldBeOk();
         });
 
-        var item = result.ReadAsJson<ConnegItem>();
+        var item = await result.ReadAsJsonAsync<ConnegItem>();
         item.ShouldNotBeNull();
         item!.Name.ShouldBe("LooseWidget");
     }
@@ -95,7 +93,7 @@ public class ContentNegotiationTests : IntegrationContext
             x.StatusCodeShouldBeOk();
         });
 
-        var text = result.ReadAsText();
+        var text = await result.ReadAsTextAsync();
         text.ShouldBe("StrictWidget: 99");
     }
 
@@ -109,7 +107,7 @@ public class ContentNegotiationTests : IntegrationContext
             x.StatusCodeShouldBeOk();
         });
 
-        var text = result.ReadAsText();
+        var text = await result.ReadAsTextAsync();
         text.ShouldBe("LooseWidget: 77");
     }
 }

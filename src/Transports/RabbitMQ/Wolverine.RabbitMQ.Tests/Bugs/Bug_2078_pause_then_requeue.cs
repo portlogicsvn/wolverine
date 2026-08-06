@@ -7,11 +7,8 @@ using Shouldly;
 using Wolverine.ErrorHandling;
 using Wolverine.Runtime.Handlers;
 using Xunit;
-using Xunit.Abstractions;
-
 namespace Wolverine.RabbitMQ.Tests.Bugs;
 
-[Trait("Category", "Flaky")]
 public class Bug_2078_pause_then_requeue : IAsyncLifetime
 {
     private readonly ITestOutputHelper _output;
@@ -24,7 +21,7 @@ public class Bug_2078_pause_then_requeue : IAsyncLifetime
         _queueName = RabbitTesting.NextQueueName();
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         PauseThenRequeueHandler.Reset();
 
@@ -43,12 +40,12 @@ public class Bug_2078_pause_then_requeue : IAsyncLifetime
             }).StartAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         if (_host != null)
         {
-            await _host.TeardownResources();
             await _host.StopAsync();
+            await _host.TeardownResources();
             _host.Dispose();
         }
     }
@@ -102,7 +99,7 @@ public class Bug_2078_pause_then_requeue : IAsyncLifetime
 
     private static async Task<bool> Poll(TimeSpan timeout, Func<bool> condition)
     {
-        var cts = new CancellationTokenSource(timeout);
+        using var cts = new CancellationTokenSource(timeout);
         while (!cts.IsCancellationRequested)
         {
             if (condition()) return true;

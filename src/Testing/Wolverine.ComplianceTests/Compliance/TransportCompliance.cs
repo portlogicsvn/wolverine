@@ -8,6 +8,7 @@ using Wolverine;
 using Wolverine.ComplianceTests.ErrorHandling;
 using Wolverine.Configuration;
 using Wolverine.ErrorHandling;
+using Wolverine.Newtonsoft;
 using Wolverine.Runtime;
 using Wolverine.Runtime.Serialization;
 using Wolverine.Tracking;
@@ -32,10 +33,31 @@ public abstract class TransportComplianceFixture : IDisposable, IAsyncDisposable
 
     public bool AllLocally { get; set; }
 
-    public bool MustReset { get; set; } = false;
-    
+    public bool MustReset { get; set; } = true;
+
     public bool IsSenderOnlyTransport { get; set; }
 
+    /// <summary>
+    /// Durability mode applied to the sender and receiver hosts. Defaults to Solo,
+    /// which is correct for the vast majority of broker transports. Control-plane
+    /// transports that only register in a clustered mode (e.g. the RavenDB control
+    /// queue, which wires its NodeControlEndpoint only under Balanced) can override
+    /// this to DurabilityMode.Balanced.
+    /// </summary>
+    public DurabilityMode Mode { get; set; } = DurabilityMode.Solo;
+
+    /// <summary>
+    /// Tears down the sender and receiver hosts, then hands off to <see cref="AfterDisposeAsync"/>.
+    /// </summary>
+    /// <remarks>
+    /// Do NOT hide this with a <c>public new DisposeAsync()</c> in a derived fixture. It reads like an
+    /// override and is not one: <see cref="TransportCompliance{T}"/> disposes the fixture through a
+    /// <c>T</c>-typed reference, which binds statically to *this* method, so the hiding member is simply
+    /// never called. Thirty-four fixtures had one; seven of those carried real cleanup — a SQLite database,
+    /// shared-memory queues, and four local MQTT brokers — that had never once executed, and four more were
+    /// infinitely self-recursive dead code. Put transport-specific cleanup in <see cref="AfterDisposeAsync"/>,
+    /// which is virtual and actually runs. See #3763.
+    /// </remarks>
     public async ValueTask DisposeAsync()
     {
         if (Sender == null)
@@ -85,7 +107,7 @@ public abstract class TransportComplianceFixture : IDisposable, IAsyncDisposable
             .UseWolverine(options =>
             {
                 configure(options);
-                options.Durability.Mode = DurabilityMode.Solo;
+                options.Durability.Mode = Mode;
                 configureReceiver(options);
                 configureSender(options);
             }).StartAsync();
@@ -98,7 +120,7 @@ public abstract class TransportComplianceFixture : IDisposable, IAsyncDisposable
             {
                 configure(opts);
                 configureSender(opts);
-                opts.Durability.Mode = DurabilityMode.Solo;
+                opts.Durability.Mode = Mode;
             }).StartAsync();
 
     }
@@ -116,7 +138,7 @@ public abstract class TransportComplianceFixture : IDisposable, IAsyncDisposable
         options.Services.AddSingleton<IMessageSerializer, GreenTextWriter>();
         //options.Services.AddResourceSetupOnStartup(StartupAction.ResetState);
 
-        options.Durability.Mode = DurabilityMode.Solo;
+        options.Durability.Mode = Mode;
 
         options.UseNewtonsoftForSerialization();
     }
@@ -126,7 +148,7 @@ public abstract class TransportComplianceFixture : IDisposable, IAsyncDisposable
         Receiver = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
-                opts.Durability.Mode = DurabilityMode.Solo;
+                opts.Durability.Mode = Mode;
                 configure(opts);
                 configureReceiver(opts);
             }).StartAsync();
@@ -175,17 +197,25 @@ public abstract class TransportCompliance<T> : IAsyncLifetime where T : Transpor
     protected Uri theOutboundAddress = null!;
     protected IHost theReceiver = null!;
     protected IHost theSender = null!;
+    private readonly bool _ownFixture;
 
     protected TransportCompliance()
     {
         Fixture = new T();
+        _ownFixture = true;
+    }
+
+    protected TransportCompliance(T fixture)
+    {
+        Fixture = fixture;
+        _ownFixture = false;
     }
 
     public T Fixture { get; }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
-        if (Fixture is IAsyncLifetime lifetime)
+        if (_ownFixture && Fixture is IAsyncLifetime lifetime)
         {
             await lifetime.InitializeAsync();
         }
@@ -194,26 +224,27 @@ public abstract class TransportCompliance<T> : IAsyncLifetime where T : Transpor
         theReceiver = Fixture.Receiver;
         theOutboundAddress = Fixture.OutboundAddress;
 
-        await Fixture.Sender.ResetResourceState();
-
-        if (Fixture.Receiver != null && !ReferenceEquals(Fixture.Sender, Fixture.Receiver))
+        if (Fixture.MustReset)
         {
-            await Fixture.Receiver.ResetResourceState();
+            await Fixture.Sender.ResetResourceState();
+
+            if (Fixture.Receiver != null && !ReferenceEquals(Fixture.Sender, Fixture.Receiver))
+            {
+                await Fixture.Receiver.ResetResourceState();
+            }
         }
 
         Fixture.BeforeEach();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
+        if (!_ownFixture)
+            return;
         if (Fixture is IAsyncDisposable)
-        {
             await Fixture.DisposeAsync();
-        }
         else
-        {
             Fixture?.SafeDispose();
-        }
     }
 
     [Fact]
@@ -238,7 +269,7 @@ public abstract class TransportCompliance<T> : IAsyncLifetime where T : Transpor
     }
 
     [Fact]
-    public async Task can_send_from_one_node_to_another_by_destination()
+    public virtual async Task can_send_from_one_node_to_another_by_destination()
     {
         var session = await theSender.TrackActivity(Fixture.DefaultTimeout)
             .AlsoTrack(theReceiver)
@@ -429,7 +460,9 @@ public abstract class TransportCompliance<T> : IAsyncLifetime where T : Transpor
 
     protected void throwOnAttempt<TException>(int attempt) where TException : Exception, new()
     {
-        theMessage.Errors.Add(attempt, new TException());
+        // GH-3800: records the type NAME, not an instance -- an Exception does not round-trip
+        // through System.Text.Json, and this battery runs under serializers that use it.
+        theMessage.ThrowOnAttempt<TException>(attempt);
     }
 
     protected async Task<EnvelopeRecord> afterProcessingIsComplete()
@@ -440,9 +473,21 @@ public abstract class TransportCompliance<T> : IAsyncLifetime where T : Transpor
             .DoNotAssertOnExceptionsDetected()
             .SendMessageAndWaitAsync(theMessage);
 
-        return _session.AllRecordsInOrder().Where(x => x.Envelope!.Message is ErrorCausingMessage).LastOrDefault(x =>
-            x.MessageEventType == MessageEventType.MessageSucceeded ||
-            x.MessageEventType == MessageEventType.MovedToErrorQueue)!;
+        return endingRecordFor(_session)!;
+    }
+
+    /// <summary>
+    /// The last ending record for *the message this test sent*. Scoping by message type alone picks up
+    /// stragglers: broker queues are shared across the test methods in a compliance class, and a
+    /// redelivery still in flight when the previous test's session completed lands in this one's.
+    /// </summary>
+    private EnvelopeRecord? endingRecordFor(ITrackedSession session)
+    {
+        return session.AllRecordsInOrder()
+            .Where(x => x.Envelope?.Message is ErrorCausingMessage m && m.Id == theMessage.Id)
+            .LastOrDefault(x =>
+                x.MessageEventType == MessageEventType.MessageSucceeded ||
+                x.MessageEventType == MessageEventType.MovedToErrorQueue);
     }
 
     protected async Task shouldSucceedOnAttempt(int attempt)
@@ -456,10 +501,7 @@ public abstract class TransportCompliance<T> : IAsyncLifetime where T : Transpor
 
         session.AssertCondition("Expected ending activity was not detected", () =>
         {
-            var record = session.AllRecordsInOrder().Where(x => x.Envelope!.Message is ErrorCausingMessage).LastOrDefault(
-                x =>
-                    x.MessageEventType == MessageEventType.MessageSucceeded ||
-                    x.MessageEventType == MessageEventType.MovedToErrorQueue)!;
+            var record = endingRecordFor(session);
 
             if (record is null) return false;
 
@@ -481,10 +523,7 @@ public abstract class TransportCompliance<T> : IAsyncLifetime where T : Transpor
             .Timeout(30.Seconds())
             .SendMessageAndWaitAsync(theMessage);
 
-        var record = session.AllRecordsInOrder().Where(x => x.Envelope!.Message is ErrorCausingMessage).LastOrDefault(
-            x =>
-                x.MessageEventType == MessageEventType.MessageSucceeded ||
-                x.MessageEventType == MessageEventType.MovedToErrorQueue)!;
+        var record = endingRecordFor(session);
 
         if (record == null)
         {
@@ -498,13 +537,13 @@ public abstract class TransportCompliance<T> : IAsyncLifetime where T : Transpor
 
         var writer = new StringWriter();
 
-        writer.WriteLine($"Actual ending was '{record.MessageEventType}' on attempt {record.AttemptNumber}");
+        await writer.WriteLineAsync($"Actual ending was '{record.MessageEventType}' on attempt {record.AttemptNumber}");
         foreach (var envelopeRecord in session.AllRecordsInOrder())
         {
-            writer.WriteLine(envelopeRecord);
+            await writer.WriteLineAsync(envelopeRecord.ToString());
             if (envelopeRecord.Exception != null)
             {
-                writer.WriteLine(envelopeRecord.Exception.Message);
+                await writer.WriteLineAsync(envelopeRecord.Exception.Message);
             }
         }
 
@@ -541,7 +580,7 @@ public abstract class TransportCompliance<T> : IAsyncLifetime where T : Transpor
     }
 
     [Fact]
-    public async Task can_schedule_retry()
+    public virtual async Task can_schedule_retry()
     {
         throwOnAttempt<BadImageFormatException>(1);
 
@@ -700,8 +739,7 @@ public abstract class TransportCompliance<T> : IAsyncLifetime where T : Transpor
     }
 }
 
-#region sample_BlueTextReader
-
+#region sample_bluetextreader
 public class BlueTextReader : IMessageSerializer
 {
     public string ContentType => "text/plain";
@@ -730,8 +768,7 @@ public class BlueTextReader : IMessageSerializer
 
 #endregion
 
-#region sample_GreenTextWriter
-
+#region sample_greentextwriter
 public class GreenTextWriter : IMessageSerializer
 {
     public string ContentType => "text/plain";

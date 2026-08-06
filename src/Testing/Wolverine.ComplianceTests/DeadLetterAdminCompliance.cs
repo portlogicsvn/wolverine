@@ -11,8 +11,6 @@ using Wolverine.Tracking;
 using Wolverine.Transports;
 using Wolverine.Util;
 using Xunit;
-using Xunit.Abstractions;
-
 namespace Wolverine.ComplianceTests;
 
 public abstract class DeadLetterAdminCompliance : IAsyncLifetime
@@ -42,7 +40,7 @@ public abstract class DeadLetterAdminCompliance : IAsyncLifetime
 
     public IHost theHost { get; private set; } = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         theHost = await BuildCleanHost();
 
@@ -61,7 +59,7 @@ public abstract class DeadLetterAdminCompliance : IAsyncLifetime
         EightHoursAgo = DateTimeOffset.UtcNow.AddHours(-8);
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await theHost.StopAsync();
         theHost.Dispose();
@@ -525,6 +523,59 @@ public abstract class DeadLetterAdminCompliance : IAsyncLifetime
             envelopeResult.Replayable.ShouldBeTrue();
         }
 
+    }
+
+    [Fact]
+    public async Task query_by_replayable_flag()
+    {
+        // Two disjoint partitions by exception type. We mark only the BadImageFormatException
+        // partition replayable, then assert the Replayable filter selects each partition
+        // server-side (including a coherent TotalCount, which in-memory filtering cannot give).
+        withTargetMessage1();
+        theGenerator.ExceptionSource = msg => new BadImageFormatException(msg);
+        await load(9, FiveHoursAgo);
+
+        theGenerator.ExceptionSource = msg => new DivideByZeroException(msg);
+        await load(6, FourHoursAgo);
+
+        var replayableQuery = new DeadLetterEnvelopeQuery(TimeRange.AllTime())
+            { ExceptionType = typeof(BadImageFormatException).FullNameInCode() };
+        await theDeadLetters.ReplayAsync(replayableQuery, CancellationToken.None);
+
+        // Replayable = true → only the 9 marked envelopes
+        var onlyReplayable = await theDeadLetters.QueryAsync(
+            new DeadLetterEnvelopeQuery(TimeRange.AllTime()) { Replayable = true, PageSize = 1000 },
+            CancellationToken.None);
+        onlyReplayable.TotalCount.ShouldBe(9);
+        onlyReplayable.Envelopes.Count.ShouldBe(9);
+        onlyReplayable.Envelopes.ShouldAllBe(e => e.Replayable);
+
+        // Replayable = false → only the 6 that were never marked
+        var onlyStuck = await theDeadLetters.QueryAsync(
+            new DeadLetterEnvelopeQuery(TimeRange.AllTime()) { Replayable = false, PageSize = 1000 },
+            CancellationToken.None);
+        onlyStuck.TotalCount.ShouldBe(6);
+        onlyStuck.Envelopes.Count.ShouldBe(6);
+        onlyStuck.Envelopes.ShouldAllBe(e => !e.Replayable);
+
+        // Replayable = null (default) → no filtering, all 15
+        var all = await theDeadLetters.QueryAsync(
+            new DeadLetterEnvelopeQuery(TimeRange.AllTime()) { PageSize = 1000 },
+            CancellationToken.None);
+        all.TotalCount.ShouldBe(15);
+        all.Envelopes.Count.ShouldBe(15);
+
+        // The replayable predicate composes with the other filters
+        var replayableStuck = await theDeadLetters.QueryAsync(
+            new DeadLetterEnvelopeQuery(TimeRange.AllTime())
+            {
+                Replayable = false,
+                ExceptionType = typeof(BadImageFormatException).FullNameInCode(),
+                PageSize = 1000
+            },
+            CancellationToken.None);
+        replayableStuck.TotalCount.ShouldBe(0);
+        replayableStuck.Envelopes.Count.ShouldBe(0);
     }
 
     [Fact]

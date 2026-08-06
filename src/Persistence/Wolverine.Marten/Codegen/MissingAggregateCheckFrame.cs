@@ -3,6 +3,7 @@ using JasperFx.CodeGeneration;
 using JasperFx.CodeGeneration.Frames;
 using JasperFx.CodeGeneration.Model;
 using JasperFx.Core.Reflection;
+using JasperFx.Events;
 using Marten.Events;
 
 namespace Wolverine.Marten.Codegen;
@@ -35,5 +36,13 @@ internal class MissingAggregateCheckFrame : SyncFrame
             $"if ({_eventStream.Usage}.{nameof(IEventStream<string>.Aggregate)} == null) throw new {typeof(UnknownAggregateException).FullNameInCode()}(typeof({_aggregateType.FullNameInCode()}), {_identity.Usage});");
 
         Next?.GenerateCode(method, writer);
+    }
+
+    public override void GenerateFSharpCode(GeneratedMethod method, ISourceWriter writer)
+    {
+        writer.WriteLine(
+            $"if isNull {_eventStream.FSharpUsage}.{nameof(IEventStream<string>.Aggregate)} then raise({typeof(UnknownAggregateException).FSharpName()}(typeof<{_aggregateType.FSharpName()}>, {_identity.FSharpUsage}))");
+
+        Next?.GenerateFSharpCode(method, writer);
     }
 }

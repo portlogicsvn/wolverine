@@ -5,6 +5,7 @@ using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
+using NSubstitute;
 using Shouldly;
 using Weasel.Core;
 using Wolverine;
@@ -13,6 +14,7 @@ using Wolverine.Persistence.Durability;
 using Wolverine.RDBMS;
 using Wolverine.RDBMS.Durability;
 using Wolverine.RDBMS.Polling;
+using Wolverine.Runtime;
 using Wolverine.Runtime.Agents;
 using Wolverine.Runtime.WorkerQueues;
 using Wolverine.SqlServer;
@@ -26,7 +28,14 @@ public class SqlServerMessageStoreTests : MessageStoreCompliance
     public override async Task<IHost> BuildCleanHost()
     {
         var host = await Host.CreateDefaultBuilder()
-            .UseWolverine(opts => { opts.PersistMessagesWithSqlServer(Servers.SqlServerConnectionString, "receiver"); })
+            .UseWolverine(opts =>
+            {
+                opts.PersistMessagesWithSqlServer(Servers.SqlServerConnectionString, "receiver");
+                // Exercise the real RdbmsListenerStore impl in the IListenerStore
+                // compliance tests (GH-2685). When this flag is off the suite falls
+                // back to the NullListenerStore short-circuit in MessageStoreCompliance.
+                opts.Durability.EnableDynamicListeners = true;
+            })
             .StartAsync();
 
         var persistence = (IMessageDatabase)host.Services.GetRequiredService<IMessageStore>();
@@ -54,6 +63,35 @@ public class SqlServerMessageStoreTests : MessageStoreCompliance
 
         counts.Incoming.ShouldBe(0);
         counts.Scheduled.ShouldBe(0);
+        counts.Handled.ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task delete_expired_handled_envelopes_in_batches()
+    {
+        // Regression for #3116 -- batched DELETE TOP cleanup on SQL Server
+        for (var i = 0; i < 5; i++)
+        {
+            var envelope = ObjectMother.Envelope();
+            await thePersistence.Inbox.StoreIncomingAsync(envelope);
+            await thePersistence.Inbox.MarkIncomingEnvelopeAsHandledAsync(envelope);
+        }
+
+        await using (var conn = new SqlConnection(Servers.SqlServerConnectionString))
+        {
+            await conn.OpenAsync(TestContext.Current.CancellationToken);
+            await conn.CreateCommand(
+                    $"update receiver.{DatabaseConstants.IncomingTable} set {DatabaseConstants.KeepUntil} = @cutoff where status = 'Handled'")
+                .With("cutoff", DateTimeOffset.UtcNow.Subtract(1.Hours()))
+                .ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+            await conn.CloseAsync();
+        }
+
+        var command = new DeleteExpiredHandledEnvelopesCommand((IMessageDatabase)thePersistence,
+            new DurabilitySettings(), NullLogger.Instance);
+        await theHost.InvokeAsync(command);
+
+        var counts = await thePersistence.Admin.FetchCountsAsync();
         counts.Handled.ShouldBe(0);
     }
 
@@ -136,17 +174,22 @@ public class SqlServerMessageStoreTests : MessageStoreCompliance
 
         var durabilitySettings = theHost.Services.GetRequiredService<DurabilitySettings>();
 
-        var runtime = theHost.GetRuntime();
+        // Use a substituted runtime rather than the live one. PollForScheduledMessagesAsync
+        // reassigns ownership AND hands the envelope straight to the execution pipeline via
+        // IWolverineRuntime.EnqueueDirectlyAsync. With the real runtime the envelope is picked
+        // up off local://replies and marked Handled within ~250ms, so asserting on the row's
+        // status is a race the test only usually wins -- it lost twice on CI. See GH-3821.
+        var runtime = Substitute.For<IWolverineRuntime>();
 
-        await thePersistence.As<IMessageDatabase>().PollForScheduledMessagesAsync(runtime,
-            NullLogger.Instance,
-            durabilitySettings,
-            default);
+        await thePersistence.As<IMessageDatabase>().PollForScheduledMessagesAsync(runtime, NullLogger.Instance, durabilitySettings, TestContext.Current.CancellationToken);
 
         var stored = (await thePersistence.Admin.AllIncomingAsync()).Single();
 
         stored.OwnerId.ShouldBe(durabilitySettings.AssignedNodeNumber);
         stored.Status.ShouldBe(EnvelopeStatus.Incoming);
+
+        // and the poll really did hand the envelope off to be executed
+        await runtime.Received().EnqueueDirectlyAsync(Arg.Is<IReadOnlyList<Envelope>>(x => x.Count == 1));
     }
     
         [Fact]
@@ -177,11 +220,11 @@ public class SqlServerMessageStoreTests : MessageStoreCompliance
         await theHost.InvokeAsync(new DatabaseOperationBatch(messageDatabase, [log]));
 
         using var conn = new SqlConnection(Servers.SqlServerConnectionString);
-        await conn.OpenAsync();
+        await conn.OpenAsync(TestContext.Current.CancellationToken);
         await conn.CreateCommand(
                 $"update receiver.{DatabaseConstants.NodeRecordTableName} set timestamp = @time where node_number = 2")
             .With("time", DateTimeOffset.UtcNow.Subtract(10.Days()))
-            .ExecuteNonQueryAsync();
+            .ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         await conn.CloseAsync();
         
         var recent2 = await thePersistence.Nodes.FetchRecentRecordsAsync(100);

@@ -9,6 +9,15 @@
         <GenerateAssemblyVersionAttribute>false</GenerateAssemblyVersionAttribute>
         <GenerateAssemblyFileVersionAttribute>false</GenerateAssemblyFileVersionAttribute>
         <GenerateAssemblyInformationalVersionAttribute>false</GenerateAssemblyInformationalVersionAttribute>
+        <!--
+          AOT-compatible (#2746). Reflective surface resolved via class-level
+          [UnconditionalSuppressMessage] on the codegen frame providers / saga
+          diagnostics / tenanted DbContext builders, plus a forwarded
+          [DAM(PublicConstructors|NonPublicConstructors|PublicProperties)] on
+          AddDbContextWithWolverineIntegration<T> to satisfy EF Core's own
+          AddDbContext<TContext> requirement.
+        -->
+        <IsAotCompatible>true</IsAotCompatible>
     </PropertyGroup>
 
     <ItemGroup>
@@ -19,8 +28,12 @@
         <ProjectReference Include="..\Wolverine.RDBMS\Wolverine.RDBMS.csproj"/>
     </ItemGroup>
 
-    <ItemGroup Condition="'$(TargetFramework)' == 'net8.0' OR '$(TargetFramework)' == 'net9.0'">
+    <ItemGroup Condition="'$(TargetFramework)' == 'net9.0'">
         <PackageReference Include="Microsoft.CodeAnalysis.Workspaces.MSBuild" />
+        <!-- Unify EF Core Design's transitive Roslyn (CSharp.Workspaces 4.8.0) up to the
+             solution's 4.14.0 line. Previously masked by core WolverineFx's JasperFx.RuntimeCompiler
+             reference, removed in #2876. Flows transitively to the EF sample/test projects. -->
+        <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" />
         <PackageReference Include="Microsoft.Build.Tasks.Core" />
     </ItemGroup>
 
@@ -28,5 +41,4 @@
         <Folder Include="obj\Debug\netstandard2.1"/>
     </ItemGroup>
 
-    <Import Project="../../../Analysis.Build.props"/>
 </Project>

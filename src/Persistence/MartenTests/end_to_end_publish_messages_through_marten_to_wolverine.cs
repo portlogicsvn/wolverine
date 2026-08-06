@@ -3,6 +3,7 @@ using System.Text.Json;
 using IntegrationTests;
 using JasperFx;
 using JasperFx.Core;
+using JasperFx.MultiTenancy;
 using JasperFx.Events;
 using JasperFx.Events.Daemon;
 using JasperFx.Events.Grouping;
@@ -21,7 +22,7 @@ using Weasel.Postgresql;
 using Wolverine;
 using Wolverine.Marten;
 using Wolverine.Tracking;
-using IRevisioned = Marten.Metadata.IRevisioned;
+using IRevisioned = JasperFx.IRevisioned;
 
 namespace MartenTests;
 
@@ -35,6 +36,9 @@ public class end_to_end_publish_messages_through_marten_to_wolverine
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery()
+                    .IncludeType(typeof(GotBHandler))
+                    .IncludeType(typeof(CustomerChangedHandler));
                 opts.Durability.Mode = DurabilityMode.Solo;
                 
                 opts.Services.AddMarten(m =>
@@ -50,7 +54,7 @@ public class end_to_end_publish_messages_through_marten_to_wolverine
                     .AddAsyncDaemon(DaemonMode.Solo);
 
                 opts.Policies.UseDurableLocalQueues();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var streamId = Guid.NewGuid();
 
@@ -79,6 +83,8 @@ public class end_to_end_publish_messages_through_marten_to_wolverine
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery().IncludeType(typeof(GotBHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Services.AddMarten(m =>
                     {
                         m.DisableNpgsqlLogging = true;
@@ -94,7 +100,7 @@ public class end_to_end_publish_messages_through_marten_to_wolverine
 
                 opts.Policies.UseDurableLocalQueues();
                 opts.Durability.Mode = DurabilityMode.Solo;
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var streamId = Guid.NewGuid();
 
@@ -123,6 +129,8 @@ public class end_to_end_publish_messages_through_marten_to_wolverine
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery().IncludeType(typeof(GotBHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Services.AddMarten(m =>
                     {
                         m.Connection(Servers.PostgresConnectionString);
@@ -137,7 +145,7 @@ public class end_to_end_publish_messages_through_marten_to_wolverine
                     .AddAsyncDaemon(DaemonMode.Solo);
 
                 opts.Policies.UseDurableLocalQueues();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var streamId = Guid.NewGuid();
 
@@ -172,6 +180,8 @@ public class end_to_end_publish_messages_through_marten_to_wolverine
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery().IncludeType(typeof(GotBHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Services.AddMarten(m =>
                     {
                         m.Connection(Servers.PostgresConnectionString);
@@ -190,13 +200,13 @@ public class end_to_end_publish_messages_through_marten_to_wolverine
                     opts.Services.AddHostedService<SideEffectInitialData>();
                 
                 opts.Policies.UseDurableLocalQueues();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var count = 0;
         while (count < 10)
         {
             if (GotBHandler.Received.Count >= 3) break;
-            await Task.Delay(250.Milliseconds());
+            await Task.Delay(250.Milliseconds(), TestContext.Current.CancellationToken);
         }
         
         GotBHandler.Received.Count.ShouldBe(3);
@@ -212,7 +222,7 @@ public class end_to_end_publish_messages_through_marten_to_wolverine
     }
 }
 
-public class Projection3 : SingleStreamProjection<SideEffects1, Guid>
+public partial class Projection3 : SingleStreamProjection<SideEffects1, Guid>
 {
     public void Apply(SideEffects1 aggregate, AEvent _)
     {
@@ -250,14 +260,16 @@ public static class GotBHandler
     }
 }
 
-public class SideEffects1 : IRevisioned
+public class SideEffects1 : JasperFx.ILongVersioned
 {
     public Guid Id { get; set; }
     public int A { get; set; }
     public int B { get; set; }
     public int C { get; set; }
     public int D { get; set; }
-    public int Version { get; set; }
+    // ILongVersioned (long), not IRevisioned (int): JasperFx 2.0 rc split numeric
+    // versioning, and this document tracks a long stream version.
+    public long Version { get; set; }
 }
 
 // Wrap it in your own IHostedService
@@ -295,11 +307,14 @@ public class
 {
     private IHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery()
+                    .IncludeType(typeof(CustomerChangedHandler))
+                    .IncludeType(typeof(GotBHandler));
                 opts.Durability.Mode = DurabilityMode.Solo;
                 
                 opts.Services.AddMarten(m =>
@@ -318,9 +333,10 @@ public class
             }).StartAsync();
     }
 
-    public Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
-        return _host.StopAsync();
+        await _host.StopAsync();
+        _host.Dispose();
     }
     
     [Fact]
@@ -329,7 +345,7 @@ public class
         var store = _host.DocumentStore();
         await using var session = store.LightweightSession();
         var customerId = session.Events.StartStream<Customer>(new CustomerAdded("Acme")).Id;
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         Func<IMessageContext, Task> action = async _ =>
         {
@@ -354,7 +370,7 @@ public class
         var store = _host.DocumentStore();
         await using var session = store.LightweightSession();
         var customerId = session.Events.StartStream<Customer>(new CustomerAdded("Acme")).Id;
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         Func<IMessageContext, Task> action = async _ =>
         {
@@ -393,7 +409,7 @@ public record CustomerActivated;
 
 public record CustomerMoved(string Location);
 
-public class CustomerProjection : MultiStreamProjection<Customer, Guid>
+public partial class CustomerProjection : MultiStreamProjection<Customer, Guid>
 {
     public CustomerProjection()
     {
@@ -408,9 +424,9 @@ public class CustomerProjection : MultiStreamProjection<Customer, Guid>
 
     public override ValueTask RaiseSideEffects(IDocumentOperations operations, IEventSlice<Customer> slice)
     {
-        if (slice.Aggregate != null && slice.Aggregate.Location.IsNotEmpty())
+        if (slice.Snapshot != null && slice.Snapshot.Location.IsNotEmpty())
         {
-            slice.PublishMessage(new CustomerChanged(slice.Aggregate));
+            slice.PublishMessage(new CustomerChanged(slice.Snapshot));
         }
 
         return new ValueTask();
@@ -434,7 +450,7 @@ public class Order2
 
     // This is important, by Marten convention this would
     // be the
-    public int Version { get; set; }
+    public long Version { get; set; }
 
     public Order2(OrderCreated created)
     {

@@ -38,7 +38,7 @@ builder.UseWolverine(opts =>
         .Then.MoveToErrorQueue();
 });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/ExceptionHandling.cs#L15-L27' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_simple_retries_on_concurrency_exception' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/ExceptionHandling.cs#L15-L26' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_simple_retries_on_concurrency_exception' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Of course though, sometimes you are opting into a more stringent form of optimistic concurrency where the handler should
@@ -51,7 +51,7 @@ public record MarkItemReady(Guid OrderId, string ItemName, int Version);
 In that case, there's absolutely no value in retrying the message, so we should use a different error handling policy to
 move that message off immediately like one of these:
 
-<!-- snippet: sample_showing_concurrency_exception_moving_directly_to_DLQ -->
+<!-- snippet: sample_showing_concurrency_exception_moving_directly_to_dlq -->
 <a id='snippet-sample_showing_concurrency_exception_moving_directly_to_dlq'></a>
 ```cs
 public static class MarkItemReadyHandler
@@ -85,7 +85,7 @@ public static class MarkItemReadyHandler
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/Orders.cs#L382-L415' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_showing_concurrency_exception_moving_directly_to_dlq' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/Orders.cs#L402-L434' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_showing_concurrency_exception_moving_directly_to_dlq' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Exclusive Locks or Serializable Transactions
@@ -126,7 +126,7 @@ var builder = Host.CreateApplicationBuilder()
         });
     });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/ConcurrencyExamples.cs#L13-L33' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_strict_ordering_for_control_queue' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/ConcurrencyExamples.cs#L13-L32' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_strict_ordering_for_control_queue' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 The strict ordering usage definitely limits the throughput in your system while largely eliminating issues due to concurrency.
@@ -140,3 +140,8 @@ More likely though, to both protect against concurrent access against resources 
 * [Session Identifier and FIFO queue support for Azure Service Bus](/guide/messaging/transports/azureservicebus/session-identifiers)
 * Wolverine's [Partitioned Sequential Messaging](/guide/messaging/partitioning) feature introduced in Wolverine 5.0 that was designed specifically to alleviate problems with concurrency within
   Wolverine systems.
+
+If you are on **Kafka**, the idiomatic way to scale out concurrency is to run more nodes in the same
+consumer group and let Kafka assign partitions across them (one consumer per partition at a time), rather
+than reaching for in-process parallelism. See [Kafka — Scaling Out / Concurrency](/guide/messaging/transports/kafka#scaling-out-concurrency)
+for the recommended cooperative-sticky + static-membership configuration.

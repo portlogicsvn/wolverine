@@ -73,6 +73,17 @@ public interface IPostgresqlBackedPersistence
     IPostgresqlBackedPersistence OverrideScheduledJobLockId(int lockId);
 
     /// <summary>
+    /// Override the PostgreSQL advisory lock identifier that Wolverine uses to serialize
+    /// schema migrations across concurrent processes. The default is 4006. Set this to
+    /// match Marten's <c>StoreOptions.ApplyChangesLockId</c> (default 4004) when using
+    /// <c>IntegrateWithWolverine</c> if you want both frameworks to serialize against
+    /// the same lock.
+    /// </summary>
+    /// <param name="lockId"></param>
+    /// <returns></returns>
+    IPostgresqlBackedPersistence OverrideMigrationLockId(int lockId);
+
+    /// <summary>
     /// Should Wolverine provision PostgreSQL command queues for this Wolverine application? The default is true,
     /// but these queues are unnecessary if using an external broker for Wolverine command queues -- and the Wolverine team does recommend
     /// using external brokers for command queues when that's possible
@@ -154,7 +165,7 @@ internal class PostgresqlBackedPersistence : IPostgresqlBackedPersistence, IWolv
     public bool CommandQueuesEnabled { get; set; } = true;
 
     private int _scheduledJobLockId = 0;
-    
+
     // This would be an override
     public int ScheduledJobLockId
     {
@@ -169,6 +180,13 @@ internal class PostgresqlBackedPersistence : IPostgresqlBackedPersistence, IWolv
             _scheduledJobLockId = value;
         }
     }
+
+    /// <summary>
+    /// Advisory lock id used to serialize Wolverine schema migrations across concurrent
+    /// processes. Defaults to 4006. Align with Marten's ApplyChangesLockId (default 4004)
+    /// when using IntegrateWithWolverine to share the lock between the two frameworks.
+    /// </summary>
+    public int MigrationLockId { get; set; } = 4006;
     
 
     public void Configure(WolverineOptions options)
@@ -189,6 +207,11 @@ internal class PostgresqlBackedPersistence : IPostgresqlBackedPersistence, IWolv
         options.CodeGeneration.Sources.Add(new DatabaseBackedPersistenceMarker());
         options.CodeGeneration.Sources.Add(new SagaStorageVariableSource());
 
+        // Weasel-managed tenant partitioning support for conjoined EF Core multi-tenancy
+        options.Services.TryAddEnumerable(ServiceDescriptor
+            .Singleton<ITenantPartitioningProviderFactory, Wolverine.Postgresql.MultiTenancy.
+                PostgresqlTenantPartitioningProviderFactory>());
+
         options.Services.AddSingleton<IMessageStore>(s => BuildMessageStore(s.GetRequiredService<IWolverineRuntime>()));
 
         options.Services.AddSingleton<IDatabaseSource, MessageDatabaseDiscovery>();
@@ -205,6 +228,16 @@ internal class PostgresqlBackedPersistence : IPostgresqlBackedPersistence, IWolv
         }
 
         options.Services.AddSingleton<Migrator, PostgresqlMigrator>();
+
+        // CritterWatch / saga-explorer diagnostic surface — every saga
+        // persisted via Wolverine's lightweight (Postgres-backed)
+        // saga storage is owned by this provider. Registered singleton
+        // here so the runtime aggregator picks it up alongside any
+        // Marten / EF Core / RavenDB diagnostics in mixed-storage hosts.
+        options.Services.AddSingleton<Wolverine.Persistence.Sagas.ISagaStoreDiagnostics>(s =>
+            new Wolverine.RDBMS.Sagas.DatabaseSagaStoreDiagnostics(
+                s.GetRequiredService<IWolverineRuntime>(),
+                (IMessageDatabase)s.GetRequiredService<IMessageStore>()));
     }
 
     public IMessageStore BuildMessageStore(IWolverineRuntime runtime)
@@ -235,8 +268,6 @@ internal class PostgresqlBackedPersistence : IPostgresqlBackedPersistence, IWolv
             return new MultiTenantedMessageStore(defaultStore, runtime,
                 new PostgresqlTenantedMessageStore(runtime, this, sagaTables));
         }
-        
-        settings.Role = Role;
 
         return new PostgresqlMessageStore(settings, runtime.DurabilitySettings, mainSource,
             logger, sagaTables);
@@ -249,13 +280,20 @@ internal class PostgresqlBackedPersistence : IPostgresqlBackedPersistence, IWolv
         var settings = new DatabaseSettings
         {
             CommandQueuesEnabled = CommandQueuesEnabled,
-            Role = MessageStoreRole.Main,
+            Role = Role,
             ConnectionString = ConnectionString,
             DataSource = DataSource,
             ScheduledJobLockId = ScheduledJobLockId,
+            MigrationLockId = MigrationLockId,
             SchemaName = EnvelopeStorageSchemaName,
-            AddTenantLookupTable = UseMasterTableTenancy,
-            TenantConnections = TenantConnections
+            AddTenantLookupTable = UseMasterTableTenancy || _options.Durability.TenantRegistryRequired,
+            TenantConnections = TenantConnections,
+            // Propagate the AutoCreate override (see #2780). Without this,
+            // OverrideAutoCreateResources(autoCreate) mutated the wrapper's
+            // own field but never made it into DatabaseSettings, which is
+            // what MessageDatabase.Admin / MessageDatabase.Tenants /
+            // Migrator.ApplyAllAsync actually read.
+            AutoCreate = AutoCreate
         };
         return settings;
     }
@@ -312,6 +350,12 @@ internal class PostgresqlBackedPersistence : IPostgresqlBackedPersistence, IWolv
         return this;
     }
 
+    IPostgresqlBackedPersistence IPostgresqlBackedPersistence.OverrideMigrationLockId(int lockId)
+    {
+        MigrationLockId = lockId;
+        return this;
+    }
+
     IPostgresqlBackedPersistence IPostgresqlBackedPersistence.EnableCommandQueues(bool enabled)
     {
         CommandQueuesEnabled = enabled;
@@ -360,6 +404,23 @@ internal class PostgresqlBackedPersistence : IPostgresqlBackedPersistence, IWolv
         configure(source);
 
         TenantConnections = source;
+
+        // GH-3016: surface the MasterTenantSource through DI so store-agnostic admin consumers
+        // (e.g. CritterWatch's tenant-management handler set) can drive the Add/Disable/Enable/
+        // Remove lifecycle via GetServices<IDynamicTenantSource<string>>() without sniffing for
+        // the concrete MasterTenantSource type. This must be registered here — at config time,
+        // before the container is built — rather than in BuildMessageStore (which runs lazily off
+        // the IMessageStore factory, after the container is built) or in Configure() (which
+        // Include() invokes eagerly, before this fluent call sets UseMasterTableTenancy). The
+        // factory defers to IMessageStore resolution, which is what constructs the
+        // MasterTenantSource and assigns it to ConnectionStringTenancy. Mirrors the conditional
+        // shape Marten landed in JasperFx/marten#4605.
+        _options.Services.AddSingleton<IDynamicTenantSource<string>>(s =>
+        {
+            _ = s.GetRequiredService<IMessageStore>();
+            return (IDynamicTenantSource<string>)ConnectionStringTenancy!;
+        });
+
         return this;
     }
 

@@ -21,7 +21,7 @@ public abstract partial class MessageDatabase<T>
 
         if (await TryAttainLockAsync(externalTable.AdvisoryLock, conn, token))
         {
-            var command = buildFetchSql(conn, externalTable.TableName, externalTable.Columns().ToArray(),
+            await using var command = buildFetchSql(conn, externalTable.TableName, externalTable.Columns().ToArray(),
                 externalTable.MessageBatchSize);
 
             await using var reader = await command.ExecuteReaderAsync(token);
@@ -62,6 +62,16 @@ public abstract partial class MessageDatabase<T>
     protected abstract Task deleteMany(DbTransaction tx, Guid[] ids, DbObjectName tableName, string mapperIdColumnName);
 
     protected abstract Task<bool> TryAttainLockAsync(int lockId, T connection, CancellationToken token);
+
+    /// <summary>
+    /// Releases a previously-acquired session-scoped advisory lock. Default
+    /// implementation is a no-op for providers (e.g., SQLite) where the lock
+    /// is automatically released when the connection closes.
+    /// </summary>
+    protected virtual Task ReleaseLockAsync(int lockId, T connection, CancellationToken token)
+    {
+        return Task.CompletedTask;
+    }
 
     protected abstract DbCommand buildFetchSql(T conn, DbObjectName tableName, string[] columnNames, int maxRecords);
 

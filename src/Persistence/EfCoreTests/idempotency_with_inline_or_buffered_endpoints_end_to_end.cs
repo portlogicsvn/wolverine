@@ -20,15 +20,15 @@ namespace EfCoreTests;
 
 public class idempotency_with_inline_or_buffered_endpoints_end_to_end : IAsyncLifetime
 {
-    public Task InitializeAsync()
+    public ValueTask InitializeAsync()
     {
-        return Task.CompletedTask;
+        return ValueTask.CompletedTask;
     }
 
-    public Task DisposeAsync()
+    public ValueTask DisposeAsync()
     {
         SqlConnection.ClearAllPools();
-        return Task.CompletedTask;
+        return ValueTask.CompletedTask;
     }
 
     [Theory]
@@ -59,7 +59,7 @@ public class idempotency_with_inline_or_buffered_endpoints_end_to_end : IAsyncLi
                 opts.PersistMessagesWithSqlServer(Servers.SqlServerConnectionString, "idempotency");
                 opts.UseEntityFrameworkCoreTransactions();
                 opts.UseEntityFrameworkCoreWolverineManagedMigrations();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var messageId = Guid.NewGuid();
         var tracked1 = await host.SendMessageAndWaitAsync(new MaybeIdempotent(messageId));
@@ -110,7 +110,7 @@ public class idempotency_with_inline_or_buffered_endpoints_end_to_end : IAsyncLi
                 opts.PersistMessagesWithSqlServer(Servers.SqlServerConnectionString, "idempotency");
                 opts.UseEntityFrameworkCoreTransactions();
                 opts.UseEntityFrameworkCoreWolverineManagedMigrations();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var messageId = Guid.NewGuid();
         var tracked1 = await host.SendMessageAndWaitAsync(new MaybeIdempotent(messageId));
@@ -136,8 +136,7 @@ public class idempotency_with_inline_or_buffered_endpoints_end_to_end : IAsyncLi
     [Fact]
     public async Task apply_idempotency_to_non_transactional_handler()
     {
-        #region sample_using_AutoApplyIdempotencyOnNonTransactionalHandlers
-
+        #region sample_using_autoapplyidempotencyonnontransactionalhandlers
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -156,7 +155,7 @@ public class idempotency_with_inline_or_buffered_endpoints_end_to_end : IAsyncLi
                 
                 // THIS RIGHT HERE
                 opts.Policies.AutoApplyIdempotencyOnNonTransactionalHandlers();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         #endregion
 

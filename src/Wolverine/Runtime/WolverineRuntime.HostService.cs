@@ -1,3 +1,4 @@
+using System.Reflection;
 using JasperFx;
 using JasperFx.CodeGeneration;
 using JasperFx.Core;
@@ -6,12 +7,15 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Wolverine.Attributes;
 using Wolverine.Configuration;
+using Wolverine.ErrorHandling;
 using Wolverine.Persistence.Durability;
 using Wolverine.Runtime.Agents;
 using Wolverine.Runtime.Scheduled;
+using Wolverine.Runtime.Serialization;
 using Wolverine.Runtime.WorkerQueues;
 using Wolverine.Transports;
 using Wolverine.Transports.Local;
+using Wolverine.Transports.Tcp;
 using Wolverine.Util;
 
 namespace Wolverine.Runtime;
@@ -21,21 +25,76 @@ public partial class WolverineRuntime
     private bool _hasStarted;
     private Task? _idleAgentCleanupLoop;
 
+    /// <summary>
+    /// Detects whether Wolverine is running in a metadata-only CLI mode (codegen, OpenAPI
+    /// generation via GetDocument.Insider) where persistence and transport connectivity
+    /// are not required. When detected, lightweight startup settings are applied automatically
+    /// so the host can start without needing external databases or message brokers.
+    /// </summary>
+    private void applyMetadataOnlyModeIfDetected()
+    {
+        if (Options.LightweightMode) return; // Already applied (e.g., by StartLightweightAsync)
+
+        var isMetadataOnly = DynamicCodeBuilder.WithinCodegenCommand
+            || (Environment.GetEnvironmentVariable("ASPNETCORE_HOSTINGSTARTUPASSEMBLIES")
+                ?.Contains("GetDocument", StringComparison.OrdinalIgnoreCase) ?? false);
+
+        if (!isMetadataOnly) return;
+
+        Options.ExternalTransportsAreStubbed = true;
+        Options.Durability.DurabilityAgentEnabled = false;
+        Options.Durability.Mode = DurabilityMode.MediatorOnly;
+        Options.LightweightMode = true;
+    }
+
     public async Task StartAsync(CancellationToken cancellationToken)
     {
         // Make this idempotent because the AddResourceSetupOnStartup() can cause it to bootstrap twice
         if (_hasStarted) return;
-        
+
+        // Auto-detect codegen and OpenAPI generation tools; suppress persistence/transport init
+        applyMetadataOnlyModeIfDetected();
+
         try
         {
             Logger.LogInformation("Starting Wolverine messaging for application assembly {Assembly}",
                 Options.ApplicationAssembly!.GetName());
 
+            // GH-3521: surface the RememberedApplicationAssembly first-host-wins pin loudly. Buffered during
+            // options configuration (no logger existed yet) and emitted here so a silently-inherited scanned
+            // assembly in a multi-host test process is observable instead of a downstream "No routes" mystery.
+            if (Options.ApplicationAssemblyReuseWarning is { } assemblyWarning)
+            {
+                Logger.LogWarning(assemblyWarning);
+            }
+
             logCodeGenerationConfiguration();
 
             await ApplyAsyncExtensions();
 
+            // Run after async extensions (which may mutate the options) and
+            // before any listener is started so an early-arriving message
+            // can't race the publish.
+            EnvelopeSerializer.Limits = new EnvelopeReaderLimits(
+                MaxBatchSize: Options.MaxIncomingEnvelopeBatchSize,
+                MaxDataSize: Options.MaxIncomingEnvelopeDataSize,
+                MaxHeaderCount: Options.MaxIncomingEnvelopeHeaderCount);
+            WireProtocol.MaxFrameSize = Options.MaxIncomingTcpFrameSize;
+
             await _stores.Value.InitializeAsync();
+
+            // AlwaysMakeScheduledMessagesDurable opts every non-durable scheduled send onto
+            // the message store inbox; if no store is configured, we silently fall through
+            // to in-process scheduling (lost on restart) — defeating the policy. Surface
+            // this as a startup warning so a misconfiguration is observable rather than a
+            // silent durability gap.
+            if (Options.Durability.AlwaysMakeScheduledMessagesDurable && Storage is NullMessageStore)
+            {
+                Logger.LogWarning(
+                    "Policies.AlwaysMakeScheduledMessagesDurable() is set but no message store is configured. " +
+                    "Scheduled messages will continue to use in-process scheduling and will be lost on restart. " +
+                    "Configure a message store (e.g. PersistMessagesWithPostgresql) to make the policy effective.");
+            }
 
             if (!Options.ExternalTransportsAreStubbed)
             {
@@ -45,23 +104,32 @@ public partial class WolverineRuntime
                 }
             }
 
-            // Check for a source-generated type loader to bypass runtime assembly scanning
-            var typeLoader = _container.Services.GetService(typeof(IWolverineTypeLoader)) as IWolverineTypeLoader;
-            if (typeLoader == null)
-            {
-                // Also check for the assembly-level attribute as a discovery mechanism
-                typeLoader = tryDiscoverTypeLoaderFromAttribute();
-            }
-
-            if (typeLoader != null)
-            {
-                Logger.LogInformation(
-                    "Source-generated IWolverineTypeLoader detected, using compile-time discovery to reduce startup time");
-                Handlers.UseTypeLoader(typeLoader);
-            }
-
             // Build up the message handlers
             Handlers.Compile(Options, _container);
+
+            // Under MultipleHandlerBehavior.Separated, a message type may have BOTH a direct
+            // Handle(T) handler AND a BatchMessagesOf<T>() batch handler. By default the batch
+            // local queue is the element type's convention queue — the SAME queue the direct
+            // handler uses — so the two collide (a local queue resolves a single executor per
+            // message type) and the batch is silently shadowed. Move the batch onto a dedicated
+            // queue so both can run independently. Done before the messaging transports start so
+            // the new queue still receives the durable/local-queue endpoint policies.
+            reassignBatchQueuesThatCollideWithHandlers();
+
+            // Under the DEFAULT Classic behavior the same collision is NOT resolved: the direct
+            // Handle(T) handler wins and the BatchMessagesOf<T>() batch handler is silently shadowed.
+            // Warn loudly (or throw, if opted in) so the shadowing is not a silent surprise. GH-3289.
+            warnOrAssertBatchHandlerConflicts();
+
+            // Apply BatchMessagesOf<T>(b => b.ProbeIndividuallyAfter(N)) as a failure rule on the batch
+            // handler chain. GH-3289.
+            applyBatchProbePolicies();
+
+            // Pre-populate the message-type-name cache so the per-message ToMessageTypeName()
+            // hot path inside Envelope construction never pays the first-occurrence reflection
+            // cost (attribute reads, interface walks, generic-type pretty-printing).
+            // See issue #1577 (cold-start optimizations).
+            Wolverine.Util.WolverineMessageNaming.PrepopulateCache(Handlers.AllMessageTypes());
 
             await tryMigrateStorage();
 
@@ -118,8 +186,46 @@ public partial class WolverineRuntime
                     break;
             }
 
+            // Pre-populate the per-message-type router cache so the per-message
+            // RoutingFor() hot path never pays the first-occurrence
+            // CloseAndBuildAs over MessageRouter<T> / EmptyMessageRouter<T>.
+            // Must happen AFTER the messaging transports start (so external-
+            // transport route sources can resolve their endpoints), but
+            // before RuntimeIsFullyStarted observers run. AOT pillar follow-up
+            // #2769 (Option A).
+            //
+            // Skip in MediatorOnly and Serverless modes:
+            //   - MediatorOnly: no messaging happens through this runtime, so
+            //     RoutingFor() is never called in steady state. Pre-populating
+            //     would lazily instantiate local sending agents (the
+            //     LocalRoutingMessageSource resolves Endpoint.Agent as a side
+            //     effect of building a route), violating the mode's "no
+            //     transports" contract.
+            //   - Serverless: RemoveLocal() above stripped the local transport,
+            //     but MessageRouterBase<T>'s ctor unconditionally calls
+            //     GetOrBuildSendingAgent(TransportConstants.DurableLocalUri)
+            //     for scheduled-envelope fallback, which now throws
+            //     UnknownTransportException. Skipping the pre-population avoids
+            //     materializing routers we don't need in this mode; per-type
+            //     RoutingFor() on the cold path still works because callers
+            //     either target external endpoints directly or never invoke
+            //     routing for local-only types.
+            //
+            // TODO: a follow-up could make MessageRouterBase<T>'s LocalDurableQueue
+            // lazy / nullable so Serverless apps reclaim the AOT cold-start win.
+            var mode = Options.Durability.Mode;
+            if (mode != DurabilityMode.MediatorOnly && mode != DurabilityMode.Serverless)
+            {
+                PrepopulateRoutingCache(Handlers.AllMessageTypes());
+            }
+
             await Observer.RuntimeIsFullyStarted();
             _hasStarted = true;
+
+            // Freeze fault-publishing policy so per-type overrides cannot be silently
+            // mutated from runtime code after host startup completes. All bootstrap
+            // callbacks (UseWolverine + per-type PublishFault calls) have run by now.
+            Options.FaultPublishing.Freeze();
 
             // Subscribe to the host shutdown signal so we can immediately latch all receivers
             // the moment SIGTERM/ApplicationStopping fires, rather than waiting until our
@@ -156,7 +262,22 @@ public partial class WolverineRuntime
         
         if (Options.AutoBuildMessageStorageOnStartup != AutoCreate.None && Storage is not NullMessageStore)
         {
-            await _stores.Value.MigrateAsync();
+            try
+            {
+                await _stores.Value.MigrateAsync();
+            }
+            catch (Exception e) when (Options.ResourceMigrationFailureMode == ResourceMigrationFailureMode.ContinueOnFailures)
+            {
+                // e.g. a replica that lost the migration lock during a rolling deploy. Log and keep
+                // starting up rather than crash-looping. See GH-3130.
+                Logger.LogError(e,
+                    "Failed to migrate Wolverine message storage on startup. Continuing startup anyway because ResourceMigrationFailureMode is ContinueOnFailures.");
+            }
+        }
+        else if (Storage is not NullMessageStore)
+        {
+            Logger.LogInformation(
+                "Skipping automatic message storage migration on startup because AutoBuildMessageStorageOnStartup is None. The message storage must have been provisioned ahead of time, e.g. with 'resources setup' / IHost.SetupResources()");
         }
 
         _hasMigratedStorage = true;
@@ -189,6 +310,21 @@ public partial class WolverineRuntime
         switch (Options.CodeGeneration.TypeLoadMode)
         {
             case TypeLoadMode.Dynamic:
+                // Core WolverineFx no longer ships the Roslyn runtime compiler (#2876). Dynamic mode
+                // always compiles handler/middleware dispatch at runtime, so it requires an
+                // IAssemblyGenerator — auto-registered by referencing WolverineFx.RuntimeCompilation,
+                // or via an explicit opts.UseRuntimeCompilation(). Fail fast with guidance if absent.
+                if (!_container.HasRegistrationFor(typeof(IAssemblyGenerator)))
+                {
+                    throw new InvalidOperationException(
+                        "Wolverine is running in TypeLoadMode.Dynamic, which compiles handler/middleware code at runtime, " +
+                        "but no IAssemblyGenerator (Roslyn) is registered. Core WolverineFx no longer ships the runtime compiler. " +
+                        "Either add the 'WolverineFx.RuntimeCompilation' NuGet package (it auto-registers when referenced, or call " +
+                        "opts.UseRuntimeCompilation() in UseWolverine(...)), or pre-generate code with 'dotnet run -- codegen write' " +
+                        "and set opts.CodeGeneration.TypeLoadMode = TypeLoadMode.Static. " +
+                        "See https://wolverinefx.net/guide/codegen.html (GH-2876).");
+                }
+
                 Logger.LogInformation(
                     $"The Wolverine code generation mode is {nameof(TypeLoadMode.Dynamic)}. This is suitable for development, but you may want to opt into other options for production usage to reduce start up time and resource utilization.");
                 Logger.LogInformation("See https://wolverine.netlify.app/guide/codegen.html for more information");
@@ -252,9 +388,12 @@ public partial class WolverineRuntime
             {
                 await _stores.Value.DrainAsync();
             }
-            catch (TaskCanceledException)
+            catch (OperationCanceledException)
             {
-                // This can timeout, just swallow it here
+                // Best-effort drain. TaskCanceledException is the common shape, but
+                // some ADO.NET drivers (Npgsql, MySqlConnector) raise a plain
+                // OperationCanceledException when the host's shutdown timeout fires
+                // mid-command — catch the parent so we cover both.
             }
 
             try
@@ -266,6 +405,17 @@ public partial class WolverineRuntime
             catch (ObjectDisposedException)
             {
                 // This could happen if DisposeAsync() is called before StopAsync()
+            }
+            catch (OperationCanceledException)
+            {
+                // Best-effort cleanup — when the host's shutdown timeout fires (or the
+                // caller passes an already-cancelled token through Host.StopAsync),
+                // every persistence command picks up the cancellation and the SQL
+                // driver throws OperationCanceledException. Swallow it: any envelopes
+                // left as owner_id = node_id will be reclaimed by the durability
+                // agent's recovery polling on the next live node, so dropping the
+                // release here is functionally safe and avoids surfacing a normal
+                // shutdown race as a test/run failure. Same reasoning as GH-2671.
             }
         }
 
@@ -328,9 +478,15 @@ public partial class WolverineRuntime
         // Build message-type-to-ancillary-store mapping for durable inbox routing.
         // When a handler targets an ancillary store on a different database, incoming
         // envelopes should be persisted in that store for transactional atomicity.
+        //
+        // Use AllChains() rather than Chains so per-endpoint sticky chains
+        // produced by MultipleHandlerBehavior.Separated are included.
+        // Without this, [MartenStore]-attributed handlers under Separated mode
+        // never make it into the map and inbox routing falls back to the main
+        // store. See https://github.com/JasperFx/wolverine/issues/2576.
         if (Stores != null && Stores.HasAnyAncillaryStores())
         {
-            foreach (var chain in Handlers.Chains.Where(c => c.AncillaryStoreType != null))
+            foreach (var chain in Handlers.AllChains().Where(c => c.AncillaryStoreType != null))
             {
                 var messageTypeName = chain.MessageType.ToMessageTypeName();
                 Stores.MapMessageTypeToAncillaryStore(messageTypeName, chain.AncillaryStoreType!);
@@ -343,11 +499,24 @@ public partial class WolverineRuntime
             Options.Transports.RemoveLocal();
         }
 
+        var failedTransports = new List<ITransport>();
         foreach (var transport in Options.Transports)
         {
             if (!Options.ExternalTransportsAreStubbed)
             {
-                await transport.InitializeAsync(this).ConfigureAwait(false);
+                try
+                {
+                    await transport.InitializeAsync(this).ConfigureAwait(false);
+                }
+                catch (Exception e) when (Options.ResourceMigrationFailureMode == ResourceMigrationFailureMode.ContinueOnFailures)
+                {
+                    // e.g. a transient broker-provisioning failure during a rolling deploy. Log, skip this
+                    // transport's endpoint startup below, and keep the application starting. See GH-3130.
+                    failedTransports.Add(transport);
+                    Logger.LogError(e,
+                        "Failed to initialize Wolverine transport {Transport} on startup. Continuing startup anyway because ResourceMigrationFailureMode is ContinueOnFailures.",
+                        transport);
+                }
             }
             else
             {
@@ -357,6 +526,9 @@ public partial class WolverineRuntime
 
         foreach (var transport in Options.Transports)
         {
+            // A transport that failed to initialize under ContinueOnFailures has no usable endpoints
+            if (failedTransports.Contains(transport)) continue;
+
             var replyUri = transport.ReplyEndpoint()?.Uri;
 
             foreach (var endpoint in transport.Endpoints().Where(x => x.AutoStartSendingAgent()))
@@ -408,6 +580,121 @@ public partial class WolverineRuntime
         }
     }
 
+    // Suffix appended to the element type's convention queue name to host the batch processor
+    // when the same element type also has a direct handler under Separated mode.
+    internal const string BatchQueueSuffix = "-batch";
+
+    private void reassignBatchQueuesThatCollideWithHandlers()
+    {
+        if (Options.MultipleHandlerBehavior != MultipleHandlerBehavior.Separated)
+        {
+            return;
+        }
+
+        if (Options.BatchDefinitions.Count == 0)
+        {
+            return;
+        }
+
+        var local = Options.Transports.GetOrCreate<LocalTransport>();
+
+        foreach (var batch in Options.BatchDefinitions)
+        {
+            // No direct Handle(T) handler for the element type -> the batch owns the element
+            // type's queue and the existing fallback routing/executor behavior is correct.
+            if (Handlers.ChainFor(batch.ElementType) == null)
+            {
+                continue;
+            }
+
+            // The user explicitly pointed the batch at a distinct queue already -> respect it.
+            var directQueue = local.FindQueueForMessageType(batch.ElementType);
+            if (!string.Equals(batch.LocalExecutionQueueName, directQueue.EndpointName,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            // Move the batch onto a dedicated queue distinct from the direct handler's queue.
+            var batchQueueName = directQueue.EndpointName + BatchQueueSuffix;
+            var batchQueue = local.QueueFor(batchQueueName);
+            batchQueue.Mode = directQueue.Mode;
+            batch.LocalExecutionQueueName = batchQueue.EndpointName;
+        }
+    }
+
+    private void warnOrAssertBatchHandlerConflicts()
+    {
+        // Only relevant under the default Classic behavior. Under Separated the same collision is
+        // legitimately resolved by reassignBatchQueuesThatCollideWithHandlers() (both handlers run).
+        if (Options.MultipleHandlerBehavior != MultipleHandlerBehavior.ClassicCombineIntoOneLogicalHandler)
+        {
+            return;
+        }
+
+        if (Options.BatchDefinitions.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var batch in Options.BatchDefinitions)
+        {
+            // A non-null chain for the element type itself means there is a direct Handle(T) handler
+            // colliding with the batch (the batch handler is for T[], a different chain).
+            var directChain = Handlers.ChainFor(batch.ElementType);
+            if (directChain == null)
+            {
+                continue;
+            }
+
+            var elementType = batch.ElementType.NameInCode();
+            var directHandlers = directChain.Handlers
+                .Select(x => $"{x.HandlerType.NameInCode()}.{x.Method.Name}()").Join(", ");
+
+            var message =
+                $"Batch handler conflict for message type '{batch.ElementType.FullNameInCode()}': it has BOTH a direct handler ({directHandlers}) " +
+                $"and a BatchMessagesOf<{elementType}>() batch handler ({elementType}[]). Under the default " +
+                $"MultipleHandlerBehavior.ClassicCombineIntoOneLogicalHandler the direct handler wins and the batch handler is silently " +
+                $"shadowed (it never runs). To run both independently set opts.MultipleHandlerBehavior = MultipleHandlerBehavior.Separated; " +
+                $"otherwise remove one of the two handlers. (Call opts.AssertNoBatchHandlerConflicts() to make Wolverine throw on this instead of warning.)";
+
+            if (Options.AssertsNoBatchHandlerConflicts)
+            {
+                throw new InvalidOperationException(message);
+            }
+
+            Logger.LogWarning(message);
+        }
+    }
+
+    private void applyBatchProbePolicies()
+    {
+        if (Options.BatchDefinitions.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var batch in Options.BatchDefinitions)
+        {
+            if (batch.ProbeIndividuallyAfterAttempts is not { } attempts)
+            {
+                continue;
+            }
+
+            // The failure rule lives on the batch handler chain (the T[] handler), matching any exception:
+            // retry the whole batch until it has failed `attempts` times, then re-run each member as its
+            // own size-1 batch so only the failing one dead-letters.
+            var batchChain = Handlers.ChainFor(batch.Batcher.BatchMessageType);
+            if (batchChain == null)
+            {
+                continue;
+            }
+
+            batchChain.OnException<Exception>()
+                .ContinueWith(new Batching.ProbeIndividuallyContinuationSource(attempts));
+        }
+    }
+
     private void discoverListenersFromConventions()
     {
         // Let any registered routing conventions discover listener endpoints
@@ -428,6 +715,29 @@ public partial class WolverineRuntime
             {
                 routingConvention.DiscoverListeners(this, handledMessageTypes);
             }
+
+            // ALSO pre-register sender subscription metadata for each handled
+            // message type so that endpoint policies (e.g.
+            // UseDurableOutboxOnAllSendingEndpoints) apply to conventionally-
+            // routed sender endpoints. Without this, transports like RabbitMQ
+            // create the sender endpoint as a side effect of listener
+            // discovery (ApplyListenerRoutingDefaults), but the Subscription
+            // metadata used by AllSenders policies is added lazily by
+            // DiscoverSenders only on the first publish — by which point
+            // BrokerTransport.InitializeAsync has already Compile()'d the
+            // endpoint with no subscriptions and Endpoint._hasCompiled
+            // short-circuits the policy from ever applying. See GH-2588.
+            //
+            // PreregisterSenders is intentionally lighter than DiscoverSenders
+            // — it does NOT build the sending agent (which would need a live
+            // broker connection that hasn't been opened yet). The full
+            // DiscoverSenders still runs lazily on first publish via
+            // RoutingFor; by then the endpoint has already been compiled with
+            // the subscription in place, so the policy decisions stick.
+            foreach (var routingConvention in Options.RoutingConventions)
+            {
+                routingConvention.PreregisterSenders(handledMessageTypes, this);
+            }
         }
         else
         {
@@ -435,27 +745,6 @@ public partial class WolverineRuntime
         }
 
         Options.LocalRouting.DiscoverListeners(this, handledMessageTypes);
-    }
-
-    private IWolverineTypeLoader? tryDiscoverTypeLoaderFromAttribute()
-    {
-        try
-        {
-            var assembly = Options.ApplicationAssembly;
-            if (assembly == null) return null;
-
-            var attribute = assembly.GetCustomAttributes(typeof(WolverineTypeManifestAttribute), false)
-                .FirstOrDefault() as WolverineTypeManifestAttribute;
-
-            if (attribute?.LoaderType == null) return null;
-
-            return Activator.CreateInstance(attribute.LoaderType) as IWolverineTypeLoader;
-        }
-        catch (Exception e)
-        {
-            Logger.LogWarning(e, "Failed to instantiate source-generated IWolverineTypeLoader from assembly attribute, falling back to runtime scanning");
-            return null;
-        }
     }
 
     internal Task StartLightweightAsync()

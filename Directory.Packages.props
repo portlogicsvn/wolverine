@@ -4,117 +4,152 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageVersion Include="Alba" Version="8.5.2" />
+    <PackageVersion Include="Asp.Versioning.Abstractions" Version="[10.0.0,11.0.0)" />
+    <PackageVersion Include="Asp.Versioning.Http" Version="[10.0.0,11.0.0)" />
+    <PackageVersion Include="Asp.Versioning.Mvc.ApiExplorer" Version="[10.0.0,11.0.0)" />
+    <PackageVersion Include="AWSSDK.S3" Version="4.0.22.1" />
     <PackageVersion Include="AWSSDK.SimpleNotificationService" Version="4.0.2.14" />
     <PackageVersion Include="AWSSDK.SQS" Version="4.0.2.14" />
     <PackageVersion Include="Azure.Identity" Version="1.17.0" />
     <PackageVersion Include="Azure.Messaging.ServiceBus" Version="7.20.1" />
+    <PackageVersion Include="Azure.Storage.Blobs" Version="12.27.0" />
+    <PackageVersion Include="Apache.Avro" Version="1.12.1" />
     <PackageVersion Include="BenchmarkDotNet" Version="0.13.1" />
+    <PackageVersion Include="Confluent.Kafka" Version="2.14.0" />
     <PackageVersion Include="Confluent.SchemaRegistry.Serdes.Avro" Version="2.14.0" />
     <PackageVersion Include="Confluent.SchemaRegistry.Serdes.Json" Version="2.14.0" />
     <PackageVersion Include="coverlet.collector" Version="6.0.4" />
     <PackageVersion Include="DotPulsar" Version="5.1.2" />
     <PackageVersion Include="FluentAssertions" Version="6.12.2" />
+    <PackageVersion Include="FluentResults" Version="3.16.0" />
     <PackageVersion Include="FluentValidation" Version="12.0.0" />
     <PackageVersion Include="FSharp.Core" Version="9.0.303" />
     <PackageVersion Include="GitHubActionsTestLogger" Version="2.4.1" />
+    <PackageVersion Include="Google.Api.CommonProtos" Version="2.16.0" />
     <PackageVersion Include="Google.Cloud.PubSub.V1" Version="3.24.0" />
+    <PackageVersion Include="Google.Cloud.Storage.V1" Version="4.13.0" />
     <PackageVersion Include="Google.Protobuf" Version="3.31.1" />
+    <PackageVersion Include="Grpc.AspNetCore" Version="2.76.0" />
     <PackageVersion Include="Grpc.Core" Version="2.46.6" />
-    <PackageVersion Include="Grpc.Tools" Version="2.72.0" />
+    <PackageVersion Include="Grpc.Core.Api" Version="2.76.0" />
+    <PackageVersion Include="Grpc.Net.Client" Version="2.76.0" />
+    <PackageVersion Include="Grpc.Net.ClientFactory" Version="2.76.0" />
+    <PackageVersion Include="Grpc.StatusProto" Version="2.76.0" />
+    <PackageVersion Include="Grpc.Tools" Version="2.76.0" />
     <PackageVersion Include="HtmlTags" Version="9.0.0" />
-    <PackageVersion Include="JasperFx" Version="1.23.0" />
-    <PackageVersion Include="JasperFx.Events" Version="1.25.0" />
-    <PackageVersion Include="JasperFx.RuntimeCompiler" Version="4.4.0" />
-    <PackageVersion Include="Lamar.Microsoft.DependencyInjection" Version="15.0.1" />
-    <PackageVersion Include="Marten" Version="8.28.0" />
+    <!-- Drives test-host executables as supervised worker processes from the Nuke build
+         (build/SupervisedTests.cs): class-partitioned parallel workers, per-lane environments,
+         and honest retry reporting. Referenced ONLY by the build project. -->
+    <PackageVersion Include="Bobcat.Supervisor" Version="0.6.1" />
+    <PackageVersion Include="JasperFx" Version="2.39.5" />
+    <PackageVersion Include="JasperFx.Events" Version="2.39.5" />
+    <PackageVersion Include="JasperFx.Events.SourceGenerator" Version="2.39.5" />
+    <!-- RuntimeCompiler is on its own 5.x line (the Roslyn compiler package) — not the 2.1.x
+         family; it stays at 5.0.0. -->
+    <PackageVersion Include="JasperFx.RuntimeCompiler" Version="5.0.0" />
+    <PackageVersion Include="JasperFx.SourceGenerator" Version="2.39.5" />
+    <PackageVersion Include="Lamar.Microsoft.DependencyInjection" Version="16.0.0" />
+    <PackageVersion Include="Marten" Version="9.22.2" />
     <PackageVersion Include="Microsoft.Data.SqlClient" Version="6.1.3" />
-    <PackageVersion Include="Polecat" Version="1.6.1" />
+    <PackageVersion Include="Polecat" Version="[5.7.0,6.0.0)" />
     <PackageVersion Include="Microsoft.Azure.Cosmos" Version="3.46.1" />
-    <PackageVersion Include="Marten.AspNetCore" Version="8.28.0" />
+    <PackageVersion Include="Marten.AspNetCore" Version="9.22.2" />
+    <PackageVersion Include="Marten.Newtonsoft" Version="9.22.2" />
     <PackageVersion Include="MemoryPack" Version="1.21.3" />
-    <PackageVersion Include="MessagePack" Version="3.1.3" />
+    <PackageVersion Include="MessagePack" Version="3.1.7" />
     <PackageVersion Include="Meziantou.Extensions.Logging.Xunit" Version="1.0.15" />
     <PackageVersion Include="Microsoft.AspNetCore.Mvc.Testing" Version="9.0.14" />
-    <PackageVersion Include="Microsoft.AspNetCore.SignalR" Version="1.1.0" />
+    <PackageVersion Include="Microsoft.AspNetCore.SignalR" Version="1.2.9" />
     <PackageVersion Include="Microsoft.AspNetCore.SignalR.Client" Version="9.0.8" />
     <PackageVersion Include="Microsoft.Azure.SignalR" Version="1.32.0" />
     <PackageVersion Include="Microsoft.CodeAnalysis.Analyzers" Version="3.11.0" />
     <PackageVersion Include="Microsoft.CodeAnalysis.Common" Version="4.14.0" />
     <PackageVersion Include="Microsoft.CodeAnalysis.CSharp" Version="4.14.0" />
-    <PackageVersion Include="Microsoft.CodeAnalysis.NetAnalyzers" Version="5.0.3" />
+    <!-- Pinned so the EF Core projects unify on the 4.14.0 Roslyn line. Core WolverineFx no
+         longer references JasperFx.RuntimeCompiler (#2876), which previously pulled
+         CodeAnalysis.CSharp.Workspaces 4.14.0 and masked EF Core Design's transitive 4.8.0
+         (conflicting with Workspaces.MSBuild 4.14.0). WolverineFx.EntityFrameworkCore
+         references this directly so the unification flows to all EF sample/test projects. -->
+    <PackageVersion Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="4.14.0" />
     <PackageVersion Include="Microsoft.Extensions.ApiDescription.Server" Version="9.0.5" />
     <PackageVersion Include="Microsoft.FeatureManagement" Version="3.2.0" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="8.0.0" />
     <PackageVersion Include="Microsoft.VisualStudio.Threading.Analyzers" Version="17.0.64" />
     <PackageVersion Include="MQTTnet.Extensions.ManagedClient" Version="4.3.7.1207" />
+    <PackageVersion Include="MQTTnet" Version="5.2.0.1603" />
+    <PackageVersion Include="MQTTnet.Server" Version="5.2.0.1603" />
     <PackageVersion Include="MySqlConnector" Version="2.4.0" />
-    <PackageVersion Include="NATS.Net" Version="2.7.0" />
+    <PackageVersion Include="NATS.Net" Version="2.8.2" />
     <PackageVersion Include="NewId" Version="4.0.1" />
     <PackageVersion Include="Newtonsoft.Json" Version="13.0.3" />
     <PackageVersion Include="Npgsql" Version="9.0.3" />
     <PackageVersion Include="NSubstitute" Version="5.3.0" />
-    <PackageVersion Include="Nuke.Common" Version="9.0.4" />
+    <PackageVersion Include="NuGet.Packaging" Version="6.14.3" />
+    <PackageVersion Include="Nuke.Common" Version="10.1.0" />
     <PackageVersion Include="NSwag.AspNetCore" Version="14.0.0" />
-    <PackageVersion Include="OpenTelemetry" Version="1.14.0" />
-    <PackageVersion Include="OpenTelemetry.Api" Version="1.14.0" />
-    <PackageVersion Include="OpenTelemetry.Exporter.Console" Version="1.6.0" />
-    <PackageVersion Include="OpenTelemetry.Exporter.Jaeger" Version="1.8.0" />
-    <PackageVersion Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.14.0" />
-    <PackageVersion Include="OpenTelemetry.Extensions.Hosting" Version="1.14.0" />
-    <PackageVersion Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.14.0" />
-    <PackageVersion Include="OpenTelemetry.Instrumentation.Http" Version="1.14.0" />
+    <PackageVersion Include="OpenTelemetry" Version="1.15.3" />
+    <PackageVersion Include="OpenTelemetry.Api" Version="1.15.3" />
+    <PackageVersion Include="OpenTelemetry.Exporter.Console" Version="1.15.3" />
+    <PackageVersion Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.15.3" />
+    <PackageVersion Include="OpenTelemetry.Extensions.Hosting" Version="1.15.3" />
+    <PackageVersion Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.15.2" />
+    <PackageVersion Include="OpenTelemetry.Instrumentation.Http" Version="1.15.1" />
     <PackageVersion Include="Oracle.ManagedDataAccess.Core" Version="23.7.0" />
     <PackageVersion Include="protobuf-net.BuildTools" Version="3.2.52" />
+    <PackageVersion Include="protobuf-net.Grpc" Version="1.2.2" />
+    <PackageVersion Include="protobuf-net.Grpc.AspNetCore" Version="1.2.2" />
     <PackageVersion Include="RabbitMQ.Client" Version="7.1.2" />
     <PackageVersion Include="RavenDB.Client" Version="7.0.2" />
     <PackageVersion Include="RavenDB.DependencyInjection" Version="5.0.1" />
     <PackageVersion Include="RavenDB.TestDriver" Version="7.0.2" />
     <PackageVersion Include="Refit" Version="8.0.0" />
     <PackageVersion Include="Refit.HttpClientFactory" Version="8.0.0" />
+    <PackageVersion Include="Scalar.AspNetCore" Version="2.14.8" />
     <PackageVersion Include="Shouldly" Version="4.3.0" />
-    <PackageVersion Include="Spectre.Console" Version="0.53.0" />
+    <PackageVersion Include="Spectre.Console" Version="0.55.0" />
     <PackageVersion Include="StackExchange.Redis" Version="2.9.17" />
     <PackageVersion Include="StronglyTypedId" Version="1.0.0-beta08" />
+    <!-- Transitively pinned (see CentralPackageTransitivePinningEnabled above): Swashbuckle 9.x
+         and Microsoft.AspNetCore.OpenApi 10.x pull Microsoft.OpenApi 2.0.0, which carries a high
+         severity advisory (GHSA-v5pm-xwqc-g5wc, patched in 2.7.5). -->
+    <PackageVersion Include="Microsoft.OpenApi" Version="2.7.5" />
     <PackageVersion Include="Swashbuckle.AspNetCore" Version="6.5.0" />
     <PackageVersion Include="Swashbuckle.AspNetCore.Swagger" Version="9.0.1" />
     <PackageVersion Include="Swashbuckle.AspNetCore.SwaggerGen" Version="9.0.1" />
     <PackageVersion Include="Swashbuckle.AspNetCore.SwaggerUI" Version="9.0.1" />
     <PackageVersion Include="System.ComponentModel" Version="4.3.0" />
-    <PackageVersion Include="Testcontainers" Version="4.11.0" />
-    <PackageVersion Include="Testcontainers.LocalStack" Version="4.11.0" />
-    <PackageVersion Include="Testcontainers.MsSql" Version="4.11.0" />
-    <PackageVersion Include="Testcontainers.Nats" Version="4.10.0" />
-    <PackageVersion Include="Testcontainers.Pulsar" Version="4.10.0" />
-    <PackageVersion Include="Testcontainers.Redis" Version="4.10.0" />
-    <PackageVersion Include="Testcontainers.ServiceBus" Version="4.10.0" />
+    <PackageVersion Include="System.Security.Cryptography.Xml" Version="10.0.7" />
+    <PackageVersion Include="Testcontainers" Version="4.12.0" />
+    <PackageVersion Include="Testcontainers.CosmosDb" Version="4.12.0" />
+    <PackageVersion Include="Testcontainers.Kafka" Version="4.12.0" />
+    <PackageVersion Include="Testcontainers.LocalStack" Version="4.12.0" />
+    <PackageVersion Include="Testcontainers.MsSql" Version="4.12.0" />
+    <PackageVersion Include="Testcontainers.Nats" Version="4.12.0" />
+    <PackageVersion Include="Testcontainers.Pulsar" Version="4.12.0" />
+    <PackageVersion Include="Testcontainers.Redis" Version="4.12.0" />
+    <PackageVersion Include="Testcontainers.ServiceBus" Version="4.12.0" />
     <PackageVersion Include="System.Diagnostics.DiagnosticSource" Version="9.0.5" />
     <PackageVersion Include="System.Net.NameResolution" Version="4.3.0" />
     <PackageVersion Include="System.Threading.Tasks.Dataflow" Version="9.0.5" />
-    <PackageVersion Include="Weasel.Core" Version="8.11.2" />
-    <PackageVersion Include="Weasel.EntityFrameworkCore" Version="8.11.2" />
-    <PackageVersion Include="Weasel.MySql" Version="8.11.2" />
-    <PackageVersion Include="Weasel.Oracle" Version="8.11.2" />
-    <PackageVersion Include="Weasel.Postgresql" Version="8.11.2" />
-    <PackageVersion Include="Weasel.SqlServer" Version="8.11.2" />
-    <PackageVersion Include="Weasel.Sqlite" Version="8.11.2" />
+    <PackageVersion Include="Weasel.Core" Version="9.23.0" />
+    <PackageVersion Include="Weasel.EntityFrameworkCore" Version="9.23.0" />
+    <PackageVersion Include="Weasel.MySql" Version="9.23.0" />
+    <PackageVersion Include="Weasel.Oracle" Version="9.23.0" />
+    <PackageVersion Include="Weasel.Postgresql" Version="9.23.0" />
+    <PackageVersion Include="Weasel.SqlServer" Version="9.23.0" />
+    <PackageVersion Include="Weasel.Sqlite" Version="9.23.0" />
     <PackageVersion Include="xunit" Version="2.9.3" />
-    <PackageVersion Include="xunit.assemblyfixture" Version="2.2.0" />
-    <PackageVersion Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.5" />
+    <!-- xUnit v3. Test projects use xunit.v3 and must set <OutputType>Exe</OutputType>.
+         Shared/base-class libraries that are referenced by test projects (notably
+         Wolverine.ComplianceTests) use xunit.v3.extensibility.core instead so they stay
+         plain netstandard2.0 libraries. See XUNIT3-MIGRATION-PLAN.md. -->
+    <PackageVersion Include="xunit.v3" Version="3.2.2" />
+    <PackageVersion Include="xunit.v3.assert" Version="3.2.2" />
+    <PackageVersion Include="xunit.v3.extensibility.core" Version="3.2.2" />
   </ItemGroup>
   <!-- TFM-conditional Microsoft.Extensions.* for Wolverine core (version ranges for NuGet compatibility) -->
-  <ItemGroup Condition=" '$(TargetFramework)' == 'net8.0' ">
-    <PackageVersion Include="Microsoft.AspNetCore.OpenApi" Version="8.0.7" />
-    <PackageVersion Include="Microsoft.Extensions.Caching.Memory" Version="[8.0.1,10.0.0)" />
-    <PackageVersion Include="Microsoft.Extensions.Configuration" Version="[8.0.0,10.0.0)" />
-    <PackageVersion Include="Microsoft.Extensions.Configuration.Abstractions" Version="[8.0.0,10.0.0)" />
-    <PackageVersion Include="Microsoft.Extensions.Configuration.Binder" Version="[8.0.2,10.0.0)" />
-    <PackageVersion Include="Microsoft.Extensions.Configuration.Json" Version="[8.0.1,10.0.0)" />
-    <PackageVersion Include="Microsoft.Extensions.Diagnostics.HealthChecks.Abstractions" Version="[8.0.8,10.0.0)" />
-    <PackageVersion Include="Microsoft.Extensions.Hosting" Version="[8.0.1,10.0.0)" />
-    <PackageVersion Include="Microsoft.Extensions.Hosting.Abstractions" Version="[8.0.1,10.0.0)" />
-    <PackageVersion Include="Microsoft.Extensions.ObjectPool" Version="[8.0.23,10.0.0)" />
-  </ItemGroup>
   <ItemGroup Condition=" '$(TargetFramework)' == 'net9.0' ">
     <PackageVersion Include="Microsoft.AspNetCore.OpenApi" Version="9.0.5" />
     <PackageVersion Include="Microsoft.Extensions.Caching.Memory" Version="[9.0.0,11.0.0)" />
@@ -122,6 +157,7 @@
     <PackageVersion Include="Microsoft.Extensions.Configuration.Abstractions" Version="[9.0.0,11.0.0)" />
     <PackageVersion Include="Microsoft.Extensions.Configuration.Binder" Version="[9.0.0,11.0.0)" />
     <PackageVersion Include="Microsoft.Extensions.Configuration.Json" Version="[9.0.0,11.0.0)" />
+    <PackageVersion Include="Microsoft.Extensions.Diagnostics.HealthChecks" Version="[9.0.0,11.0.0)" />
     <PackageVersion Include="Microsoft.Extensions.Diagnostics.HealthChecks.Abstractions" Version="[9.0.0,11.0.0)" />
     <PackageVersion Include="Microsoft.Extensions.Hosting" Version="[9.0.0,11.0.0)" />
     <PackageVersion Include="Microsoft.Extensions.Hosting.Abstractions" Version="[9.0.0,11.0.0)" />
@@ -138,6 +174,7 @@
     <PackageVersion Include="Microsoft.Extensions.Configuration.Abstractions" Version="10.0.0" />
     <PackageVersion Include="Microsoft.Extensions.Configuration.Binder" Version="10.0.0" />
     <PackageVersion Include="Microsoft.Extensions.Configuration.Json" Version="10.0.0" />
+    <PackageVersion Include="Microsoft.Extensions.Diagnostics.HealthChecks" Version="10.0.0" />
     <PackageVersion Include="Microsoft.Extensions.Diagnostics.HealthChecks.Abstractions" Version="10.0.0" />
     <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.0" />
     <PackageVersion Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.0" />
@@ -145,22 +182,14 @@
     <PackageVersion Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.0-rc.2" />
   </ItemGroup>
   <!-- TFM-conditional EF Core ecosystem -->
-  <ItemGroup Condition=" '$(TargetFramework)' == 'net8.0' ">
-    <PackageVersion Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="8.0.11" />
-    <PackageVersion Include="Microsoft.EntityFrameworkCore" Version="9.0.5" />
-    <PackageVersion Include="Microsoft.EntityFrameworkCore.Design" Version="9.0.5" />
-    <PackageVersion Include="Microsoft.EntityFrameworkCore.Relational" Version="9.0.5" />
-    <PackageVersion Include="Microsoft.EntityFrameworkCore.SqlServer" Version="8.0.11" />
-    <PackageVersion Include="Microsoft.CodeAnalysis.Workspaces.MSBuild" Version="4.14.0" />
-    <PackageVersion Include="Microsoft.Build.Tasks.Core" Version="17.13.26" />
-  </ItemGroup>
   <ItemGroup Condition=" '$(TargetFramework)' == 'net9.0' ">
     <PackageVersion Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="9.0.0" />
     <PackageVersion Include="Microsoft.EntityFrameworkCore" Version="9.0.5" />
     <PackageVersion Include="Microsoft.EntityFrameworkCore.Design" Version="9.0.5" />
+    <PackageVersion Include="Microsoft.EntityFrameworkCore.InMemory" Version="9.0.5" />
     <PackageVersion Include="Microsoft.EntityFrameworkCore.Relational" Version="9.0.5" />
     <PackageVersion Include="Microsoft.EntityFrameworkCore.SqlServer" Version="9.0.0" />
     <PackageVersion Include="Microsoft.CodeAnalysis.Workspaces.MSBuild" Version="4.14.0" />
-    <PackageVersion Include="Microsoft.Build.Tasks.Core" Version="17.13.26" />
+    <PackageVersion Include="Microsoft.Build.Tasks.Core" Version="18.4.0" />
   </ItemGroup>
 </Project>

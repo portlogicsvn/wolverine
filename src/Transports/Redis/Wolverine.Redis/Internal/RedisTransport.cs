@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Linq;
 using JasperFx.Core;
+using JasperFx.Descriptors;
 using Microsoft.Extensions.Logging;
 using StackExchange.Redis;
 using Spectre.Console;
@@ -13,10 +14,33 @@ namespace Wolverine.Redis.Internal;
 public class RedisTransport : BrokerTransport<RedisStreamEndpoint>, IAsyncDisposable
 {
     public const string ProtocolName = "redis";
-    
+
+    // The URI scheme for this transport instance's endpoints. Equal to ProtocolName ("redis") for the
+    // default broker, or the BrokerName for an additional named broker (AddNamedRedisBroker), so named
+    // brokers' endpoints never collide with the default redis:// broker. GH-3309.
+    private readonly string _protocol;
+
     private readonly LightweightCache<string, RedisStreamEndpoint> _streams;
     private readonly ConcurrentDictionary<string, IConnectionMultiplexer> _connections = new();
-    private readonly string _connectionString;
+    private readonly Lazy<IConnectionMultiplexer> _defaultConnection;
+
+    /// <summary>
+    /// Tenants that declare their own dedicated Redis connection (broker-per-tenant). Keyed by tenant id.
+    /// GH-3309.
+    /// </summary>
+    internal LightweightCache<string, RedisTenant> Tenants { get; } = new(id => new RedisTenant(id));
+
+    // Exactly one of these four connection sources is populated, used in precedence order: a
+    // caller-managed multiplexer, a factory that resolves one from the IoC container, caller-supplied
+    // ConfigurationOptions, or a connection string. GH-3110 — the first three let callers wire up
+    // StackExchange.Redis extensions such as Microsoft.Azure.StackExchangeRedis for Entra ID /
+    // Managed Identity token refresh. Wolverine owns (and disposes) only the multiplexers it builds
+    // itself from ConfigurationOptions / a connection string.
+    private readonly IConnectionMultiplexer? _externalConnection;
+    private readonly Func<IServiceProvider, IConnectionMultiplexer>? _connectionFactory;
+    private IServiceProvider? _services;
+    private readonly ConfigurationOptions? _configurationOptions;
+    private readonly string? _connectionString;
 
     /// <summary>
     /// Enable/disable creation of system endpoints like reply streams
@@ -31,24 +55,130 @@ public class RedisTransport : BrokerTransport<RedisStreamEndpoint>, IAsyncDispos
     public int ReplyDatabaseId { get; set; } = 0;
 
     /// <summary>
+    /// How many times the scheduled-message sweep will fail to deserialize an entry in
+    /// <c>{stream}:scheduled</c> before moving its raw bytes to the dead letter queue. Defaults to 3.
+    ///
+    /// <para>GH-3613 stopped the sweep from deleting entries it could not read, because that was silently
+    /// destroying scheduled retries. The cost was that a genuinely unreadable payload — a truncated write, a
+    /// serializer change, a hand-edited key — then stayed in the sorted set forever and re-warned on every
+    /// sweep. This bounds that: unreadable is not the same as expired, but it is not permanent either. Set to
+    /// 0 to disable and keep such entries indefinitely. See GH-3644.</para>
+    ///
+    /// <para>Entries are only ever dead-lettered, never dropped, and only when the listening endpoint has its
+    /// native dead letter queue enabled. With it disabled the entry is left in place regardless.</para>
+    /// </summary>
+    public int MaxScheduledReadAttempts { get; set; } = 3;
+
+    /// <summary>
     /// Customizable selector to build a stable consumer name for listeners when an endpoint-level ConsumerName is not set.
     /// Defaults to ServiceName-NodeNumber-MachineName (lowercased and sanitized).
     /// </summary>
+    [DescribeAsConfigurationState]
     public Func<IWolverineRuntime, RedisStreamEndpoint, string>? DefaultConsumerNameSelector { get; set; }
     
     /// <summary>
     /// Default constructor for GetOrCreate pattern - uses localhost:6379
     /// </summary>
-    public RedisTransport() : this("localhost:6379")
+    public RedisTransport() : this(ProtocolName, "localhost:6379")
     {
         // Default constructor for GetOrCreate<T>()
     }
-    
-    public RedisTransport(string connectionString) : base(ProtocolName, "Redis Streams Transport", ["redis"])
+
+    /// <summary>
+    /// Constructor used when connecting to more than one Redis broker from a single application. The
+    /// <paramref name="protocol"/> doubles as the additional broker's URI scheme so its endpoints don't
+    /// collide with the default <c>redis://</c> broker. Reached through
+    /// <see cref="AddNamedRedisBroker(WolverineOptions, BrokerName, string)"/>. Wolverine owns the
+    /// underlying <see cref="ConnectionMultiplexer"/> and disposes it on shutdown.
+    /// </summary>
+    public RedisTransport(string protocol, string connectionString) : base(protocol, "Redis Streams Transport", [protocol])
     {
+        _protocol = protocol;
         _connectionString = connectionString ?? throw new ArgumentNullException(nameof(connectionString));
-        _streams = new LightweightCache<string, RedisStreamEndpoint>(
-            cacheKey => 
+        _streams = buildStreamCache();
+        _defaultConnection = new Lazy<IConnectionMultiplexer>(createDefaultConnection);
+    }
+
+    /// <summary>
+    /// Connect to Redis with a StackExchange.Redis connection string. Wolverine owns the underlying
+    /// <see cref="ConnectionMultiplexer"/> and disposes it on shutdown.
+    /// </summary>
+    public RedisTransport(string connectionString) : this(ProtocolName, connectionString)
+    {
+    }
+
+    /// <summary>
+    /// Connect to a named Redis broker with a caller-supplied <see cref="ConfigurationOptions"/>. The
+    /// <paramref name="protocol"/> doubles as the broker's URI scheme. GH-3110.
+    /// </summary>
+    public RedisTransport(string protocol, ConfigurationOptions configurationOptions) : base(protocol, "Redis Streams Transport", [protocol])
+    {
+        _protocol = protocol;
+        _configurationOptions = configurationOptions ?? throw new ArgumentNullException(nameof(configurationOptions));
+        _streams = buildStreamCache();
+        _defaultConnection = new Lazy<IConnectionMultiplexer>(createDefaultConnection);
+    }
+
+    /// <summary>
+    /// Connect to Redis with a caller-supplied <see cref="ConfigurationOptions"/>. Wolverine owns the
+    /// <see cref="ConnectionMultiplexer"/> it builds from these options and disposes it on shutdown. Use
+    /// this to wire up StackExchange.Redis extensions (e.g. Microsoft.Azure.StackExchangeRedis for Entra
+    /// ID / Managed Identity token refresh) that augment <see cref="ConfigurationOptions"/>. GH-3110.
+    /// </summary>
+    public RedisTransport(ConfigurationOptions configurationOptions) : this(ProtocolName, configurationOptions)
+    {
+    }
+
+    /// <summary>
+    /// Connect to a named Redis broker with a caller-managed <see cref="IConnectionMultiplexer"/>. The
+    /// <paramref name="protocol"/> doubles as the broker's URI scheme. Wolverine does NOT dispose the
+    /// supplied multiplexer. GH-3110.
+    /// </summary>
+    public RedisTransport(string protocol, IConnectionMultiplexer connection) : base(protocol, "Redis Streams Transport", [protocol])
+    {
+        _protocol = protocol;
+        _externalConnection = connection ?? throw new ArgumentNullException(nameof(connection));
+        _streams = buildStreamCache();
+        _defaultConnection = new Lazy<IConnectionMultiplexer>(createDefaultConnection);
+    }
+
+    /// <summary>
+    /// Connect to Redis with a caller-managed <see cref="IConnectionMultiplexer"/>. Wolverine uses the
+    /// supplied multiplexer as-is and does NOT dispose it — the caller owns its lifetime (and any token
+    /// refresh / reconnect policy wired into it). GH-3110.
+    /// </summary>
+    public RedisTransport(IConnectionMultiplexer connection) : this(ProtocolName, connection)
+    {
+    }
+
+    /// <summary>
+    /// Connect to a named Redis broker with an <see cref="IConnectionMultiplexer"/> resolved from the
+    /// application's IoC container at runtime. The <paramref name="protocol"/> doubles as the broker's URI
+    /// scheme. Wolverine does NOT dispose the resolved multiplexer. GH-3110.
+    /// </summary>
+    public RedisTransport(string protocol, Func<IServiceProvider, IConnectionMultiplexer> connectionFactory) : base(protocol, "Redis Streams Transport", [protocol])
+    {
+        _protocol = protocol;
+        _connectionFactory = connectionFactory ?? throw new ArgumentNullException(nameof(connectionFactory));
+        _streams = buildStreamCache();
+        _defaultConnection = new Lazy<IConnectionMultiplexer>(createDefaultConnection);
+    }
+
+    /// <summary>
+    /// Connect to Redis with an <see cref="IConnectionMultiplexer"/> resolved from the application's IoC
+    /// container at runtime. Use this to share a single multiplexer (e.g. one registered as a singleton,
+    /// possibly with Microsoft.Azure.StackExchangeRedis token refresh) between Wolverine and the rest of
+    /// the application. The resolved multiplexer is assumed to be owned by the container — Wolverine uses
+    /// it as-is and does NOT dispose it. GH-3110.
+    /// </summary>
+    public RedisTransport(Func<IServiceProvider, IConnectionMultiplexer> connectionFactory) : this(ProtocolName, connectionFactory)
+    {
+    }
+
+    private LightweightCache<string, RedisStreamEndpoint> buildStreamCache()
+    {
+        return new LightweightCache<string, RedisStreamEndpoint>(
+            cacheKey =>
             {
                 // Parse the cache key format: {databaseId}:{streamKey}
                 var parts = cacheKey.Split(':', 2);
@@ -58,27 +188,85 @@ public class RedisTransport : BrokerTransport<RedisStreamEndpoint>, IAsyncDispos
                 }
                 var streamKey = parts[1];
                 return new RedisStreamEndpoint(
-                    new Uri($"{ProtocolName}://stream/{databaseId}/{streamKey}"),
+                    new Uri($"{_protocol}://stream/{databaseId}/{streamKey}"),
                     this,
                     EndpointRole.Application);
             });
     }
 
+    private IConnectionMultiplexer createDefaultConnection()
+    {
+        if (_externalConnection != null) return _externalConnection;
+
+        if (_connectionFactory != null)
+        {
+            var services = _services ?? throw new InvalidOperationException(
+                "The Redis transport's IConnectionMultiplexer factory cannot be resolved before the Wolverine host has started. " +
+                "This usually means a Redis connection was requested before ConnectAsync ran.");
+            return _connectionFactory(services);
+        }
+
+        if (_configurationOptions != null) return ConnectionMultiplexer.Connect(_configurationOptions);
+        return ConnectionMultiplexer.Connect(_connectionString!);
+    }
+
+    /// <summary>
+    /// True when Wolverine built the default connection itself (from a connection string or
+    /// ConfigurationOptions) and is therefore responsible for disposing it. A caller-managed multiplexer
+    /// or one resolved from the IoC container is owned elsewhere and must not be disposed here.
+    /// </summary>
+    private bool OwnsDefaultConnection => _externalConnection == null && _connectionFactory == null;
+
     public override Uri ResourceUri
     {
         get
         {
-            // Parse connection string to build resource URI
-            var options = ConfigurationOptions.Parse(_connectionString);
-            var endpoint = options.EndPoints.FirstOrDefault();
-            
+            // Derive the resource URI from whichever connection source is configured.
+            var endpoint = primaryEndPoint();
+
             if (endpoint == null)
             {
-                return new Uri($"{ProtocolName}://localhost:6379");
+                return new Uri($"{_protocol}://localhost:6379");
             }
-            
-            return new Uri($"{ProtocolName}://{endpoint}");
+
+            return new Uri($"{_protocol}://{endpoint}");
         }
+    }
+
+    private System.Net.EndPoint? primaryEndPoint()
+    {
+        if (_externalConnection != null) return _externalConnection.GetEndPoints().FirstOrDefault();
+        if (_connectionFactory != null)
+        {
+            // Only known once the factory has resolved a multiplexer (after the host has started).
+            return _defaultConnection.IsValueCreated ? _defaultConnection.Value.GetEndPoints().FirstOrDefault() : null;
+        }
+        if (_configurationOptions != null) return _configurationOptions.EndPoints.FirstOrDefault();
+        return ConfigurationOptions.Parse(_connectionString!).EndPoints.FirstOrDefault();
+    }
+
+    /// <summary>
+    /// A diagnostic-safe summary of how this transport connects to Redis. The <c>password</c> in a
+    /// connection string or <see cref="ConfigurationOptions"/> is masked; a caller-managed multiplexer is
+    /// reported as such (Wolverine never sees its credentials). Safe to render in diagnostic output.
+    /// </summary>
+    public string ConnectionSummary =>
+        _externalConnection != null ? "caller-managed IConnectionMultiplexer"
+        : _connectionFactory != null ? "caller-managed IConnectionMultiplexer factory"
+        : _configurationOptions != null ? SanitizeConfigurationOptionsForLogging(_configurationOptions)
+        : SanitizeConnectionStringForLogging(_connectionString!);
+
+    public override string? DescribeEndpoint()
+    {
+        // Prefer a clean host:port; primaryEndPoint() never exposes credentials. Fall back to the already-sanitized
+        // ConnectionSummary for caller-managed multiplexers or a factory not yet resolved.
+        return primaryEndPoint() switch
+        {
+            System.Net.DnsEndPoint dns => $"{dns.Host}:{dns.Port}",
+            System.Net.IPEndPoint ip => $"{ip.Address}:{ip.Port}",
+            { } endpoint => endpoint.ToString(),
+            _ => ConnectionSummary
+        };
     }
 
     internal IDatabase GetDatabase(string? connectionString = null, int database = 0)
@@ -86,17 +274,43 @@ public class RedisTransport : BrokerTransport<RedisStreamEndpoint>, IAsyncDispos
         var connection = GetConnection(connectionString);
         return connection.GetDatabase(database);
     }
-    
+
     internal IConnectionMultiplexer GetConnection(string? connectionString = null)
     {
-        var connStr = connectionString ?? _connectionString;
-        return _connections.GetOrAdd(connStr, cs => ConnectionMultiplexer.Connect(cs));
+        // A caller-managed multiplexer is the single shared connection, regardless of any per-endpoint
+        // connection-string override.
+        if (_externalConnection != null) return _externalConnection;
+
+        if (connectionString != null)
+        {
+            return _connections.GetOrAdd(connectionString, cs => ConnectionMultiplexer.Connect(cs));
+        }
+
+        return _defaultConnection.Value;
+    }
+
+    /// <summary>
+    /// Resolve the Redis connection for a tenant: the tenant's own dedicated multiplexer when it declares
+    /// its own connection string / <see cref="ConfigurationOptions"/> / <see cref="IConnectionMultiplexer"/>,
+    /// otherwise the shared transport connection. Each dedicated tenant is an independent Redis server, so
+    /// the same stream key + consumer group live on each without collision. GH-3309.
+    /// </summary>
+    internal IConnectionMultiplexer GetTenantConnection(RedisTenant tenant)
+    {
+        if (!tenant.HasOwnConnection) return GetConnection();
+
+        // Lazily build (and cache on the tenant) so the connection resolves correctly regardless of whether
+        // ConnectAsync has run yet.
+        return tenant.Connection ??= tenant.BuildConnection();
     }
 
     public override async ValueTask ConnectAsync(IWolverineRuntime runtime)
     {
-        runtime.Logger.LogInformation("Connecting to Redis at {ConnectionString}", 
-            SanitizeConnectionStringForLogging(_connectionString));
+        // Capture the IoC container so a factory-based connection can be resolved. ConnectAsync runs
+        // before any endpoint forces a connection (BrokerTransport.startupAsync), so this is set in time.
+        _services ??= runtime.Services;
+
+        runtime.Logger.LogInformation("Connecting to Redis at {ConnectionString}", ConnectionSummary);
         
         try
         {
@@ -106,8 +320,17 @@ public class RedisTransport : BrokerTransport<RedisStreamEndpoint>, IAsyncDispos
             // Test the connection
             var db = connection.GetDatabase();
             await db.PingAsync();
-            
+
             runtime.Logger.LogInformation("Successfully connected to Redis");
+
+            // Tenants that declare their own connection get a dedicated multiplexer they own for the lifetime
+            // of the transport. Eagerly connect and ping each so a misconfigured tenant fails fast at startup.
+            foreach (var tenant in Tenants.Where(x => x.HasOwnConnection))
+            {
+                var tenantConnection = GetTenantConnection(tenant);
+                await tenantConnection.GetDatabase().PingAsync();
+                runtime.Logger.LogInformation("Created dedicated Redis connection for tenant {TenantId}", tenant.TenantId);
+            }
         }
         catch (Exception ex)
         {
@@ -135,7 +358,7 @@ public class RedisTransport : BrokerTransport<RedisStreamEndpoint>, IAsyncDispos
 
     protected override RedisStreamEndpoint findEndpointByUri(Uri uri)
     {
-        if (uri.Scheme != ProtocolName)
+        if (uri.Scheme != Protocol)
         {
             throw new ArgumentException($"Invalid scheme for Redis transport: {uri.Scheme}");
         }
@@ -218,7 +441,24 @@ public class RedisTransport : BrokerTransport<RedisStreamEndpoint>, IAsyncDispos
     {
         try
         {
-            foreach (var connection in _connections.Values)
+            var owned = _connections.Values.ToList();
+
+            // Dispose the default connection only if Wolverine created it. A caller-managed
+            // IConnectionMultiplexer, or one resolved from the IoC container via a factory, is owned
+            // elsewhere and must never be disposed here. GH-3110.
+            if (_defaultConnection.IsValueCreated && OwnsDefaultConnection)
+            {
+                owned.Add(_defaultConnection.Value);
+            }
+
+            // Dispose only the tenant multiplexers Wolverine built itself (from a connection string /
+            // ConfigurationOptions). A caller-managed tenant IConnectionMultiplexer is owned elsewhere. GH-3309.
+            foreach (var tenant in Tenants.Where(x => x is { Connection: not null, OwnsConnection: true }))
+            {
+                owned.Add(tenant.Connection!);
+            }
+
+            foreach (var connection in owned.Distinct())
             {
                 await connection.CloseAsync();
                 connection.Dispose();
@@ -271,15 +511,30 @@ public class RedisTransport : BrokerTransport<RedisStreamEndpoint>, IAsyncDispos
         return options.ToString();
     }
 
+    private static string SanitizeConfigurationOptionsForLogging(ConfigurationOptions options)
+    {
+        // Mask the password without mutating the caller's options instance.
+        var clone = options.Clone();
+        clone.Password = clone.Password?.Length > 0 ? "****" : null;
+        return clone.ToString();
+    }
+
     protected override void tryBuildSystemEndpoints(IWolverineRuntime runtime)
     {
         if (!SystemQueuesEnabled) return;
 
-        // Create a per-node reply stream endpoint similar to other transports (using database 0)
-        var replyStreamKey = $"wolverine.response.{runtime.Options.ServiceName}.{runtime.DurabilitySettings.AssignedNodeNumber}".ToLowerInvariant();
+        // Create a per-node reply stream endpoint similar to other transports (using database 0).
+        // In Solo mode the assigned node number is always 1 (#3188) and the service name is not
+        // unique per host, so multiple Solo hosts on one Redis would share a reply stream and
+        // cross-deliver replies — key on the always-unique UniqueNodeId instead. Balanced gets a
+        // unique AssignedNodeNumber via election. See #3189.
+        var replyNode = runtime.Options.Durability.Mode == DurabilityMode.Solo
+            ? runtime.Options.UniqueNodeId.ToString("N")
+            : runtime.DurabilitySettings.AssignedNodeNumber.ToString();
+        var replyStreamKey = $"wolverine.response.{runtime.Options.ServiceName}.{replyNode}".ToLowerInvariant();
         var cacheKey = $"{ReplyDatabaseId}:{replyStreamKey}";
         var replyEndpoint = new RedisStreamEndpoint(
-            new Uri($"{ProtocolName}://stream/{ReplyDatabaseId}/{replyStreamKey}?consumerGroup=wolverine-replies"),
+            new Uri($"{Protocol}://stream/{ReplyDatabaseId}/{replyStreamKey}?consumerGroup=wolverine-replies"),
             this,
             EndpointRole.System)
         {
@@ -290,28 +545,5 @@ public class RedisTransport : BrokerTransport<RedisStreamEndpoint>, IAsyncDispos
         };
 
         _streams[cacheKey] = replyEndpoint;
-    }
-    
-    /// <summary>
-    /// Helper method to create a Redis stream URI with database ID
-    /// </summary>
-    /// <param name="streamKey">Redis stream key name</param>
-    /// <param name="databaseId">Redis database ID</param>
-    /// <returns>Formatted Redis stream URI</returns>
-    public static Uri BuildRedisStreamUri(string streamKey, int databaseId = 0)
-    {
-        return new Uri($"redis://stream/{databaseId}/{streamKey}");
-    }
-
-    /// <summary>
-    /// Helper method to create a Redis stream URI with database ID and consumer group
-    /// </summary>
-    /// <param name="streamKey">Redis stream key name</param>
-    /// <param name="databaseId">Redis database ID</param>
-    /// <param name="consumerGroup">Consumer group name</param>
-    /// <returns>Formatted Redis stream URI</returns>
-    public static Uri BuildRedisStreamUri(string streamKey, int databaseId, string consumerGroup)
-    {
-        return new Uri($"redis://stream/{databaseId}/{streamKey}?consumerGroup={consumerGroup}");
     }
 }

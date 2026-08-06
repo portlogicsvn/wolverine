@@ -20,18 +20,11 @@ public class MartenBackedMessagePersistenceTests : PostgresqlContext, IDisposabl
 {
     private readonly Envelope theEnvelope;
 
-    private readonly IHost theHost;
+    private IHost theHost = null!;
     private Envelope persisted = null!;
 
     public MartenBackedMessagePersistenceTests()
     {
-        theHost = WolverineHost.For(opts =>
-        {
-            opts.Services.AddMarten(x => { x.Connection(Servers.PostgresConnectionString); })
-                .IntegrateWithWolverine();
-        });
-
-
         theEnvelope = ObjectMother.Envelope();
         theEnvelope.Message = new Message1();
         theEnvelope.ScheduledTime = DateTime.Today.ToUniversalTime().AddDays(1);
@@ -43,24 +36,34 @@ public class MartenBackedMessagePersistenceTests : PostgresqlContext, IDisposabl
         theEnvelope.ParentId = Guid.NewGuid().ToString();
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
+        theHost = await WolverineHost.ForAsync(opts =>
+        {
+            opts.Discovery.DisableConventionalDiscovery();
+            opts.Durability.Mode = DurabilityMode.Solo;
+
+            opts.Services.AddMarten(x => { x.Connection(Servers.PostgresConnectionString); })
+                .IntegrateWithWolverine();
+        });
+
         var persistence = theHost.Get<IMessageStore>();
 
         await persistence.Admin.RebuildAsync();
 
 
-        persistence.Inbox.RescheduleExistingEnvelopeForRetryAsync(theEnvelope).Wait(3.Seconds());
+        await persistence.Inbox.RescheduleExistingEnvelopeForRetryAsync(theEnvelope)
+            .WaitAsync(3.Seconds());
 
         persisted = (await persistence.Admin
                 .AllIncomingAsync())
             .FirstOrDefault(x => x.Id == theEnvelope.Id)!;
     }
 
-    public Task DisposeAsync()
+    public ValueTask DisposeAsync()
     {
         Dispose();
-        return Task.CompletedTask;
+        return ValueTask.CompletedTask;
     }
 
     public void Dispose()

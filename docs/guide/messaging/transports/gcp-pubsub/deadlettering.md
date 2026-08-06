@@ -2,6 +2,12 @@
 
 By default, Wolverine dead lettering is disabled for GCP Pub/Sub transport and Wolverine uses any persistent envelope storage for dead lettering. You can opt in to Wolverine dead lettering through GCP Pub/Sub globally as shown below.
 
+When a message is moved to the dead letter topic, Wolverine stamps the standard diagnostic headers
+(`exception-type`, `exception-message`, `exception-stack`, `failed-at`, `original-destination`) as Pub/Sub
+message attributes, with the delivery attempt count on the standard `attempts` header. See
+[diagnostic headers on dead letter messages](/tutorials/dead-letter-queues#diagnostic-headers-on-dead-letter-messages)
+for the full cross-transport header structure.
+
 <!-- snippet: sample_enable_wolverine_dead_lettering_for_pubsub -->
 <a id='snippet-sample_enable_wolverine_dead_lettering_for_pubsub'></a>
 ```cs
@@ -25,7 +31,7 @@ var host = await Host.CreateDefaultBuilder()
             );
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/GCP/Wolverine.Pubsub.Tests/DocumentationSamples.cs#L175-L197' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_enable_wolverine_dead_lettering_for_pubsub' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/GCP/Wolverine.Pubsub.Tests/DocumentationSamples.cs#L169-L190' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_enable_wolverine_dead_lettering_for_pubsub' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 When enabled, Wolverine will try to move dead letter messages in GCP Pub/Sub to a single, global topic named "wlvrn.dead-letter".
@@ -56,5 +62,5 @@ var host = await Host.CreateDefaultBuilder()
             );
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/GCP/Wolverine.Pubsub.Tests/DocumentationSamples.cs#L202-L225' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_configuring_wolverine_dead_lettering_for_pubsub' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/GCP/Wolverine.Pubsub.Tests/DocumentationSamples.cs#L195-L217' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_configuring_wolverine_dead_lettering_for_pubsub' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->

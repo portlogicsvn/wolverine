@@ -3,6 +3,23 @@ namespace Wolverine;
 public static class MessageBusExtensions
 {
     /// <summary>
+    ///     Publish a sequence of messages to all known subscribers in the order in which
+    ///     the messages are enumerated. Messages without known subscribers are ignored.
+    /// </summary>
+    /// <param name="bus"></param>
+    /// <param name="messages"></param>
+    /// <typeparam name="T"></typeparam>
+    public static async ValueTask PublishAllAsync<T>(this IMessageBus bus, IEnumerable<T> messages)
+    {
+        ArgumentNullException.ThrowIfNull(messages);
+
+        foreach (var message in messages)
+        {
+            await bus.PublishAsync(message).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
     ///     Schedule the publishing or execution of a message until a later time
     /// </summary>
     /// <param name="message"></param>
@@ -95,6 +112,60 @@ public interface ICommandBus
     /// <typeparam name="T"></typeparam>
     /// <returns></returns>
     Task<T> InvokeAsync<T>(object message, DeliveryOptions options, CancellationToken cancellation = default, TimeSpan? timeout = default);
+
+    /// <summary>
+    ///     Execute the message handling right now and stream back a typed sequence of response objects.
+    ///     The handler must return <see cref="IAsyncEnumerable{TResponse}"/> of the response type.
+    ///     Only supported for locally-handled messages.
+    /// </summary>
+    /// <param name="message"></param>
+    /// <param name="cancellation"></param>
+    /// <typeparam name="TResponse"></typeparam>
+    /// <returns></returns>
+    IAsyncEnumerable<TResponse> StreamAsync<TResponse>(object message, CancellationToken cancellation = default);
+
+    /// <summary>
+    ///     Execute the message handling right now and stream back a typed sequence of response objects.
+    ///     The handler must return <see cref="IAsyncEnumerable{TResponse}"/> of the response type.
+    ///     Only supported for locally-handled messages.
+    /// </summary>
+    /// <param name="message"></param>
+    /// <param name="options">Use to pass in extra metadata like headers or group id or correlation information to the command execution</param>
+    /// <param name="cancellation"></param>
+    /// <typeparam name="TResponse"></typeparam>
+    /// <returns></returns>
+    IAsyncEnumerable<TResponse> StreamAsync<TResponse>(object message, DeliveryOptions options, CancellationToken cancellation = default);
+
+    /// <summary>
+    ///     Execute the message handling for an inbound stream of messages right now and wait for the
+    ///     single response. The handler must accept <see cref="IAsyncEnumerable{TRequest}"/> as its
+    ///     message type, e.g. <c>Task&lt;TResponse&gt; Handle(IAsyncEnumerable&lt;TRequest&gt; messages, CancellationToken token)</c>.
+    ///     Only supported for locally-handled messages.
+    /// </summary>
+    /// <param name="messages"></param>
+    /// <param name="cancellation"></param>
+    /// <param name="timeout">Optional timeout</param>
+    /// <typeparam name="TRequest"></typeparam>
+    /// <typeparam name="TResponse"></typeparam>
+    /// <returns></returns>
+    Task<TResponse> StreamAsync<TRequest, TResponse>(IAsyncEnumerable<TRequest> messages,
+        CancellationToken cancellation = default, TimeSpan? timeout = default);
+
+    /// <summary>
+    ///     Execute the message handling for an inbound stream of messages right now and wait for the
+    ///     single response. The handler must accept <see cref="IAsyncEnumerable{TRequest}"/> as its
+    ///     message type, e.g. <c>Task&lt;TResponse&gt; Handle(IAsyncEnumerable&lt;TRequest&gt; messages, CancellationToken token)</c>.
+    ///     Only supported for locally-handled messages.
+    /// </summary>
+    /// <param name="messages"></param>
+    /// <param name="options">Use to pass in extra metadata like headers or group id or correlation information to the command execution</param>
+    /// <param name="cancellation"></param>
+    /// <param name="timeout">Optional timeout</param>
+    /// <typeparam name="TRequest"></typeparam>
+    /// <typeparam name="TResponse"></typeparam>
+    /// <returns></returns>
+    Task<TResponse> StreamAsync<TRequest, TResponse>(IAsyncEnumerable<TRequest> messages,
+        DeliveryOptions options, CancellationToken cancellation = default, TimeSpan? timeout = default);
 }
 
 /// <summary>

@@ -7,8 +7,7 @@ using Wolverine.Postgresql;
 using Wolverine.Tracking;
 using Wolverine.Transports;
 using Wolverine.Transports.Sending;
-using Xunit.Abstractions;
-
+using Xunit;
 namespace Wolverine.Kafka.Tests;
 
 public class configure_consumers_and_publishers : IAsyncLifetime
@@ -22,7 +21,7 @@ public class configure_consumers_and_publishers : IAsyncLifetime
 
     private IHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
          _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -98,7 +97,7 @@ public class configure_consumers_and_publishers : IAsyncLifetime
             }).StartAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _host.StopAsync();
         _host.Dispose();
@@ -150,14 +149,17 @@ public class configure_consumers_and_publishers : IAsyncLifetime
     }
 
     [Fact]
-    public void durable_mode_disables_auto_commit_but_not_auto_offset_store()
+    public void default_commit_mode_wires_store_then_auto_flush()
     {
+        // GH-3150: the default CommitMode is StoreThenAutoFlush, which relies on Kafka's background
+        // committer flushing manually-stored offsets — so EnableAutoCommit is on and offset storage
+        // is manual. (Replaces the previous blanket EnableAutoCommit=false for durable listeners.)
         var blue = _host.GetRuntime().Endpoints.ActiveListeners()
             .Single(x => x.Uri.ToString().Contains("blue")).ShouldBeOfType<ListeningAgent>()
             .Listener.ShouldBeOfType<KafkaListener>();
 
-        blue.Config.EnableAutoCommit.ShouldBe(false);
-        blue.Config.EnableAutoOffsetStore.ShouldBeNull();
+        blue.Config.EnableAutoCommit.ShouldBe(true);
+        blue.Config.EnableAutoOffsetStore.ShouldBe(false);
     }
 
 }

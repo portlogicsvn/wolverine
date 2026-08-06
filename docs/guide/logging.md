@@ -31,14 +31,14 @@ using var host = await Host.CreateDefaultBuilder()
         opts.Policies.MessageSuccessLogLevel(LogLevel.Debug);
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/LoggingUsage.cs#L26-L41' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_turning_down_message_logging' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/LoggingUsage.cs#L25-L39' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_turning_down_message_logging' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 The sample up above turns down the logging on a global, application level. If you have some kind of command message where
 you don't want logging for that particular message type, but do for all other message types, you can override the log
 level for only that specific message type like so:
 
-<!-- snippet: sample_customized_handler_using_Configure -->
+<!-- snippet: sample_customized_handler_using_configure -->
 <a id='snippet-sample_customized_handler_using_configure'></a>
 ```cs
 public class CustomizedHandler
@@ -60,7 +60,7 @@ public class CustomizedHandler
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/CoreTests/Configuration/can_customize_handler_chain_through_Configure_call_on_HandlerType.cs#L25-L46' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_customized_handler_using_configure' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/CoreTests/Configuration/can_customize_handler_chain_through_Configure_call_on_HandlerType.cs#L25-L45' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_customized_handler_using_configure' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Methods on message handler types with the signature:
@@ -124,7 +124,7 @@ on a message type by message type basis. While you *can* also do that with custo
 way to do that is to use the `[WolverineLogging]` attribute on either the handler type or the handler method as shown 
 below:
 
-<!-- snippet: sample_using_Wolverine_Logging_attribute -->
+<!-- snippet: sample_using_wolverine_logging_attribute -->
 <a id='snippet-sample_using_wolverine_logging_attribute'></a>
 ```cs
 public record QuietMessage;
@@ -161,7 +161,7 @@ public class QuietAndVerboseMessageHandler
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/CoreTests/Acceptance/logging_configuration.cs#L78-L114' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_wolverine_logging_attribute' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/CoreTests/Acceptance/logging_configuration.cs#L78-L113' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_wolverine_logging_attribute' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 
@@ -183,7 +183,7 @@ using var host = await Host.CreateDefaultBuilder()
         opts.Policies.LogMessageStarting(LogLevel.Information);
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/LoggingUsage.cs#L11-L21' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_log_message_starting' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/LoggingUsage.cs#L11-L20' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_log_message_starting' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 This will append log entries looking like this:
@@ -222,12 +222,12 @@ To explicitly mark members as "audited", you *can* use attributes within your me
 public class AuditedMessage
 {
     [Audit]
-    public string Name { get; set; }
+    public string Name { get; set; } = null!;
 
     [Audit("AccountIdentifier")] public int AccountId;
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/CoreTests/Configuration/auditing_determination.cs#L102-L112' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_audit_attribute' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/CoreTests/Configuration/auditing_determination.cs#L101-L110' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_audit_attribute' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Or if you are okay using a common message interface for common identification like "this message targets an account/organization/tenant/client"
@@ -245,7 +245,7 @@ public interface IAccountMessage
 // A possible command that uses our marker interface above
 public record DebitAccount(int AccountId, decimal Amount) : IAccountMessage;
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/CoreTests/Configuration/auditing_determination.cs#L137-L148' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_account_message_for_auditing' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/CoreTests/Configuration/auditing_determination.cs#L135-L145' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_account_message_for_auditing' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 You can specify audited members through this syntax:
@@ -256,7 +256,7 @@ You can specify audited members through this syntax:
 // opts is WolverineOptions inside of a UseWolverine() call
 opts.Policies.ForMessagesOfType<IAccountMessage>().Audit(x => x.AccountId);
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/CoreTests/Configuration/auditing_determination.cs#L73-L78' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_explicit_registration_of_audit_properties' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/CoreTests/Configuration/auditing_determination.cs#L73-L77' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_explicit_registration_of_audit_properties' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 This will extend your log entries to like this:
@@ -433,16 +433,22 @@ builder.Services.AddOpenTelemetryTracing(x =>
         .AddSource("Wolverine");
 });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/OpenTelemetry/OtelWebApi/Program.cs#L36-L52' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_enabling_open_telemetry' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/OpenTelemetry/OtelWebApi/Program.cs#L36-L51' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_enabling_open_telemetry' title='Start of snippet'>anchor</a></sup>
 <a id='snippet-sample_enabling_open_telemetry-1'></a>
 ```cs
 builder.Services.AddOpenTelemetry()
     .WithTracing(tracing => { tracing.AddSource("Wolverine"); })
-    .WithMetrics(metrics => { metrics.AddMeter("Wolverine"); })
+    .WithMetrics(metrics => { metrics.AddMeter("Wolverine*"); })
     .UseOtlpExporter();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/OpenTelemetry/OtelWebApiWolverineMarten/Program.cs#L36-L43' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_enabling_open_telemetry-1' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/OpenTelemetry/OtelWebApiWolverineMarten/Program.cs#L36-L42' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_enabling_open_telemetry-1' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
+
+::: tip
+The exported `Meter` is named `Wolverine:{ApplicationName}` (e.g. `Wolverine:MyService`), so the wildcard
+`AddMeter("Wolverine*")` is required — a bare `AddMeter("Wolverine")` matches nothing. The `ActivitySource`
+for traces is still just `Wolverine`.
+:::
 
 ::: tip
 Wolverine 1.7 added the ability to disable Open Telemetry tracing on an endpoint by endpoint basis, and **finally** turned
@@ -467,7 +473,7 @@ using var host = await Host.CreateDefaultBuilder()
             .TelemetryEnabled(false);
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/DisablingOpenTelemetry.cs#L11-L26' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_disabling_open_telemetry_by_endpoint' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/DisablingOpenTelemetry.cs#L11-L25' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_disabling_open_telemetry_by_endpoint' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Note that this `TelemetryEnabled()` method is available on all possible subscriber and listener types within Wolverine.
@@ -488,6 +494,47 @@ public const string EnvelopeDiscarded = "wolverine.envelope.discarded";
 /// ActivityEvent marking when an incoming envelope is being moved to the error queue
 /// </summary>
 public const string MovedToErrorQueue = "wolverine.error.queued";
+
+/// <summary>
+/// ActivityEvent marking that a Fault&lt;T&gt; was successfully auto-published
+/// for an envelope being moved to the error queue or discarded.
+/// </summary>
+public const string FaultPublished = "wolverine.fault.published";
+
+/// <summary>
+/// ActivityEvent marking that auto-publishing a Fault&lt;T&gt; failed —
+/// the underlying error is logged and metered, never thrown.
+/// </summary>
+public const string FaultPublishFailed = "wolverine.fault.publish.failed";
+
+/// <summary>
+/// ActivityEvent marking that auto-publishing a Fault&lt;T&gt; was skipped because
+/// no routes are configured for the fault message type. Operator must wire either
+/// a remote subscriber (PublishMessage&lt;Fault&lt;T&gt;&gt;().To(...)) or a local handler.
+/// </summary>
+public const string FaultNoRoute = "wolverine.fault.no_route";
+
+/// <summary>
+/// ActivityEvent marking that auto-publishing was suppressed because the message being
+/// processed is itself a Fault&lt;T&gt; — Wolverine never publishes Fault&lt;Fault&lt;T&gt;&gt;.
+/// Almost always indicates a misconfigured recursive handler.
+/// </summary>
+public const string FaultRecursionSuppressed = "wolverine.fault.recursion_suppressed";
+
+/// <summary>
+/// ActivityEvent marking that a send-side dead-letter movement bypassed
+/// auto-Fault publishing (the fault subsystem is receive-side only). Emitted
+/// only when fault publishing is globally enabled — operators using per-type
+/// PublishFault opt-in only will not see this event.
+/// </summary>
+public const string FaultBypassedSendSide = "wolverine.fault.bypassed.send_side";
+
+/// <summary>
+/// ActivityEvent marking that an unknown-message-type DLQ movement bypassed
+/// auto-Fault publishing (no T to construct Fault&lt;T&gt; for). Emitted only
+/// when fault publishing is globally enabled.
+/// </summary>
+public const string FaultBypassedUnknownType = "wolverine.fault.bypassed.unknown_type";
 
 /// <summary>
 /// ActivityEvent marking when an incoming envelope does not have a known message
@@ -570,9 +617,238 @@ public const string SendingResumed = "wolverine.sending.resumed";
 /// A stop reason when sending agents are paused after too many sender failures
 /// </summary>
 public const string TooManySenderFailures = "TooManySenderFailures";
+
+/// <summary>
+/// Activity tag for the saga identity value when processing a saga message
+/// </summary>
+public const string SagaId = "wolverine.saga.id";
+
+/// <summary>
+/// Activity tag set when an envelope being processed carries a
+/// <see cref="Envelope.ScheduledTime"/> — i.e. it was previously
+/// scheduled for delayed delivery (saga timeout, deferred command,
+/// retry-with-delay, …) rather than dispatched immediately. Useful
+/// for trace queries that want to distinguish "first-time delivery"
+/// from "scheduled re-entry" in saga workflows where timeout
+/// messages re-enter the saga after a wait.
+/// </summary>
+public const string MessageScheduled = "wolverine.message.scheduled";
+
+/// <summary>
+/// Activity tag for the saga type full name when processing a saga message
+/// </summary>
+public const string SagaType = "wolverine.saga.type";
+
+/// <summary>
+/// Activity tag for the aggregate stream identity when processing an aggregate handler workflow
+/// </summary>
+public const string StreamId = "wolverine.stream.id";
+
+/// <summary>
+/// Activity tag for the aggregate type full name when processing an aggregate handler workflow
+/// </summary>
+public const string StreamType = "wolverine.stream.type";
+
+/// <summary>
+/// Span name emitted when a streaming handler is executing via StreamAsync
+/// </summary>
+public const string StreamingExecution = "wolverine.streaming";
+
+/// <summary>
+/// ActivityEvent emitted when the handler phase of a streaming invocation completes
+/// and iteration of the returned sequence is about to begin
+/// </summary>
+public const string StreamingStarted = "wolverine.stream.handler.started";
+
+/// <summary>
+/// ActivityEvent emitted when a streaming handler sequence is fully consumed or cancelled
+/// </summary>
+public const string StreamingCompleted = "wolverine.stream.handler.completed";
+
+/// <summary>
+/// ActivityEvent emitted by the codegen wrapper around the user handler MethodCall
+/// immediately before the handler body runs. Opt-in via
+/// <c>WolverineOptions.Tracking.HandlerExecutionDiagnosticsEnabled</c>.
+/// </summary>
+public const string HandlerStarted = "wolverine.handler.started";
+
+/// <summary>
+/// ActivityEvent emitted by the codegen wrapper around the user handler MethodCall
+/// immediately after the handler body returns successfully. Opt-in via
+/// <c>WolverineOptions.Tracking.HandlerExecutionDiagnosticsEnabled</c>.
+/// </summary>
+public const string HandlerFinished = "wolverine.handler.finished";
+
+/// <summary>
+/// ActivityEvent emitted by the codegen wrapper around the FlushOutgoingMessages
+/// MethodCall immediately before the call. Opt-in via
+/// <c>WolverineOptions.Tracking.OutboxDiagnosticsEnabled</c>.
+/// </summary>
+public const string OutboxFlushing = "wolverine.outbox.flushing";
+
+/// <summary>
+/// ActivityEvent emitted by the codegen wrapper around the FlushOutgoingMessages
+/// MethodCall immediately after the call returns. Opt-in via
+/// <c>WolverineOptions.Tracking.OutboxDiagnosticsEnabled</c>.
+/// </summary>
+public const string OutboxPublished = "wolverine.outbox.published";
+
+/// <summary>
+/// Activity tag (milliseconds): elapsed time from producer <see cref="Envelope.SentAt"/>
+/// to consumer activity start. Opt-in via
+/// <c>WolverineOptions.Tracking.HandlerExecutionDiagnosticsEnabled</c>.
+/// </summary>
+public const string EnvelopeTransportLagMs = "wolverine.envelope.transport_lag_ms";
+
+/// <summary>
+/// Activity tag (milliseconds): elapsed time from worker-queue handoff
+/// (<see cref="Envelope.ReceivedAt"/>) to handler activity start. Opt-in via
+/// <c>WolverineOptions.Tracking.HandlerExecutionDiagnosticsEnabled</c>.
+/// </summary>
+public const string EnvelopeReceiveDwellMs = "wolverine.envelope.receive_dwell_ms";
+
+/// <summary>
+/// Span name emitted around inbound envelope deserialization. Opt-in via
+/// <c>WolverineOptions.Tracking.DeserializationSpanEnabled</c>.
+/// </summary>
+public const string Deserialize = "wolverine.deserialize";
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Wolverine/Runtime/WolverineTracing.cs#L27-L121' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_wolverine_open_telemetry_tracing_spans_and_activities' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Wolverine/Runtime/WolverineTracing.cs#L28-L257' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_wolverine_open_telemetry_tracing_spans_and_activities' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
+
+## Opt-in Handler Execution Diagnostics <Badge type="tip" text="5.38" />
+
+The default span surface above covers cluster-level events (listener pause, retries, scheduled redelivery, etc.). Wolverine ships a separate, **opt-in** layer of structured diagnostics aimed primarily at **performance optimization** — handler latency tuning, spotting queue dwell or backpressure, profiling slow transactional commits, and debugging `await`-graph interleaving inside the handler. Each flag lives on `WolverineOptions.Tracking` and **defaults to `false`**, so apps that don't ask for the surface pay nothing for it.
+
+```csharp
+builder.UseWolverine(opts =>
+{
+    // wolverine.handler.started / wolverine.handler.finished ActivityEvents
+    // around the user handler body, plus per-envelope timing tags.
+    opts.Tracking.HandlerExecutionDiagnosticsEnabled = true;
+
+    // wolverine.deserialize span around inbound envelope deserialization,
+    // tagged with messaging.message_payload_size_bytes.
+    opts.Tracking.DeserializationSpanEnabled = true;
+
+    // wolverine.outbox.flushing / wolverine.outbox.published ActivityEvents
+    // around the FlushOutgoingMessages call in the generated handler chain,
+    // and (when Wolverine.Marten transactional middleware is in play)
+    // marten.savechanges.start / marten.savechanges.finished ActivityEvents
+    // around the Marten IDocumentSession.SaveChangesAsync call.
+    opts.Tracking.OutboxDiagnosticsEnabled = true;
+
+    // RecordCauseAndEffect call after the handler body that reports unique
+    // (incoming, outgoing) message-type pairs to IWolverineObserver.
+    opts.Tracking.EnableMessageCausationTracking = true;
+});
+```
+
+Each flag is independent. The runtime checks each flag at code-generation time only — when a flag is `false`, the corresponding annotations are not emitted into the generated handler at all, so there is **zero per-message runtime cost** for any feature you haven't enabled. That codegen-time gating is the whole point: in tight production hot paths you want a flag that costs literally nothing when it's off, not one guarded by a runtime `if`. The legacy `WolverineOptions.EnableMessageCausationTracking` property is preserved as an `[Obsolete]` shim that delegates to `Tracking.EnableMessageCausationTracking`.
+
+### `HandlerExecutionDiagnosticsEnabled`
+
+When set, two ActivityEvents and two activity tags are emitted around each handler invocation:
+
+| Name | Kind | Meaning |
+|---|---|---|
+| `wolverine.handler.started` | ActivityEvent | Emitted immediately before the user handler body runs, after every middleware frame has completed. Lets you measure middleware overhead independently. |
+| `wolverine.handler.finished` | ActivityEvent | Emitted immediately after the user handler body returns successfully. |
+| `wolverine.envelope.transport_lag_ms` | tag (double, milliseconds) | `activity.StartTimeUtc - envelope.SentAt` — the elapsed time from when the producer stamped the envelope's send timestamp to when the consumer's handler activity started. Skipped for negative values (clock drift). |
+| `wolverine.envelope.receive_dwell_ms` | tag (double, milliseconds) | `activity.StartTimeUtc - envelope.ReceivedAt` — the elapsed time from when the listener stamped the envelope as received (`Envelope.MarkReceived`) to when the handler activity started. Useful for spotting in-process worker-queue backpressure separately from upstream transport latency. Absent for envelopes that didn't traverse a receiver (inline `IMessageBus.InvokeAsync` calls). |
+
+The two ActivityEvents are emitted by the JasperFx `MethodCall.ActivityEventBeforeCall` / `.ActivityEventAfterCall` codegen surface, so they wrap exactly the user handler `MethodCall` — middleware frames before the handler body stay unmarked. The two timing tags are stamped by an `ApplyExecutionDiagnosticTagsFrame` that's prepended to the generated chain when the flag is set, so all the tag computation happens inline in the generated handler with no runtime branching in `Executor` or `HandlerPipeline`.
+
+### `DeserializationSpanEnabled`
+
+When set, Wolverine starts a `wolverine.deserialize` span (kind = `Internal`) around the inbound envelope deserialization that runs before the handler chain executes. The span carries:
+
+| Tag | Meaning |
+|---|---|
+| `messaging.message_payload_size_bytes` | The size of the raw envelope `Data` array in bytes. |
+
+The span's status is set to `Error` (with the exception type name as description) when deserialization throws — useful for separating "transport delivered me garbage" from "my handler blew up" in trace dashboards. The span only starts when the flag is on, so apps that don't enable it see no extra spans.
+
+### `OutboxDiagnosticsEnabled`
+
+When set, Wolverine emits two ActivityEvents around the post-handler call to `IMessageContext.FlushOutgoingMessagesAsync` in the generated handler chain:
+
+| Name | Meaning |
+|---|---|
+| `wolverine.outbox.flushing` | Emitted immediately before the outbox flush call. |
+| `wolverine.outbox.published` | Emitted immediately after the outbox flush call returns successfully. |
+
+This is provider-agnostic — it fires regardless of which transactional middleware (Marten, EF Core, RDBMS, Polecat, etc.) added the `FlushOutgoingMessages` postprocessor frame. The annotation is emitted via the same JasperFx `MethodCall.ActivityEventBeforeCall` / `.ActivityEventAfterCall` codegen surface as the handler events, so when the flag is off the generated outbox-flush call has no extra emission.
+
+When the chain pulls in **Wolverine.Marten** transactional middleware, `OutboxDiagnosticsEnabled` also brackets the Marten transactional commit:
+
+| Name | Meaning |
+|---|---|
+| `marten.savechanges.start` | Emitted immediately before `IDocumentSession.SaveChangesAsync(CancellationToken)`. |
+| `marten.savechanges.finished` | Emitted immediately after `SaveChangesAsync` returns successfully. |
+
+Useful for separating "the database commit is slow" from "the broker publish is slow" when profiling a transactional handler — the two pairs of events bracket the two distinct stages.
+
+### `EnableMessageCausationTracking`
+
+When set, Wolverine emits a `RecordCauseAndEffect(context, context.Runtime.Observer)` call into the generated handler **between** the handler body and the postprocessor frames. Each unique `(incoming → outgoing, handler)` triple is reported once to `IWolverineObserver.MessageCausedBy` for downstream topology visualization (CritterWatch enables this flag automatically). Latched on the framework side, so the call itself is cheap on the steady-state path; the codegen-time gate guarantees zero cost for users who don't enable it.
+
+### `Envelope.ReceivedAt`
+
+The `wolverine.envelope.receive_dwell_ms` tag depends on a new `Envelope.ReceivedAt` property that's stamped by `Envelope.MarkReceived` — the single point all receivers (`BufferedReceiver`, `DurableReceiver`, etc.) call when a message is handed off from a listener to the worker pipeline. The property is `[JsonIgnore]` and only set by Wolverine itself; it stays `null` for envelopes that didn't traverse a receiver (inline `InvokeAsync` calls).
+
+### Sample of the generated handler code
+
+The "zero per-message runtime cost when off" property is easiest to see by inspecting the C# Wolverine actually generates. Take a trivial handler:
+
+```csharp
+public record TrackingDiagnosticsMessage(string Text);
+
+public static class TrackingDiagnosticsHandler
+{
+    public static void Handle(TrackingDiagnosticsMessage message) { /* no-op */ }
+}
+```
+
+With **all flags off** (the default), the generated `HandleAsync` body is the bare handler invocation — no diagnostic plumbing is emitted at all:
+
+```csharp
+public override Task HandleAsync(MessageContext context, CancellationToken cancellation)
+{
+    var trackingDiagnosticsMessage = (TrackingDiagnosticsMessage)context.Envelope.Message;
+
+    Activity.Current?.SetTag("message.handler", "TrackingDiagnosticsHandler");
+    Activity.Current?.SetTag("handler.type",    "TrackingDiagnosticsHandler");
+
+    TrackingDiagnosticsHandler.Handle(trackingDiagnosticsMessage);
+
+    return Task.CompletedTask;
+}
+```
+
+With `Tracking.HandlerExecutionDiagnosticsEnabled = true` and `Tracking.EnableMessageCausationTracking = true`, the generated body picks up an `ApplyExecutionDiagnosticTags` call at the top, ActivityEvents bracketing the handler body, and a `RecordCauseAndEffect` call between the handler and the postprocessor frames:
+
+```csharp
+public override Task HandleAsync(MessageContext context, CancellationToken cancellation)
+{
+    var trackingDiagnosticsMessage = (TrackingDiagnosticsMessage)context.Envelope.Message;
+
+    WolverineTracing.ApplyExecutionDiagnosticTags(Activity.Current, context.Envelope);
+    Activity.Current?.SetTag("message.handler", "TrackingDiagnosticsHandler");
+    Activity.Current?.SetTag("handler.type",    "TrackingDiagnosticsHandler");
+
+    Activity.Current?.AddEvent(new ActivityEvent("wolverine.handler.started"));
+    TrackingDiagnosticsHandler.Handle(trackingDiagnosticsMessage);
+    Activity.Current?.AddEvent(new ActivityEvent("wolverine.handler.finished"));
+
+    RecordCauseAndEffect(context, context.Runtime.Observer);
+    return Task.CompletedTask;
+}
+```
+
+Compare the two and the design pattern is concrete: each opt-in flag adds a specific line to the generated method; turning it back off removes the line entirely. There's no runtime `if (options.Tracking.X)` check anywhere in the framework hot path — the chain's `assembleFrames` reads each flag once at codegen time and decides which frames to emit.
+
+If you want to inspect what your own handlers look like, set `WolverineOptions.CodeGeneration.SourceCodeWritingEnabled = true` and dump the generated code (or call `host.Services.GetRequiredService<HandlerGraph>().ChainFor<MyMessage>()!.SourceCode`); the same `tracking_diagnostics_opt_in` test suite in the Wolverine repo writes the generated source to xUnit output for every flag combination, so the contract is regression-tested rather than just illustrated here.
 
 ## Handler Type Tagging
 
@@ -641,6 +917,62 @@ will be added back to Wolverine in 4.0.
 | wolverine-dead-letter-queue  | Counter                                                                                                   | Number of messages moved to dead letter queues                                                                                                                                                                                                                                         |
 | wolverine-effective-time     | Histogram                                                                                                 | Effective time between a message being sent and being completely handled in milliseconds. Right now this works between Wolverine to Wolverine application sending and from NServiceBus applications sending to Wolverine applications through Wolverine’s NServiceBus interoperability. |
 | wolverine-execution-failure  | Counter                                                                                                   | Number of message execution failures. Tagged by exception type                                                                                                                                                                                                                         |
+| wolverine-inbox-count        | [Observable Gauge](https://opentelemetry.io/docs/specs/otel/metrics/api/#asynchronous-gauge)             | Current number of persisted incoming (inbox) messages. Tagged by `source` and `database`                                                                                                                                                                                                |
+| wolverine-outbox-count       | Observable Gauge                                                                                          | Current number of persisted outgoing (outbox) messages. Tagged by `source` and `database`                                                                                                                                                                                              |
+| wolverine-scheduled-count    | Observable Gauge                                                                                          | Current number of persisted scheduled messages. Tagged by `source` and `database`                                                                                                                                                                                                      |
+
+::: tip System traffic is not counted <Badge type="tip" text="6.25" />
+Wolverine's own internal traffic — node agent commands on the control queues, acknowledgements, and
+CritterWatch monitoring messages — is excluded from all of the message-level instruments above, as is any
+endpoint marked with the `System` role or with `TelemetryEnabled = false`. An idle application therefore
+reports zero message volume even when Wolverine's node coordination or CritterWatch monitoring is busy
+underneath. Before 6.25 this internal chatter was counted, which could show up as a steady, phantom
+message rate (~150/minute was reported) on an otherwise quiet system.
+:::
+
+### Standard Metrics Tags
+
+Every Wolverine metric instrument above is tagged with these dimensions so you can slice the series in your
+observability tooling:
+
+| Tag                   | Description                                                                            |
+|-----------------------|----------------------------------------------------------------------------------------|
+| `message.type`        | The message type name                                                                  |
+| `message.destination` | The endpoint URI the message was sent to / received at (when known)                    |
+| `tenant.id`           | The tenant id (when the message is tenant-scoped)                                       |
+| `source`              | The Wolverine `ServiceName` of the application emitting the metric                      |
+
+The `wolverine-execution-failure` instrument additionally carries an `exception.type` tag. You can attach your
+own per-message tags with [`Envelope.SetMetricsTag`](#additional-metrics-tags).
+
+::: tip The `source` tag <Badge type="tip" text="6.14.1" />
+Before 6.14.1 the `source` (service-name) tag was only present on `wolverine-messages-sent` and
+`wolverine-messages-received`. As of **6.14.1** it is added to **every** instrument, so a shared metrics backend
+that scrapes many services can slice each series per service — `{source="my-service"}` /
+`sum by (source, ...)` works uniformly across all Wolverine metrics.
+:::
+
+### Histogram Buckets <Badge type="tip" text="6.14.1" />
+
+The `wolverine-execution-time` and `wolverine-effective-time` histograms record millisecond latencies, but the
+default OpenTelemetry histogram buckets are tuned for seconds — so quantile baselines computed from a
+time-series database (Prometheus / VictoriaMetrics) over those instruments are coarse. Wolverine therefore
+applies a millisecond-oriented set of explicit bucket boundaries (as instrument
+[advice](https://opentelemetry.io/docs/specs/otel/metrics/api/#instrument-advisory-parameters)) by default. You
+can override them, or opt back into the SDK defaults:
+
+```csharp
+builder.UseWolverine(opts =>
+{
+    // Supply your own ascending bucket boundaries, in milliseconds
+    opts.Metrics.HistogramBucketBoundaries = new double[] { 5, 25, 100, 500, 2000, 10000 };
+
+    // ...or fall back to the OpenTelemetry SDK / exporter defaults
+    opts.Metrics.HistogramBucketBoundaries = null;
+});
+```
+
+An explicit OpenTelemetry `View` for these instruments still overrides this advice when configured.
 
 As a sample set up for publishing metrics, here's a proof of concept built with Honeycomb as the metrics collector:
 
@@ -717,7 +1049,7 @@ public static class OrganizationTaggingMiddleware
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/MetricsSamples.cs#L43-L60' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_organization_tagging_middleware' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/MetricsSamples.cs#L41-L57' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_organization_tagging_middleware' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Finally, we'll add the new middleware to all message handlers where the message implements the `IOrganizationRelated` interface like so:
@@ -733,7 +1065,7 @@ using var host = await Host.CreateDefaultBuilder()
         opts.Policies.ForMessagesOfType<IOrganizationRelated>().AddMiddleware(typeof(OrganizationTaggingMiddleware));
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/MetricsSamples.cs#L10-L20' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_organization_tagging_middleware' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/MetricsSamples.cs#L10-L19' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_organization_tagging_middleware' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ### Tenant Id Tagging
@@ -749,5 +1081,23 @@ public static async Task publish_operation(IMessageBus bus, string tenantId, str
     await bus.PublishAsync(new SomeMessage(name));
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/MetricsSamples.cs#L30-L40' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_tenant_id_tagging' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/MetricsSamples.cs#L29-L38' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_tenant_id_tagging' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
+
+### Queue Depth Gauge Tags <Badge type="tip" text="6.14.1" />
+
+The inbox / outbox / scheduled queue-depth gauges (`wolverine-inbox-count`, `wolverine-outbox-count`,
+`wolverine-scheduled-count`) are tagged so you can slice persisted message depth from a shared metrics backend:
+
+| Tag        | Description                                                                                          |
+|------------|------------------------------------------------------------------------------------------------------|
+| `source`   | The Wolverine `ServiceName` of the application emitting the metric                                    |
+| `database` | The database name backing the store. Only present when more than one message database is in play (e.g. multi-tenancy through separate databases) |
+
+::: tip
+Before **6.14.1**, the multi-database build emitted one gauge *per database* by appending the database name to the
+instrument **name** (`wolverine-inbox-count.<database>`). That made the depth impossible to group across databases
+in a TSDB. The database is now a `database` **tag** on the canonical `wolverine-inbox-count` instrument instead, so
+`sum by (database) (wolverine_inbox_count)` works as expected. Update any dashboards that referenced the old
+per-database instrument names.
+:::

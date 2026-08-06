@@ -15,11 +15,12 @@ public class Bug_310_saga_handler_that_returns_another_saga : PostgresqlContext,
 {
     private IHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Services.AddMarten(Servers.PostgresConnectionString)
                     .IntegrateWithWolverine();
 
@@ -29,7 +30,7 @@ public class Bug_310_saga_handler_that_returns_another_saga : PostgresqlContext,
             }).StartAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _host.StopAsync();
         _host.Dispose();
@@ -47,10 +48,10 @@ public class Bug_310_saga_handler_that_returns_another_saga : PostgresqlContext,
 
         using var session = _host.Services.GetRequiredService<IDocumentStore>().LightweightSession();
 
-        var saga1 = await session.LoadAsync<Saga1>(id);
+        var saga1 = await session.LoadAsync<Saga1>(id, TestContext.Current.CancellationToken);
         saga1!.One.ShouldBeTrue();
 
-        var saga2 = await session.LoadAsync<Saga2>(id);
+        var saga2 = await session.LoadAsync<Saga2>(id, TestContext.Current.CancellationToken);
         saga2!.Two.ShouldBeTrue();
         saga2.Three.ShouldBeTrue();
     }

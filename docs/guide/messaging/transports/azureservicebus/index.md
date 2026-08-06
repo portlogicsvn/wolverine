@@ -22,7 +22,7 @@ builder.UseWolverine(opts =>
     // connection string out of configuration
     var azureServiceBusConnectionString = builder
         .Configuration
-        .GetConnectionString("azure-service-bus");
+        .GetConnectionString("azure-service-bus")!;
 
     // Connect to the broker in the simplest possible way
     opts.UseAzureServiceBus(azureServiceBusConnectionString)
@@ -43,7 +43,7 @@ builder.UseWolverine(opts =>
 using var host = builder.Build();
 await host.StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Azure/Wolverine.AzureServiceBus.Tests/DocumentationSamples.cs#L14-L44' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_basic_connection_to_azure_service_bus' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Azure/Wolverine.AzureServiceBus.Tests/DocumentationSamples.cs#L14-L43' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_basic_connection_to_azure_service_bus' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 The advanced configuration for the broker is the [ServiceBusClientOptions](https://learn.microsoft.com/en-us/dotnet/api/azure.messaging.servicebus.servicebusclientoptions?view=azure-dotnet) class from the Azure.Messaging.ServiceBus
@@ -54,6 +54,73 @@ For security purposes, there are overloads of `UseAzureServiceBus()` that will a
 1. [TokenCredential](https://learn.microsoft.com/en-us/dotnet/api/azure.core.tokencredential?view=azure-dotnet)
 2. [AzureNamedKeyCredential](https://learn.microsoft.com/en-us/dotnet/api/azure.azurenamedkeycredential?view=azure-dotnet)
 3. [AzureSasCredential](https://learn.microsoft.com/en-us/dotnet/api/azure.azuresascredential?view=azure-dotnet)
+
+## Aspire Integration
+
+The cleanest way to integrate Wolverine with .NET Aspire for Azure Service Bus is via `TokenCredential`, typically
+`DefaultAzureCredential` from `Azure.Identity`. Aspire injects the Service Bus namespace via the
+`SERVICEBUS_URI` environment variable (or similar), and you pass it with the credential:
+
+**AppHost** (`Aspire.Hosting.Azure.ServiceBus` NuGet):
+```csharp
+var serviceBus = builder.AddAzureServiceBus("servicebus");
+
+builder.AddProject<Projects.MyWorker>("worker")
+    .WithReference(serviceBus)
+    .WaitFor(serviceBus);
+```
+
+**Service project** (`Aspire.Azure.Messaging.ServiceBus` client NuGet registers `ServiceBusClient` in DI):
+```csharp
+using Azure.Identity;
+
+// Option 1: Use Aspire.Azure.Messaging.ServiceBus to register ServiceBusClient in DI,
+// then read the namespace from configuration:
+var fullyQualifiedNamespace = builder.Configuration["Azure:ServiceBus:FullyQualifiedNamespace"]
+    ?? builder.Configuration.GetConnectionString("servicebus")!;
+
+builder.UseWolverine(opts =>
+{
+    opts.UseAzureServiceBus(fullyQualifiedNamespace, new DefaultAzureCredential())
+        // AutoProvision creates missing queues, topics, and subscriptions at startup
+        .AutoProvision();
+
+    opts.ListenToAzureServiceBusQueue("my-queue");
+    opts.PublishMessage<MyMessage>().ToAzureServiceBusQueue("my-queue");
+});
+```
+
+When using the [Azure Service Bus emulator](/guide/messaging/transports/azureservicebus/emulator) for local development or testing,
+use `UseAzureServiceBusEmulator()` instead. It connects to the emulator's messaging (AMQP) port *and* its separate management (HTTP)
+port for you:
+
+<!-- snippet: sample_using_azure_service_bus_emulator -->
+<a id='snippet-sample_using_azure_service_bus_emulator'></a>
+```cs
+var builder = Host.CreateApplicationBuilder();
+builder.UseWolverine(opts =>
+{
+    // Connect to a locally running Azure Service Bus emulator using the
+    // standard emulator ports (AMQP on 5672, management on 5300)
+    opts.UseAzureServiceBusEmulator()
+
+        // The emulator starts out empty, so let Wolverine build
+        // any queues, topics, or subscriptions it needs
+        .AutoProvision()
+        .AutoPurgeOnStartup();
+
+    opts.ListenToAzureServiceBusQueue("my-queue");
+    opts.PublishAllMessages().ToAzureServiceBusQueue("my-queue");
+});
+
+using var host = builder.Build();
+await host.StartAsync();
+```
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Azure/Wolverine.AzureServiceBus.Tests/DocumentationSamples.cs#L48-L69' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_azure_service_bus_emulator' title='Start of snippet'>anchor</a></sup>
+<!-- endSnippet -->
+
+See [Using the Azure Service Bus Emulator](/guide/messaging/transports/azureservicebus/emulator) for the Docker Compose setup, the
+overload that takes explicit connection strings, and the opt in namespace cleanup.
 
 ## Request/Reply
 
@@ -94,7 +161,7 @@ builder.UseWolverine(opts =>
 
 });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Azure/Wolverine.AzureServiceBus.Tests/DocumentationSamples.cs#L193-L216' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_enabling_azure_service_bus_control_queues' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Azure/Wolverine.AzureServiceBus.Tests/DocumentationSamples.cs#L499-L521' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_enabling_azure_service_bus_control_queues' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Disabling System Queues
@@ -105,10 +172,10 @@ to disable system queues to avoid having some annoying error messages popping up
 <!-- snippet: sample_disable_system_queues_in_azure_service_bus -->
 <a id='snippet-sample_disable_system_queues_in_azure_service_bus'></a>
 ```cs
-var host = await Host.CreateDefaultBuilder()
+using var host = await Host.CreateDefaultBuilder()
     .UseWolverine(opts =>
     {
-        opts.UseAzureServiceBusTesting()
+        opts.UseAzureServiceBus("some connection string")
             .AutoProvision().AutoPurgeOnStartup()
             .SystemQueuesAreEnabled(false);
 
@@ -117,7 +184,7 @@ var host = await Host.CreateDefaultBuilder()
         opts.PublishAllMessages().ToAzureServiceBusQueue("send_and_receive");
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Azure/Wolverine.AzureServiceBus.Tests/end_to_end.cs#L85-L99' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_disable_system_queues_in_azure_service_bus' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Azure/Wolverine.AzureServiceBus.Tests/DocumentationSamples.cs#L242-L256' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_disable_system_queues_in_azure_service_bus' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Connecting To Multiple Namespaces <Badge type="tip" text="5.0" />
@@ -130,10 +197,10 @@ Wolverine supports the "named broker" feature to connect to multiple Azure Servi
 var builder = Host.CreateApplicationBuilder();
 builder.UseWolverine(opts =>
 {
-    var connectionString1 = builder.Configuration.GetConnectionString("azureservicebus1");
+    var connectionString1 = builder.Configuration.GetConnectionString("azureservicebus1")!;
     opts.AddNamedAzureServiceBusBroker(new BrokerName("one"), connectionString1);
-    
-    var connectionString2 = builder.Configuration.GetConnectionString("azureservicebus2");
+
+    var connectionString2 = builder.Configuration.GetConnectionString("azureservicebus2")!;
     opts.AddNamedAzureServiceBusBroker(new BrokerName("two"), connectionString2);
 
     opts.PublishAllMessages().ToAzureServiceBusQueueOnNamedBroker(new BrokerName("one"), "queue1");
@@ -143,11 +210,61 @@ builder.UseWolverine(opts =>
     opts.ListenToAzureServiceBusSubscriptionOnNamedBroker(new BrokerName("two"), "subscription1");
 });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Azure/Wolverine.AzureServiceBus.Tests/end_to_end_with_named_broker.cs#L26-L44' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_named_azure_service_bus_broker' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Azure/Wolverine.AzureServiceBus.Tests/end_to_end_with_named_broker.cs#L26-L43' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_named_azure_service_bus_broker' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
+`UseConventionalRouting()` and `UseTopicAndSubscriptionConventionalRouting()` can be chained off a named broker just like any
+other endpoint configuration, and the convention applies to that broker rather than the default one.
 
+The named broker methods take only the *messaging* (AMQP) connection string. That is all a real Azure Service Bus namespace
+needs, but if the management (HTTP) endpoint is separate -- as it is against the
+[emulator](/guide/messaging/transports/azureservicebus/emulator#named-brokers-and-the-management-connection-string) -- it has to
+be set on the named transport explicitly, or anything that talks to the management API will fail at startup.
 
+## Global Partitioning
 
+Azure Service Bus queues can be used as the external transport for [global partitioned messaging](/guide/messaging/partitioning#global-partitioning). This creates a set of sharded Azure Service Bus queues with companion local queues for sequential processing across a multi-node cluster.
+
+Use `UseShardedAzureServiceBusQueues()` within a `GlobalPartitioned()` configuration:
+
+```cs
+using var host = await Host.CreateDefaultBuilder()
+    .UseWolverine(opts =>
+    {
+        opts.UseAzureServiceBus(azureServiceBusConnectionString).AutoProvision();
+
+        opts.MessagePartitioning.ByMessage<IMyMessage>(x => x.GroupId);
+
+        opts.MessagePartitioning.GlobalPartitioned(topology =>
+        {
+            // Creates 4 sharded Azure Service Bus queues named "orders1" through "orders4"
+            // with matching companion local queues for sequential processing
+            topology.UseShardedAzureServiceBusQueues("orders", 4);
+            topology.MessagesImplementing<IMyMessage>();
+        });
+    }).StartAsync();
+```
+
+This creates Azure Service Bus queues named `orders1` through `orders4` with companion local queues `global-orders1` through `global-orders4`. Messages are routed to the correct shard based on their group id, and Wolverine handles the coordination between nodes automatically.
+
+::: tip
+Azure Service Bus also has a native, broker-side alternative to this feature. [Session identifiers](/guide/messaging/transports/azureservicebus/session-identifiers) provide strictly ordered processing per session id with a single queue and no sharded topology. Consider sessions first if you are exclusively on Azure Service Bus; global partitioning is the transport-agnostic option that behaves identically across every supported broker.
+:::
+
+## URI reference
+
+The `AzureServiceBusEndpointUri` helper class builds canonical endpoint URIs:
+
+| URI form | Helper call |
+|---|---|
+| `asb://queue/{name}` | `AzureServiceBusEndpointUri.Queue("name")` |
+| `asb://topic/{name}` | `AzureServiceBusEndpointUri.Topic("name")` |
+| `asb://topic/{topic}/{subscription}` | `AzureServiceBusEndpointUri.Subscription("topic", "sub")` |
+
+```csharp
+using Wolverine.AzureServiceBus;
+
+var uri = AzureServiceBusEndpointUri.Subscription("events", "audit");
+```
 
 

@@ -23,20 +23,23 @@ public class saga_cannot_access_stream_just_persisted_in_immediate_timeout : Pos
                     {
                         m.Connection(Servers.PostgresConnectionString);
                     })
-                    .EventForwardingToWolverine()
-                    .IntegrateWithWolverine();
+                    .IntegrateWithWolverine(x => x.UseFastEventForwarding = true);
 
                 services.AddResourceSetupOnStartup();
             })
             .UseWolverine(w =>
             {
+                w.Discovery.DisableConventionalDiscovery()
+                    .IncludeType(typeof(SomeSaga))
+                    .IncludeType(typeof(Handler));
+                w.Durability.Mode = DurabilityMode.Solo;
                 w.Policies.AutoApplyTransactions();
 
                 // Uncommenting this makes the test hang and probably turn red.
                 // Without UseDurableLocalQueues it's green.
                 w.Policies.UseDurableLocalQueues();
             })
-            .StartAsync();
+            .StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var id = Guid.NewGuid();
 
@@ -47,7 +50,7 @@ public class saga_cannot_access_stream_just_persisted_in_immediate_timeout : Pos
 
         using var session = host.Services.GetRequiredService<IDocumentStore>().LightweightSession();
 
-        var saga = await session.LoadAsync<SomeSaga>(id);
+        var saga = await session.LoadAsync<SomeSaga>(id, TestContext.Current.CancellationToken);
         saga.ShouldNotBeNull();
         saga.TimedOut.ShouldBeTrue();
     }

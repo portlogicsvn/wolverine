@@ -1,4 +1,5 @@
 using System.Data.Common;
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
@@ -13,6 +14,12 @@ namespace Wolverine.EntityFrameworkCore.Internals;
 /// <summary>
 ///     Envelope transaction for raw database access for DbContexts w/o the explicit wolverine mappings
 /// </summary>
+// AOT note (#2746): IDomainEventScraper reflection over runtime DbContext.
+// Same chunk Z / chunk P pattern.
+[UnconditionalSuppressMessage("Trimming", "IL2026",
+    Justification = "EFCore envelope transaction reflects over runtime DbContext for domain-event scraping; AOT consumers preserve DbContext / domain-event types via TrimmerRootDescriptor. See AOT guide.")]
+[UnconditionalSuppressMessage("Trimming", "IL2075",
+    Justification = "EFCore envelope transaction reflects over runtime DbContext for domain-event scraping; AOT consumers preserve DbContext / domain-event types via TrimmerRootDescriptor. See AOT guide.")]
 public class EfCoreEnvelopeTransaction : IEnvelopeTransaction
 {
     private readonly MessageContext _messaging;
@@ -42,17 +49,16 @@ public class EfCoreEnvelopeTransaction : IEnvelopeTransaction
 
     public async Task PersistOutgoingAsync(Envelope envelope)
     {
-        if (DbContext.Database.CurrentTransaction == null)
-        {
-            await DbContext.Database.BeginTransactionAsync();
-        }
-
         if (DbContext.IsWolverineEnabled())
         {
             DbContext.Add(new OutgoingMessage(envelope));
         }
         else
         {
+            if (DbContext.Database.CurrentTransaction == null)
+            {
+                await DbContext.Database.BeginTransactionAsync();
+            }
             var conn = DbContext.Database.GetDbConnection();
             var tx = DbContext.Database.CurrentTransaction!.GetDbTransaction();
             var cmd = DatabasePersistence.BuildOutgoingStorageCommand(envelope, envelope.OwnerId, _database);
@@ -61,8 +67,6 @@ public class EfCoreEnvelopeTransaction : IEnvelopeTransaction
 
             await cmd.ExecuteNonQueryAsync();
         }
-
-
     }
 
     public async Task PersistOutgoingAsync(Envelope[] envelopes)
@@ -72,24 +76,19 @@ public class EfCoreEnvelopeTransaction : IEnvelopeTransaction
             return;
         }
 
-        if (DbContext.Database.CurrentTransaction == null)
-        {
-            await DbContext.Database.BeginTransactionAsync();
-        }
-
         if (DbContext.IsWolverineEnabled())
         {
-            foreach (var envelope in envelopes)
-            {
-                var outgoing = new OutgoingMessage(envelope);
-                DbContext.Add(outgoing);
-            }
+            DbContext.AddRange(envelopes.Select(e => new OutgoingMessage(e)));
         }
         else
         {
+            if (DbContext.Database.CurrentTransaction == null)
+            {
+                await DbContext.Database.BeginTransactionAsync();
+            }
             var conn = DbContext.Database.GetDbConnection();
             var tx = DbContext.Database.CurrentTransaction!.GetDbTransaction();
-            var cmd = DatabasePersistence.BuildIncomingStorageCommand(envelopes, _database);
+            var cmd = DatabasePersistence.BuildOutgoingStorageCommand(envelopes, envelopes[0].OwnerId, _database);
             cmd.Transaction = tx;
             cmd.Connection = conn;
 
@@ -99,24 +98,34 @@ public class EfCoreEnvelopeTransaction : IEnvelopeTransaction
 
     public async Task PersistIncomingAsync(Envelope envelope)
     {
-        if (DbContext.Database.CurrentTransaction == null)
-        {
-            await DbContext.Database.BeginTransactionAsync();
-        }
-
         if (DbContext.IsWolverineEnabled())
         {
+            // For a Wolverine-mapped DbContext the envelope is just tracked and flushed by
+            // SaveChangesAsync, so don't force an explicit transaction here. We defer to whatever
+            // the ambient transaction mode established: in Eager middleware mode a transaction was
+            // already begun (EnrollDbContextInTransaction / StartDatabaseTransactionForDbContext) and
+            // the tracked entity enrolls into it at SaveChanges; in Lightweight/lazy mode there is no
+            // transaction and SaveChanges provides its own implicit one. This mirrors
+            // PersistOutgoingAsync and keeps ScheduleAsync from starting a transaction the caller
+            // never asked for (see #3121).
             DbContext.Add(new IncomingMessage(envelope));
         }
         else
         {
+            // The raw branch issues an ADO command that has to share the caller's transaction, so
+            // here we do need an explicit one when none is already in flight.
+            if (DbContext.Database.CurrentTransaction == null)
+            {
+                await DbContext.Database.BeginTransactionAsync();
+            }
+
             var conn = DbContext.Database.GetDbConnection();
             var tx = DbContext.Database.CurrentTransaction!.GetDbTransaction();
             var builder = _database.ToCommandBuilder();
             DatabasePersistence.BuildIncomingStorageCommand(_database, builder, envelope);
 
 
-            var command = builder.Compile();
+            await using var command = builder.Compile();
             command.Connection = conn;
             command.Transaction = tx;
             await command.ExecuteNonQueryAsync();
@@ -180,19 +189,19 @@ public class EfCoreEnvelopeTransaction : IEnvelopeTransaction
         if (_messaging.Envelope != null && _messaging.Envelope.Destination != null)
         {
             var conn = DbContext.Database.GetDbConnection();
-            var tx = DbContext.Database.CurrentTransaction!.GetDbTransaction();
+            var tx = DbContext.Database.CurrentTransaction?.GetDbTransaction();
             
             // Are we marking an existing envelope as persisted?
             if (_messaging.Envelope.WasPersistedInInbox)
             {
                 var keepUntil =
                     DateTimeOffset.UtcNow.Add(_messaging.Runtime.Options.Durability.KeepAfterMessageHandling);
-                var cmd = conn.CreateCommand(
-                        $"update {_database.SchemaName}.{DatabaseConstants.IncomingTable} set {DatabaseConstants.Status} = '{EnvelopeStatus.Handled}', {DatabaseConstants.KeepUntil} = @keep where id = @id")
-                    .With("id", _messaging.Envelope.Id)
-                    .With("keep", keepUntil);
-                cmd.Transaction = tx;
-                await cmd.ExecuteNonQueryAsync(cancellation);
+
+                // Route through the store rather than binding the id here: the generic Weasel path binds
+                // a Guid as DbType.Guid, which ODP.NET rejects against Oracle's RAW(16) id columns
+                // (GH-3581). The store knows how to bind for its own provider.
+                await _database.MarkIncomingEnvelopeAsHandledInTransactionAsync(conn, tx, _messaging.Envelope,
+                    keepUntil, cancellation);
             }
             
             // Or inserting a record just to tell the inbox about

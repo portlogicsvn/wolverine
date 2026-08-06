@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using JasperFx.Core;
 using Microsoft.Extensions.Logging;
 using Wolverine.Runtime.WorkerQueues;
 using Wolverine.Transports;
@@ -12,17 +14,16 @@ namespace Wolverine.Runtime.Partitioning;
 internal class GlobalPartitionedInterceptor : IReceiver
 {
     private readonly IReceiver _inner;
-    private readonly IMessageBus _messageBus;
+    private readonly IWolverineRuntime _runtime;
     private readonly List<GlobalPartitionedMessageTopology> _topologies;
     private readonly ILogger _logger;
 
-    public GlobalPartitionedInterceptor(IReceiver inner, IMessageBus messageBus,
-        List<GlobalPartitionedMessageTopology> topologies, ILogger logger)
+    public GlobalPartitionedInterceptor(IReceiver inner, IWolverineRuntime runtime)
     {
         _inner = inner;
-        _messageBus = messageBus;
-        _topologies = topologies;
-        _logger = logger;
+        _runtime = runtime;
+        _topologies = runtime.Options.MessagePartitioning.GlobalPartitionedTopologies;
+        _logger = runtime.LoggerFactory.CreateLogger<GlobalPartitionedInterceptor>();
     }
 
     public IHandlerPipeline Pipeline => _inner.Pipeline;
@@ -81,12 +82,24 @@ internal class GlobalPartitionedInterceptor : IReceiver
                 }
             }
 
-            // Re-route through Wolverine's routing which will hit GlobalPartitionedRoute
-            await _messageBus.PublishAsync(envelope.Message!, new DeliveryOptions
+            // The bus is seeded with the inbound envelope so PropagateHeadersRule and
+            // every other IMetadataRule.ApplyCorrelation impl can read the originator
+            // when they enrich each outbound envelope — same shape as the publish path
+            // inside a regular handler. Context-correlation field copying (CorrelationId,
+            // ConversationId, TenantId, UserName, ParentId, SagaId) happens in the bus's
+            // overridden TrackEnvelopeCorrelation via Envelope.CopyContextCorrelationFrom,
+            // so we don't need to re-state any of those fields on DeliveryOptions here —
+            // GroupId is the only piece the routing layer itself needs to read.
+            var options = new DeliveryOptions
             {
                 GroupId = envelope.GroupId,
-                TenantId = envelope.TenantId
-            });
+            };
+
+            var bus = new RouteBus(_runtime, envelope);
+
+            using var activity = StartReRouteActivity(envelope);
+
+            await bus.PublishAsync(envelope.Message!, options);
             await listener.CompleteAsync(envelope);
             return true;
         }
@@ -97,6 +110,19 @@ internal class GlobalPartitionedInterceptor : IReceiver
             await listener.DeferAsync(envelope);
             return true;
         }
+    }
+
+    private static Activity? StartReRouteActivity(Envelope envelope)
+    {
+        if (envelope.ParentId.IsEmpty())
+        {
+            return null;
+        }
+
+        return WolverineTracing.ActivitySource.StartActivity(
+            "wolverine global-partitioning re-route",
+            ActivityKind.Internal,
+            envelope.ParentId);
     }
 
     public ValueTask DrainAsync() => _inner.DrainAsync();
@@ -118,5 +144,55 @@ internal class GlobalPartitionedInterceptor : IReceiver
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// MessageBus subclass used only by the global-partitioning re-route path.
+    /// Two responsibilities:
+    /// <list type="number">
+    ///   <item>Seed <see cref="MessageContext.Envelope"/> with the inbound envelope so
+    ///   <see cref="IEnvelopeRule.ApplyCorrelation"/> implementations such as
+    ///   <c>PropagateHeadersRule</c> see <c>originator.Envelope</c> when they enrich
+    ///   the outbound envelopes — without this seed those rules short-circuit and the
+    ///   <c>PropagateIncomingHeadersToOutgoing</c> allowlist is silently ignored for
+    ///   globally-partitioned messages.</item>
+    ///   <item>Override <see cref="MessageBus.TrackEnvelopeCorrelation"/> so each
+    ///   re-routed outbound envelope inherits the inbound's full context-correlation
+    ///   set (<c>CorrelationId</c>, <c>ConversationId</c>, <c>TenantId</c>,
+    ///   <c>UserName</c>, <c>ParentId</c>, <c>SagaId</c>) via
+    ///   <see cref="Envelope.CopyContextCorrelationFrom"/> — the same forwarding
+    ///   semantics already used by <c>ScheduledSendEnvelopeHandler</c> for unwrapped
+    ///   scheduled sends and by <c>TrackedSession.ReplayAll</c> for replayed envelopes.
+    ///   The base <c>TrackEnvelopeCorrelation</c> only pulls <c>CorrelationId</c> /
+    ///   <c>TenantId</c> / <c>UserName</c> from the bus's own properties and writes a
+    ///   fresh <c>ParentId</c> from <c>Activity.Current</c>, which is the wrong shape
+    ///   for a forwarded envelope: <c>ConversationId</c> would restart, <c>SagaId</c>
+    ///   would drop, and the trace would re-root at the interceptor hop instead of
+    ///   continuing the inbound's parent.</item>
+    /// </list>
+    /// </summary>
+    private sealed class RouteBus : MessageBus
+    {
+        private readonly Envelope _inbound;
+
+        public RouteBus(IWolverineRuntime runtime, Envelope inbound) : base(runtime)
+        {
+            _inbound = inbound;
+            Envelope = inbound;
+        }
+
+        internal override void TrackEnvelopeCorrelation(Envelope outbound, Activity? activity)
+        {
+            // Preserve any per-message Source override (e.g. CloudEvents producer
+            // setting a spec-valid `source` URI) before the inherited copy stamps
+            // the application service name as a default.
+            if (outbound.Source.IsEmpty())
+            {
+                outbound.Source = Runtime.Options.ServiceName;
+            }
+
+            outbound.CopyContextCorrelationFrom(_inbound);
+            outbound.Store = Storage;
+        }
     }
 }

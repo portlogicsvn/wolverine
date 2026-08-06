@@ -4,7 +4,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Wolverine.ComplianceTests;
 using Wolverine.ComplianceTests.Compliance;
-using Xunit.Abstractions;
+using Xunit;
 using Xunit.Sdk;
 
 namespace Wolverine.Kafka.Tests;
@@ -15,7 +15,7 @@ public class BufferedComplianceFixture : TransportComplianceFixture, IAsyncLifet
     {
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         var receiverTopic = "buffered.receiver";
         var senderTopic = "buffered.sender";
@@ -43,11 +43,6 @@ public class BufferedComplianceFixture : TransportComplianceFixture, IAsyncLifet
             opts.Services.AddResourceSetupOnStartup();
         });
     }
-
-    public new Task DisposeAsync()
-    {
-        return Task.CompletedTask;
-    }
 }
 
 public class BufferedSendingAndReceivingCompliance : TransportCompliance<BufferedComplianceFixture>;
@@ -60,7 +55,7 @@ public class InlineComplianceFixture : TransportComplianceFixture, IAsyncLifetim
     {
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         var receiverTopic = "receiver.inline";
         var senderTopic = "sender.inline";
@@ -90,11 +85,6 @@ public class InlineComplianceFixture : TransportComplianceFixture, IAsyncLifetim
 
             opts.Services.AddResourceSetupOnStartup();
         });
-    }
-
-    public new Task DisposeAsync()
-    {
-        return Task.CompletedTask;
     }
 }
 

@@ -3,7 +3,7 @@
 Custom policies can be created for HTTP endpoints through either creating your own implementation of `IHttpPolicy`
 shown below:
 
-<!-- snippet: sample_IHttpPolicy -->
+<!-- snippet: sample_ihttppolicy -->
 <a id='snippet-sample_ihttppolicy'></a>
 ```cs
 /// <summary>
@@ -20,7 +20,7 @@ public interface IHttpPolicy
     void Apply(IReadOnlyList<HttpChain> chains, GenerationRules rules, IServiceContainer container);
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/Wolverine.Http/IHttpPolicy.cs#L7-L23' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_ihttppolicy' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/Wolverine.Http/IHttpPolicy.cs#L7-L22' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_ihttppolicy' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 And then adding a policy to the `WolverineHttpOptions` like this code from the Fluent Validation extension for HTTP:
@@ -38,7 +38,7 @@ public static void UseFluentValidationProblemDetailMiddleware(this WolverineHttp
     httpOptions.AddPolicy<HttpChainFluentValidationPolicy>();
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/Wolverine.Http.FluentValidation/WolverineHttpOptionsExtensions.cs#L7-L19' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_usage_of_http_add_policy' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/Wolverine.Http.FluentValidation/WolverineHttpOptionsExtensions.cs#L7-L18' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_usage_of_http_add_policy' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Or lastly through lambdas (which creates an `IHttpPolicy` object behind the scenes):
@@ -48,6 +48,16 @@ Or lastly through lambdas (which creates an `IHttpPolicy` object behind the scen
 ```cs
 app.MapWolverineEndpoints(opts =>
 {
+    opts.UseApiVersioning(v =>
+    {
+        // Existing unversioned endpoints are left unchanged
+        v.UnversionedPolicy = UnversionedPolicy.PassThrough;
+        v.Sunset("3.0").On(DateTimeOffset.Parse("2027-01-01T00:00:00Z"))
+            .WithLink(new Uri("https://example.com/migrate-to-v2"), "Migration guide", "text/html");
+        v.Deprecate("1.0").On(DateTimeOffset.Parse("2026-12-31T00:00:00Z"))
+            .WithLink(new Uri("https://example.com/sunset-v1"));
+    });
+
     // This is strictly to test the endpoint policy
 
     opts.ConfigureEndpoints(httpChain =>
@@ -69,7 +79,7 @@ app.MapWolverineEndpoints(opts =>
     // into the Wolverine.HTTP library
     opts.UseDataAnnotationsValidationProblemDetailMiddleware();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Program.cs#L221-L246' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_configure_endpoints' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Program.cs#L300-L334' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_configure_endpoints' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 The `HttpChain` model is a configuration time structure that Wolverine.Http will use at runtime to create the full
@@ -84,6 +94,16 @@ Here's an example from the Wolverine.Http tests of using a policy to add custom 
 ```cs
 app.MapWolverineEndpoints(opts =>
 {
+    opts.UseApiVersioning(v =>
+    {
+        // Existing unversioned endpoints are left unchanged
+        v.UnversionedPolicy = UnversionedPolicy.PassThrough;
+        v.Sunset("3.0").On(DateTimeOffset.Parse("2027-01-01T00:00:00Z"))
+            .WithLink(new Uri("https://example.com/migrate-to-v2"), "Migration guide", "text/html");
+        v.Deprecate("1.0").On(DateTimeOffset.Parse("2026-12-31T00:00:00Z"))
+            .WithLink(new Uri("https://example.com/sunset-v1"));
+    });
+
     // This is strictly to test the endpoint policy
 
     opts.ConfigureEndpoints(httpChain =>
@@ -105,14 +125,14 @@ app.MapWolverineEndpoints(opts =>
     // into the Wolverine.HTTP library
     opts.UseDataAnnotationsValidationProblemDetailMiddleware();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Program.cs#L221-L246' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_configure_endpoints' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Program.cs#L300-L334' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_configure_endpoints' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Resource Writer Policies
 
 Wolverine has an additional type of policy that deals with how an endpoints primary result is handled. 
 
-<!-- snippet: sample_IResourceWriterPolicy -->
+<!-- snippet: sample_iresourcewriterpolicy -->
 <a id='snippet-sample_iresourcewriterpolicy'></a>
 ```cs
 /// <summary>
@@ -140,7 +160,7 @@ If you need special handling of a primary return type you can implement `IResour
 ```cs
 opts.AddResourceWriterPolicy<CustomResourceWriterPolicy>();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Program.cs#L268-L272' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_register_resource_writer_policy' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Program.cs#L354-L357' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_register_resource_writer_policy' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Resource writer policies registered this way will be applied in order before all built in policies.

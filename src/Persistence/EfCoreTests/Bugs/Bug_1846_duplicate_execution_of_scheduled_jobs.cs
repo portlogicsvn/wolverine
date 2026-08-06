@@ -9,8 +9,7 @@ using Wolverine;
 using Wolverine.EntityFrameworkCore;
 using Wolverine.SqlServer;
 using Wolverine.Tracking;
-using Xunit.Abstractions;
-
+using Xunit;
 namespace EfCoreTests.Bugs;
 
 [Collection("sqlserver")]
@@ -44,7 +43,7 @@ public class Bug_1846_duplicate_execution_of_scheduled_jobs
                 
                 opts.Services.AddDbContextWithWolverineIntegration<CleanDbContext>(x =>
                     x.UseSqlServer(Servers.SqlServerConnectionString));
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
         
         var session = await host.TrackActivity()
             .WaitForMessageToBeReceivedAt<MsgB>(host)

@@ -5,9 +5,11 @@ using JasperFx.CodeGeneration.Frames;
 using JasperFx.CodeGeneration.Model;
 using JasperFx.Core.Reflection;
 using Polecat;
+using JasperFx.Events;
 using Polecat.Events;
 using Wolverine.Configuration;
 using Wolverine.Polecat.Codegen;
+using Wolverine.Polecat.Requirements;
 using Wolverine.Persistence;
 using Wolverine.Persistence.Sagas;
 using Wolverine.Runtime;
@@ -16,6 +18,11 @@ namespace Wolverine.Polecat.Persistence.Sagas;
 
 internal class PolecatPersistenceFrameProvider : IPersistenceFrameProvider
 {
+    // Polecat can persist any document, so CanPersist claims every type. Yield to selective
+    // providers (EF Core) for the entity types they actually map, regardless of the order the
+    // integrations were registered in
+    public bool IsCatchAll => true;
+
     public bool CanPersist(Type entityType, IServiceContainer container, out Type persistenceService)
     {
         persistenceService = typeof(IDocumentSession);
@@ -63,9 +70,51 @@ internal class PolecatPersistenceFrameProvider : IPersistenceFrameProvider
 
         if (chain.ReturnVariablesOfType<IPolecatOp>().Any()) return true;
 
+        // GH-2941: detect parameter attributes whose Modify() injects a non-MethodCall frame
+        // depending on IDocumentSession. See MartenPersistenceFrameProvider.CanApply for the full
+        // explanation; Polecat mirrors the Marten path structurally. Pairs with the upstream
+        // Polecat fix (polecat#161, shipped in Polecat 4.2.1): DocumentSessionBase.SaveChangesAsync
+        // now also runs queued ITransactionParticipants when there are no document operations
+        // outstanding, so the StoreIncomingEnvelopeParticipant added via Session.StoreIncoming(...)
+        // for a scheduled cascade actually executes inside the chain's session transaction.
+        if (ChainHasPolecatSessionAttributes(chain)) return true;
+
         var serviceDependencies = chain
             .ServiceDependencies(container, new[] { typeof(IDocumentSession), typeof(IQuerySession), typeof(IDocumentOperations) }).ToArray();
         return serviceDependencies.Any(x => x == typeof(IDocumentSession) || x == typeof(IDocumentOperations) || x.Closes(typeof(IEventStream<>)));
+    }
+
+    private static bool ChainHasPolecatSessionAttributes(IChain chain)
+    {
+        foreach (var call in chain.HandlerCalls())
+        {
+            foreach (var parameter in call.Method.GetParameters())
+            {
+                if (parameter.GetCustomAttributes().Any(a => a is ReadAggregateAttribute)) return true;
+            }
+        }
+
+        foreach (var call in chain.HandlerCalls())
+        {
+            if (call.Method.GetCustomAttributes().Any(IsDocumentExistsAttribute)) return true;
+            if (call.HandlerType.GetCustomAttributes(true).OfType<Attribute>().Any(IsDocumentExistsAttribute)) return true;
+        }
+
+        var messageType = chain.InputType();
+        if (messageType != null && messageType.GetCustomAttributes(true).OfType<Attribute>().Any(IsDocumentExistsAttribute))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool IsDocumentExistsAttribute(Attribute attribute)
+    {
+        var type = attribute.GetType();
+        if (!type.IsGenericType) return false;
+        var def = type.GetGenericTypeDefinition();
+        return def == typeof(DocumentExistsAttribute<>) || def == typeof(DocumentDoesNotExistAttribute<>);
     }
 
     public Frame DetermineLoadFrame(IServiceContainer container, Type sagaType, Variable sagaId)
@@ -105,7 +154,7 @@ internal class PolecatPersistenceFrameProvider : IPersistenceFrameProvider
 
     public Frame DetermineStorageActionFrame(Type entityType, Variable action, IServiceContainer container)
     {
-        var method = typeof(PolecatStorageActionApplier).GetMethod("ApplyAction")
+        var method = typeof(PolecatStorageActionApplier).GetMethod("ApplyAction")!
             .MakeGenericMethod(entityType);
 
         var call = new MethodCall(typeof(PolecatStorageActionApplier), method);
@@ -124,14 +173,14 @@ internal class PolecatPersistenceFrameProvider : IPersistenceFrameProvider
 
 public static class PolecatStorageActionApplier
 {
-    public static void ApplyAction<T>(IDocumentSession session, IStorageAction<T> action)
+    public static void ApplyAction<T>(IDocumentSession session, IStorageAction<T> action) where T : notnull
     {
         if (action.Entity == null) return;
 
         switch (action.Action)
         {
             case StorageAction.Delete:
-                session.Delete(action.Entity!);
+                session.Delete(action.Entity);
                 break;
             case StorageAction.Insert:
                 session.Insert(action.Entity);
@@ -148,7 +197,7 @@ public static class PolecatStorageActionApplier
 
 internal class DocumentSessionSaveChanges : MethodCall
 {
-    public DocumentSessionSaveChanges() : base(typeof(IDocumentSession), ReflectionHelper.GetMethod<IDocumentSession>(x => x.SaveChangesAsync(default)))
+    public DocumentSessionSaveChanges() : base(typeof(IDocumentSession), ReflectionHelper.GetMethod<IDocumentSession>(x => x.SaveChangesAsync(default))!)
     {
         CommentText = "Save all pending changes to this Polecat session";
     }

@@ -2,11 +2,13 @@ using System.Text.Json;
 using JasperFx.CodeGeneration.Frames;
 using JasperFx.Core;
 using JasperFx.Core.Reflection;
+using JasperFx.Core.TypeScanning;
 using Microsoft.AspNetCore.Builder;
 using Wolverine.Http.Antiforgery;
 using Microsoft.AspNetCore.Http;
-using Newtonsoft.Json;
+using Microsoft.AspNetCore.Routing;
 using Wolverine.Configuration;
+using Wolverine.Http.ApiVersioning;
 using Wolverine.Http.CodeGen;
 using Wolverine.Http.Policies;
 using Wolverine.Http.Resources;
@@ -151,6 +153,27 @@ public class WolverineHttpOptions
     {
         AddPolicy<HttpChainDataAnnotationsValidationPolicy>();
     }
+
+    internal WolverineApiVersioningOptions? ApiVersioning { get; private set; }
+
+    /// <summary>
+    /// Enable native API versioning support. On the first call, creates the
+    /// <see cref="WolverineApiVersioningOptions"/> instance and registers an
+    /// <c>ApiVersioningPolicy</c> that applies versioning semantics at bootstrap time.
+    /// Subsequent calls accumulate configuration onto the same options instance without
+    /// registering a second policy.
+    /// </summary>
+    /// <param name="configure">An action to configure the <see cref="WolverineApiVersioningOptions"/>.</param>
+    public void UseApiVersioning(Action<WolverineApiVersioningOptions> configure)
+    {
+        ArgumentNullException.ThrowIfNull(configure);
+        if (ApiVersioning is null)
+        {
+            ApiVersioning = new WolverineApiVersioningOptions();
+            Policies.Add(new ApiVersioningPolicy(ApiVersioning));
+        }
+        configure(ApiVersioning);
+    }
     
     public async ValueTask<string?> TryDetectTenantId(HttpContext httpContext)
     {
@@ -178,13 +201,46 @@ public class WolverineHttpOptions
     /// </summary>
     public RouteWarmup WarmUpRoutes { get; set; } = RouteWarmup.Lazy;
 
+    /// <summary>
+    /// When true, a query string value that is <b>present</b> but cannot be parsed to the expected
+    /// endpoint parameter type (enum, int, Guid, etc.) short-circuits the request with a
+    /// 400 Bad Request and a ProblemDetails body naming the offending query string parameter.
+    /// This matches the behavior of ASP.NET Core minimal API parameter binding. A <b>missing</b>
+    /// query string value still binds the parameter's default / property initializer value in
+    /// either mode. Applies to query string binding for endpoint method arguments and for
+    /// [AsParameters] members bound from the query string, including collection parameters
+    /// (arrays, List&lt;T&gt;, IEnumerable&lt;T&gt;, etc.) where a single unparseable element rejects the
+    /// entire binding. This is currently opt-in
+    /// (default false) to preserve the previous lenient behavior, but the default flips
+    /// to true (strict) in Wolverine 7.0. See https://github.com/JasperFx/wolverine/issues/3372
+    /// and https://github.com/JasperFx/wolverine/issues/3398
+    /// </summary>
+    public bool RejectUnparseableQueryValues { get; set; }
+
     internal TenantIdDetection TenantIdDetection { get; } = new();
 
     internal Lazy<JsonSerializerOptions> JsonSerializerOptions { get; set; } = new(() => new JsonSerializerOptions());
 
-    internal JsonSerializerSettings NewtonsoftSerializerSettings { get; set; } = new();
+    /// <summary>
+    ///     Set by the WolverineFx.Http.Newtonsoft companion package's
+    ///     <c>UseNewtonsoftJsonForSerialization()</c> extension method to
+    ///     thread the user's <c>JsonSerializerSettings</c> customization
+    ///     into the singleton <c>NewtonsoftHttpSerialization</c> the
+    ///     extension package's <c>AddWolverineHttpNewtonsoft()</c>
+    ///     IServiceCollection extension registers. Untyped (object) so the
+    ///     core Wolverine.Http assembly does not have to reference
+    ///     Newtonsoft.Json.
+    /// </summary>
+    internal object? NewtonsoftSettingsConfiguration { get; set; }
 
     internal HttpGraph? Endpoints { get; set; }
+
+    /// <summary>
+    ///     The route builder MapWolverineEndpoints() was called on. Its DataSources collection is the
+    ///     only place the host's minimal API / MVC endpoints can be seen before the host starts, which
+    ///     an ApiExplorer read that early depends on. See <see cref="HostEndpointDataSources" />.
+    /// </summary>
+    internal IEndpointRouteBuilder? RouteBuilder { get; set; }
 
     internal MiddlewarePolicy Middleware { get; } = new();
 
@@ -220,6 +276,34 @@ public class WolverineHttpOptions
         NamespacePrefixes.Add((prefix.Trim('/'), forEndpointsInNamespace));
     }
 
+    // Null unless CustomizeHttpEndpointDiscovery() was called. HttpChainSource layers its Excludes
+    // (subtractive) and Includes (additive) on top of the built-in endpoint convention; while it stays
+    // null the discovery predicate applies only that built-in convention.
+    internal TypeQuery? EndpointDiscovery { get; private set; }
+
+    /// <summary>
+    /// Additive, opt-in customization of the type filtering used to discover Wolverine HTTP endpoints
+    /// from the scanned assemblies. This is the HTTP counterpart to
+    /// <see cref="Wolverine.Configuration.HandlerDiscovery.CustomizeHandlerDiscovery" />: use
+    /// <c>q.Excludes</c> to drop endpoint types — e.g.
+    /// <c>opts.CustomizeHttpEndpointDiscovery(q =&gt; q.Excludes.InNamespace("MyApp.Excluded"))</c> — so that
+    /// HTTP endpoints can be split across hosts the same way message handlers already can. Without this,
+    /// an HTTP endpoint in an excluded namespace of a scanned assembly still registers, and
+    /// <c>[WolverineIgnore]</c> on the type is the only lever. Rules added through <c>q.Includes</c> are
+    /// additive: they broaden discovery beyond the built-in <c>*Endpoint(s)</c> /
+    /// <c>[WolverineHttpMethod]</c> convention (an included type still only contributes methods carrying a
+    /// Wolverine HTTP verb attribute). When this method is never called, discovery applies only the
+    /// built-in endpoint convention.
+    /// </summary>
+    /// <param name="configure">Configures the excludes/includes applied during endpoint discovery.</param>
+    /// <exception cref="ArgumentNullException"></exception>
+    public void CustomizeHttpEndpointDiscovery(Action<TypeQuery> configure)
+    {
+        ArgumentNullException.ThrowIfNull(configure);
+        EndpointDiscovery ??= new TypeQuery(TypeClassification.All);
+        configure(EndpointDiscovery);
+    }
+
     /// <summary>
     /// Configure built in tenant id detection strategies
     /// </summary>
@@ -228,26 +312,21 @@ public class WolverineHttpOptions
     /// <summary>
     /// Tell Wolverine that services of type T should always be sourced from the HttpContext.RequestServices.
     /// This enables your system to use shared services with AspNetCore middleware while still allowing Wolverine
-    /// to generate inlined constructor invocation code otherwise
+    /// to generate inlined constructor invocation code otherwise. Scoped to HTTP chains — non-HTTP message
+    /// handlers that happen to consume the same service type continue to use normal constructor resolution.
     /// </summary>
     /// <typeparam name="T"></typeparam>
     public void SourceServiceFromHttpContext<T>()
     {
-        var source = new RequestServicesVariableSource(typeof(T));
-        Endpoints!.Rules.Sources.Add(source);
+        Endpoints!.HttpContextSourcedTypes.Add(typeof(T));
     }
 
-    /// <summary>
-    /// Opt into using Newtonsoft.Json for all JSON serialization in the Wolverine
-    /// Http handlers
-    /// </summary>
-    /// <param name="configure"></param>
-    public void UseNewtonsoftJsonForSerialization(Action<JsonSerializerSettings>? configure = null)
-    {
-        configure?.Invoke(NewtonsoftSerializerSettings);
-        Endpoints!.UseNewtonsoftJson();
-
-    }
+    // Newtonsoft.Json HTTP serialization moved to the WolverineFx.Http.Newtonsoft
+    // companion package in 6.0. The 5.x instance method
+    // WolverineHttpOptions.UseNewtonsoftJsonForSerialization(...) is now an
+    // extension method declared in that package; install it and add
+    // `using Wolverine.Http.Newtonsoft;` to bring the same call surface back
+    // into scope. See docs/guide/migration.md.
 
     /// <summary>
     ///     Customize Wolverine's handling of parameters to HTTP endpoint methods
@@ -268,8 +347,7 @@ public class WolverineHttpOptions
         Endpoints!.InsertParameterStrategy(strategy);
     }
 
-    #region sample_RequireAuthorizeOnAll
-
+    #region sample_requireauthorizeonall
     /// <summary>
     /// Equivalent of calling RequireAuthorization() on all wolverine endpoints
     /// </summary>
@@ -389,9 +467,10 @@ public class WolverineHttpOptions
 #pragma warning disable CS4014
         var method = MethodCall.For<PublishingEndpoint<T>>(x => x.PublishAsync(default!, null!, null!));
 #pragma warning restore CS4014
+        // GH-3646: Add() maps the route through the constructor now, so the second MapToRoute() that used to
+        // sit here is gone -- it only re-ran parameter matching after the metadata was already built.
         var chain = Endpoints!.Add(method, httpMethod, url);
 
-        chain.MapToRoute(httpMethod.ToString(), url);
         chain.DisplayName = $"Forward {typeof(T).FullNameInCode()} to Wolverine";
         chain.OperationId = $"Publish:{typeof(T).FullNameInCode()}";
         customize?.Invoke(chain);
@@ -416,9 +495,9 @@ public class WolverineHttpOptions
 #pragma warning disable CS4014
         var method = MethodCall.For<SendingEndpoint<T>>(x => x.SendAsync(default!, null!, null!));
 #pragma warning restore CS4014
+        // GH-3646: see PublishMessage above.
         var chain = Endpoints!.Add(method, httpMethod, url);
 
-        chain.MapToRoute(httpMethod.ToString(), url);
         chain.DisplayName = $"Forward {typeof(T).FullNameInCode()} to Wolverine";
         chain.OperationId = $"Send:{typeof(T).FullNameInCode()}";
         customize?.Invoke(chain);

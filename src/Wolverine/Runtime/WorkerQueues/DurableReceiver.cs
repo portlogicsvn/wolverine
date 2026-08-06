@@ -53,6 +53,23 @@ public class DurableReceiver : ILocalQueue, IChannelCallback, ISupportNativeSche
 
         Pipeline = pipeline;
 
+        void onBlockError(Envelope? envelope, Exception ex)
+        {
+            // A terminal block fault (jasperfx#506) reports with a null item
+            if (envelope == null)
+            {
+                _logger.LogCritical(ex,
+                    "The local worker queue for {Uri} has faulted and stopped processing. Messages buffered locally will not be executed",
+                    Uri);
+            }
+            else
+            {
+                _logger.LogError(ex,
+                    "Error processing envelope {EnvelopeId} ({MessageType}) in the local worker queue for {Uri}",
+                    envelope.Id, envelope.MessageType, Uri);
+            }
+        }
+
         Func<Envelope, CancellationToken, Task> execute = async (envelope, _) =>
         {
             if (_latched)
@@ -64,13 +81,13 @@ public class DurableReceiver : ILocalQueue, IChannelCallback, ISupportNativeSche
             {
                 envelope.ContentType ??= EnvelopeConstants.JsonContentType;
 
-                await pipeline.InvokeAsync(envelope, this);
+                await pipeline.InvokeAsync(envelope, this).ConfigureAwait(false);
             }
             catch (Exception? e)
             {
                 if (_receiver != null)
                 {
-                    await _receiver.PostAsync(envelope);
+                    await _receiver.PostAsync(envelope).ConfigureAwait(false);
                 }
 
                 // This *should* never happen, but of course it will
@@ -78,9 +95,24 @@ public class DurableReceiver : ILocalQueue, IChannelCallback, ISupportNativeSche
             }
         };
         
-        _receiver = endpoint.GroupShardingSlotNumber == null 
-            ? new Block<Envelope>(endpoint.MaxDegreeOfParallelism, execute)
-            : new ShardedExecutionBlock((int)endpoint.GroupShardingSlotNumber, runtime.Options.MessagePartitioning, execute).DeserializeFirst(pipeline, runtime, this);
+        if (endpoint.GroupShardingSlotNumber == null)
+        {
+            _receiver = new Block<Envelope>(endpoint.MaxDegreeOfParallelism, execute);
+        }
+        else
+        {
+            var sharded = new ShardedExecutionBlock((int)endpoint.GroupShardingSlotNumber,
+                runtime.Options.MessagePartitioning, execute);
+            sharded.OnError = onBlockError;
+            _receiver = sharded.DeserializeFirst(pipeline, runtime, this);
+        }
+
+        // Route block-level failures (an exception escaping the execution machinery itself, or the
+        // block faulting terminally per jasperfx#506) through real logging. The JasperFx default sink
+        // is stderr, which reads as a silent stall in any structured-logging deployment — and a
+        // faulted block freezes QueueCount, which permanently latches a back-pressured listener
+        // (GH CritterWatch#922).
+        _receiver.OnError = onBlockError;
         
         _deferBlock = new RetryBlock<Envelope>((env, _) => env.Listener!.DeferAsync(env).AsTask(), runtime.Logger,
             runtime.Cancellation);
@@ -97,11 +129,11 @@ public class DurableReceiver : ILocalQueue, IChannelCallback, ISupportNativeSche
                 // Only care about the batch if one exists
                 if (e.Batch != null)
                 {
-                    await _inbox.MarkIncomingEnvelopeAsHandledAsync(e.Batch);
+                    await _inbox.MarkIncomingEnvelopeAsHandledAsync(e.Batch).ConfigureAwait(false);
                 }
                 else
                 {
-                    await _inbox.MarkIncomingEnvelopeAsHandledAsync(e);
+                    await _inbox.MarkIncomingEnvelopeAsHandledAsync(e).ConfigureAwait(false);
                 }
             }, _logger,
             _settings.Cancellation);
@@ -125,12 +157,12 @@ public class DurableReceiver : ILocalQueue, IChannelCallback, ISupportNativeSche
             {
                 if (_deadLetterSender != null)
                 {
-                    await _deadLetterSender.SendAsync(envelope);
+                    await _deadLetterSender.SendAsync(envelope).ConfigureAwait(false);
                     return;
                 }
 
                 var report = new ErrorReport(envelope, envelope.Failure!);
-                await _inbox.MoveToDeadLetterStorageAsync(report.Envelope, report.Exception);
+                await _inbox.MoveToDeadLetterStorageAsync(report.Envelope, report.Exception).ConfigureAwait(false);
             }, _logger,
             _settings.Cancellation);
 
@@ -147,7 +179,11 @@ public class DurableReceiver : ILocalQueue, IChannelCallback, ISupportNativeSche
     /// <summary>
     /// If the handler for this message type targets an ancillary store on a
     /// different database, set envelope.Store so that the DelegatingMessageInbox
-    /// persists it in the correct store for transactional atomicity.
+    /// persists it in the correct store for transactional atomicity. The
+    /// receiving handler's store association wins over the publishing context's
+    /// store — see the equivalent method on
+    /// <see cref="Wolverine.Transports.Local.DurableLocalQueue"/> for the full
+    /// rationale (GH-2669).
     /// </summary>
     private void assignAncillaryStoreIfNeeded(Envelope envelope)
     {
@@ -170,7 +206,7 @@ public class DurableReceiver : ILocalQueue, IChannelCallback, ISupportNativeSche
 
     public async ValueTask DisposeAsync()
     {
-        await _receiver.WaitForCompletionAsync();
+        await _receiver.WaitForCompletionAsync().ConfigureAwait(false);
 
         _incrementAttempts.Dispose();
         _scheduleExecution.Dispose();
@@ -201,12 +237,12 @@ public class DurableReceiver : ILocalQueue, IChannelCallback, ISupportNativeSche
             foreach (var child in envelope.Batch)
             {
                 child.InBatch = false;
-                await _markAsHandled.PostAsync(child);
+                await _markAsHandled.PostAsync(child).ConfigureAwait(false);
             }
         }
         else
         {
-            await _markAsHandled.PostAsync(envelope);
+            await _markAsHandled.PostAsync(envelope).ConfigureAwait(false);
         }
     }
 
@@ -218,19 +254,19 @@ public class DurableReceiver : ILocalQueue, IChannelCallback, ISupportNativeSche
             envelope.Attempts++;
         }
 
-        await _incrementAttempts.PostAsync(envelope);
+        await _incrementAttempts.PostAsync(envelope).ConfigureAwait(false);
 
         if (_latched)
         {
             if (envelope.Listener != null)
             {
-                await _deferBlock.PostAsync(envelope);
+                await _deferBlock.PostAsync(envelope).ConfigureAwait(false);
             }
 
             return;
         }
 
-        await EnqueueAsync(envelope);
+        await EnqueueAsync(envelope).ConfigureAwait(false);
     }
 
     public IHandlerPipeline Pipeline { get; } = null!;
@@ -242,6 +278,12 @@ public class DurableReceiver : ILocalQueue, IChannelCallback, ISupportNativeSche
     public void Enqueue(Envelope envelope)
     {
         envelope.ReplyUri = envelope.ReplyUri ?? Uri;
+        // Envelopes can enter the queue without going through the listener
+        // arrival paths (receiveOneAsync / ProcessReceivedMessagesAsync) — for
+        // example via the scheduled-jobs poller's EnqueueDirectlyAsync. Make
+        // sure the ancillary-store routing is applied here too so the
+        // mark-as-handled SQL goes to the correct store. See GH-2576.
+        assignAncillaryStoreIfNeeded(envelope);
         _receiver.Post(envelope);
     }
 
@@ -249,6 +291,12 @@ public class DurableReceiver : ILocalQueue, IChannelCallback, ISupportNativeSche
     {
         envelope.WasPersistedInInbox = true;
         envelope.ReplyUri = envelope.ReplyUri ?? Uri;
+        // See note on Enqueue — same reason. The scheduled-jobs poller in
+        // {DatabaseFlavour}MessageStore.PollForScheduledMessagesAsync calls
+        // runtime.EnqueueDirectlyAsync, which lands here without ever passing
+        // through the assignAncillaryStoreIfNeeded calls in receiveOneAsync /
+        // ProcessReceivedMessagesAsync. See GH-2576.
+        assignAncillaryStoreIfNeeded(envelope);
         return _receiver.PostAsync(envelope);
     }
 
@@ -275,7 +323,7 @@ public class DurableReceiver : ILocalQueue, IChannelCallback, ISupportNativeSche
         {
             if (envelope.Listener != null)
             {
-                await _deferBlock.PostAsync(envelope);
+                await _deferBlock.PostAsync(envelope).ConfigureAwait(false);
             }
 
             return;
@@ -285,7 +333,7 @@ public class DurableReceiver : ILocalQueue, IChannelCallback, ISupportNativeSche
         {
             if (envelope.Listener != null)
             {
-                await _completeBlock.PostAsync(envelope);
+                await _completeBlock.PostAsync(envelope).ConfigureAwait(false);
             }
 
             return;
@@ -297,7 +345,7 @@ public class DurableReceiver : ILocalQueue, IChannelCallback, ISupportNativeSche
             var now = DateTimeOffset.UtcNow;
             envelope.MarkReceived(listener, now, _settings, _endpoint.WireTap);
 
-            await _receivingOne.PostAsync(envelope);
+            await _receivingOne.PostAsync(envelope).ConfigureAwait(false);
         }
         finally
         {
@@ -322,7 +370,7 @@ public class DurableReceiver : ILocalQueue, IChannelCallback, ISupportNativeSche
             try
             {
                 var completion = _receiver.WaitForCompletionAsync();
-                await Task.WhenAny(completion, Task.Delay(_settings.DrainTimeout));
+                await Task.WhenAny(completion, Task.Delay(_settings.DrainTimeout)).ConfigureAwait(false);
             }
             catch (Exception e)
             {
@@ -330,16 +378,16 @@ public class DurableReceiver : ILocalQueue, IChannelCallback, ISupportNativeSche
             }
         }
 
-        await _incrementAttempts.DrainAsync();
-        await _scheduleExecution.DrainAsync();
-        await _markAsHandled.DrainAsync();
-        await _moveToErrors.DrainAsync();
-        await _receivingOne.DrainAsync();
+        await _incrementAttempts.DrainAsync().ConfigureAwait(false);
+        await _scheduleExecution.DrainAsync().ConfigureAwait(false);
+        await _markAsHandled.DrainAsync().ConfigureAwait(false);
+        await _moveToErrors.DrainAsync().ConfigureAwait(false);
+        await _receivingOne.DrainAsync().ConfigureAwait(false);
 
-        await _completeBlock.DrainAsync();
-        await _deferBlock.DrainAsync();
+        await _completeBlock.DrainAsync().ConfigureAwait(false);
+        await _deferBlock.DrainAsync().ConfigureAwait(false);
 
-        await executeWithRetriesAsync(() => _inbox.ReleaseIncomingAsync(_settings.AssignedNodeNumber, Uri));
+        await executeWithRetriesAsync(() => _inbox.ReleaseIncomingAsync(_settings.AssignedNodeNumber, Uri)).ConfigureAwait(false);
     }
 
     public void Dispose()
@@ -386,7 +434,7 @@ public class DurableReceiver : ILocalQueue, IChannelCallback, ISupportNativeSche
                 var agent = _runtime.Endpoints.FindListeningAgent(Uri);
                 if (agent is ListeningAgent la)
                 {
-                    await la.PauseForInboxRecoveryAsync();
+                    await la.PauseForInboxRecoveryAsync().ConfigureAwait(false);
                 }
             }
             catch (Exception e)
@@ -406,24 +454,35 @@ public class DurableReceiver : ILocalQueue, IChannelCallback, ISupportNativeSche
                 await executeWithRetriesAsync(async () =>
                 {
                     envelope.OwnerId = TransportConstants.AnyNode;
+
+                    // GH-3680 defense in depth. Never write an inbox row that no recovery sweep can see.
+                    // Status defaults to 'Outgoing' and received_at to null on an envelope that never went
+                    // through MarkReceived, and both are filter columns for inbox recovery.
+                    if (envelope.Status == EnvelopeStatus.Outgoing)
+                    {
+                        envelope.Status = EnvelopeStatus.Incoming;
+                    }
+
+                    envelope.Destination ??= Uri;
+
                     assignAncillaryStoreIfNeeded(envelope);
                     try
                     {
-                        await _inbox.StoreIncomingAsync(envelope);
+                        await _inbox.StoreIncomingAsync(envelope).ConfigureAwait(false);
                         envelope.WasPersistedInInbox = true;
                     }
                     catch (DuplicateIncomingEnvelopeException)
                     {
                         // Just get out
                     }
-                });
+                }).ConfigureAwait(false);
             }
 
             if (envelope.Listener != null)
             {
                 try
                 {
-                    await envelope.Listener.DeferAsync(envelope);
+                    await envelope.Listener.DeferAsync(envelope).ConfigureAwait(false);
                 }
                 catch (Exception e)
                 {
@@ -453,8 +512,8 @@ public class DurableReceiver : ILocalQueue, IChannelCallback, ISupportNativeSche
 
                     envelope.MessageType ??= $"unknown/{e.GetType().Name}";
                     envelope.Failure = e;
-                    await _moveToErrors.PostAsync(envelope);
-                    await _completeBlock.PostAsync(envelope);
+                    await _moveToErrors.PostAsync(envelope).ConfigureAwait(false);
+                    await _completeBlock.PostAsync(envelope).ConfigureAwait(false);
                     return;
                 }
 
@@ -467,39 +526,63 @@ public class DurableReceiver : ILocalQueue, IChannelCallback, ISupportNativeSche
                 if (envelope.MessageType.IsEmpty())
                 {
                     _logger.LogInformation("Empty or missing message type name for Envelope {Id} received at durable {Destination}. Moving to dead letter queue", envelope.Id, envelope.Destination);
-                    await _moveToErrors.PostAsync(envelope);
-                    await _completeBlock.PostAsync(envelope);
+                    await _moveToErrors.PostAsync(envelope).ConfigureAwait(false);
+                    await _completeBlock.PostAsync(envelope).ConfigureAwait(false);
                     return;
                 }
 
                 envelope.OwnerId = _settings.AssignedNodeNumber;
                 assignAncillaryStoreIfNeeded(envelope);
-                await _inbox.StoreIncomingAsync(envelope);
+                await _inbox.StoreIncomingAsync(envelope).ConfigureAwait(false);
                 envelope.WasPersistedInInbox = true;
             }
             catch (DuplicateIncomingEnvelopeException e)
             {
-                await handleDuplicateIncomingEnvelope(envelope, e);
+                await handleDuplicateIncomingEnvelope(envelope, e).ConfigureAwait(false);
 
                 return;
             }
             catch (Exception)
             {
                 SignalInboxUnavailable();
-                throw;
+
+                if (envelope.Listener == null)
+                {
+                    // Nothing to settle with the broker, so let the RetryBlock keep trying
+                    throw;
+                }
+
+                // GH-3767. RetryBlock exhaustion (3 attempts over ~400ms) must never be the
+                // terminal state for a broker delivery that has not been settled: discarding
+                // leaves the delivery unacked on a live consumer, and the broker will not
+                // redeliver it while the connection stays up. Settle by deferring back to the
+                // listener -- the same semantics the latched branch applies -- and let broker
+                // redelivery plus the paused listener's inbox-recovery restart carry the retry.
+                try
+                {
+                    await envelope.Listener.DeferAsync(envelope).ConfigureAwait(false);
+                }
+                catch (Exception e)
+                {
+                    _logger.LogError(e,
+                        "Error trying to defer message {MessageId} from {Listener} after an inbox persistence failure",
+                        envelope.Id, Uri);
+                }
+
+                return;
             }
         }
 
         if (envelope.Status == EnvelopeStatus.Incoming)
         {
-            await EnqueueAsync(envelope);
+            await EnqueueAsync(envelope).ConfigureAwait(false);
         }
 
         _logger.IncomingReceived(envelope, Uri);
 
         if (envelope.Listener != null)
         {
-            await _completeBlock.PostAsync(envelope);
+            await _completeBlock.PostAsync(envelope).ConfigureAwait(false);
         }
     }
 
@@ -511,7 +594,7 @@ public class DurableReceiver : ILocalQueue, IChannelCallback, ISupportNativeSche
         {
             try
             {
-                await envelope.Listener.CompleteAsync(envelope);
+                await envelope.Listener.CompleteAsync(envelope).ConfigureAwait(false);
             }
             catch (Exception exception)
             {
@@ -521,10 +604,26 @@ public class DurableReceiver : ILocalQueue, IChannelCallback, ISupportNativeSche
         }
     }
 
+    /// <summary>
+    /// Bounded retry helper used for best-effort persistence operations like
+    /// <see cref="IMessageInbox.ReleaseIncomingAsync"/> on drain. Three properties
+    /// matter for shutdown correctness (see GH-2671):
+    /// <list type="bullet">
+    /// <item>The loop is finite — capped at <see cref="MaxReleaseRetries"/> attempts —
+    /// so a permanently unreachable database can't hang shutdown.</item>
+    /// <item>The loop honours <see cref="DurabilitySettings.Cancellation"/>: when the
+    /// host is stopping we exit immediately on the first failure rather than
+    /// hammering an already-disposed connection pool.</item>
+    /// <item>Log severity is demoted to Debug when cancellation has been signalled.
+    /// During teardown, transient socket / connection failures from the data
+    /// source are expected and don't warrant Error-level noise.</item>
+    /// </list>
+    /// </summary>
+    internal const int MaxReleaseRetries = 5;
+
     private async Task executeWithRetriesAsync(Func<Task> action)
     {
-        var i = 0;
-        while (true)
+        for (var attempt = 1; ; attempt++)
         {
             try
             {
@@ -533,9 +632,41 @@ public class DurableReceiver : ILocalQueue, IChannelCallback, ISupportNativeSche
             }
             catch (Exception e)
             {
-                _logger.LogError(e, "Unexpected failure");
-                i++;
-                await Task.Delay(i * 100).ConfigureAwait(false);
+                // Shutdown-aware exit: when the cancellation token has been signalled
+                // we treat any failure as terminal and demote the log level. Retrying
+                // here is futile (the DataSource is being torn down) and the inbox
+                // ownership we failed to release will be reclaimed by the durability
+                // agent on the next live node.
+                if (_settings.Cancellation.IsCancellationRequested)
+                {
+                    _logger.LogDebug(e,
+                        "Database operation failed during shutdown at {Uri}; exiting retry loop",
+                        Uri);
+                    return;
+                }
+
+                if (attempt >= MaxReleaseRetries)
+                {
+                    _logger.LogError(e,
+                        "Database operation at {Uri} failed after {Attempts} attempts; giving up",
+                        Uri, attempt);
+                    return;
+                }
+
+                _logger.LogError(e,
+                    "Unexpected failure at {Uri} (attempt {Attempt}/{Max})",
+                    Uri, attempt, MaxReleaseRetries);
+
+                try
+                {
+                    await Task.Delay(attempt * 100, _settings.Cancellation).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Cancellation fired while we were backing off — exit cleanly
+                    // instead of throwing out of a best-effort cleanup path.
+                    return;
+                }
             }
         }
     }
@@ -548,7 +679,91 @@ public class DurableReceiver : ILocalQueue, IChannelCallback, ISupportNativeSche
             throw new OperationCanceledException();
         }
 
+        // GH-3680. MarkReceived has to happen BEFORE the latch check, not after it. It is what stamps
+        // Status = Incoming, Destination (persisted as received_at) and Listener onto the envelope. The
+        // latched branch below persists the envelope to the inbox as a safety net, so skipping MarkReceived
+        // wrote rows with the default Status of 'Outgoing' and a null received_at -- invisible to
+        // CheckRecoverableIncomingMessagesOperation (which filters on Status = 'Incoming') and to
+        // LoadPageOfGloballyOwnedIncomingAsync (which filters on received_at), i.e. permanently orphaned.
+        // A null Listener also meant the latched branch silently skipped the defer back to the broker, so
+        // nothing else was going to redeliver them either. That is real message loss under a *durable*
+        // inbox whenever a circuit breaker trip latches the receiver mid-flight.
         foreach (var envelope in envelopes) envelope.MarkReceived(listener, now, _settings, _endpoint.WireTap);
+
+        // A latched receiver must apply the full single-envelope semantics (persist as
+        // owner 0 + defer back to the listener), so route through the one-at-a-time path
+        // which already implements them (GH-3492).
+        if (_latched)
+        {
+            foreach (var envelope in envelopes) await _receivingOne.PostAsync(envelope).ConfigureAwait(false);
+            return;
+        }
+
+        // Per-envelope guards that the single-envelope path (receiveOneAsync) has always
+        // applied but this batch path historically skipped (GH-3492): serializer unwrap
+        // (MassTransit-style interop), missing id/message-type dead-lettering, and expiry.
+        // Envelopes that fail a guard are handled individually and drop out of the batch.
+        var survivors = new List<Envelope>(envelopes.Length);
+        foreach (var envelope in envelopes)
+        {
+            if (ShouldPersistBeforeProcessing && !envelope.IsFromLocalDurableQueue())
+            {
+                try
+                {
+                    envelope.Serializer?.UnwrapEnvelopeIfNecessary(envelope);
+                }
+                catch (Exception e)
+                {
+                    _logger.LogInformation(e,
+                        "Failed to unwrap metadata for Envelope {Id} received at durable {Destination}. Moving to dead letter queue",
+                        envelope.Id, envelope.Destination);
+
+                    if (envelope.Id == Guid.Empty)
+                    {
+                        envelope.Id = Envelope.IdGenerator();
+                    }
+
+                    envelope.MessageType ??= $"unknown/{e.GetType().Name}";
+                    envelope.Failure = e;
+                    await _moveToErrors.PostAsync(envelope).ConfigureAwait(false);
+                    await _completeBlock.PostAsync(envelope).ConfigureAwait(false);
+                    continue;
+                }
+
+                if (envelope.Id == Guid.Empty)
+                {
+                    envelope.Id = Envelope.IdGenerator();
+                }
+
+                if (envelope.MessageType.IsEmpty())
+                {
+                    _logger.LogInformation(
+                        "Empty or missing message type name for Envelope {Id} received at durable {Destination}. Moving to dead letter queue",
+                        envelope.Id, envelope.Destination);
+                    await _moveToErrors.PostAsync(envelope).ConfigureAwait(false);
+                    await _completeBlock.PostAsync(envelope).ConfigureAwait(false);
+                    continue;
+                }
+            }
+
+            if (envelope.IsExpired())
+            {
+                await _completeBlock.PostAsync(envelope).ConfigureAwait(false);
+                continue;
+            }
+
+            survivors.Add(envelope);
+        }
+
+        if (survivors.Count == 0)
+        {
+            return;
+        }
+
+        if (survivors.Count != envelopes.Length)
+        {
+            envelopes = survivors.ToArray();
+        }
 
         var batchSucceeded = false;
         if (ShouldPersistBeforeProcessing)
@@ -556,13 +771,25 @@ public class DurableReceiver : ILocalQueue, IChannelCallback, ISupportNativeSche
             try
             {
                 assignAncillaryStoreIfNeeded(envelopes);
-                await _inbox.StoreIncomingAsync(envelopes);
+                await _inbox.StoreIncomingAsync(envelopes).ConfigureAwait(false);
                 foreach (var envelope in envelopes)
                 {
                     envelope.WasPersistedInInbox = true;
                 }
                 
                 batchSucceeded = true;
+            }
+            catch (DuplicateIncomingEnvelopeException)
+            {
+                // The batch contained at least one duplicate. We cannot trust which
+                // envelopes were actually persisted (some drivers autocommit per
+                // statement on multi-statement batches), so we re-attempt every
+                // envelope through the per-envelope path. The single-envelope
+                // StoreIncomingAsync correctly distinguishes fresh inserts from
+                // duplicates: fresh ones get persisted and pipelined, duplicates
+                // throw and are completed at the listener via
+                // handleDuplicateIncomingEnvelope. Do NOT pause the listener.
+                foreach (var envelope in envelopes) await _receivingOne.PostAsync(envelope).ConfigureAwait(false);
             }
             catch (Exception e)
             {
@@ -571,7 +798,7 @@ public class DurableReceiver : ILocalQueue, IChannelCallback, ISupportNativeSche
 
                 // Use finer grained retries on one envelope at a time, and this will also deal with
                 // duplicate detection
-                foreach (var envelope in envelopes) await _receivingOne.PostAsync(envelope);
+                foreach (var envelope in envelopes) await _receivingOne.PostAsync(envelope).ConfigureAwait(false);
             }
         }
         else
@@ -583,8 +810,8 @@ public class DurableReceiver : ILocalQueue, IChannelCallback, ISupportNativeSche
         {
             foreach (var message in envelopes)
             {
-                await EnqueueAsync(message);
-                await _completeBlock.PostAsync(message);
+                await EnqueueAsync(message).ConfigureAwait(false);
+                await _completeBlock.PostAsync(message).ConfigureAwait(false);
             }
         }
 

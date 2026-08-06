@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using JasperFx;
 using JasperFx.CodeGeneration;
@@ -28,7 +29,7 @@ public class BoundaryModelAttribute : WolverineParameterAttribute, IDataRequirem
     private OnMissing? _onMissing;
 
     public bool Required { get; set; }
-    public string MissingMessage { get; set; }
+    public string MissingMessage { get; set; } = null!;
 
     public OnMissing OnMissing
     {
@@ -36,6 +37,12 @@ public class BoundaryModelAttribute : WolverineParameterAttribute, IDataRequirem
         set => _onMissing = value;
     }
 
+    [UnconditionalSuppressMessage("Trimming", "IL2062",
+        Justification = "aggregateType originates from parameter.ParameterType; AOT consumers preserve it via DynamicDependency / source-generator registration.")]
+    [UnconditionalSuppressMessage("Trimming", "IL2065",
+        Justification = "MakeGenericType closes IEventBoundary<TAggregate>; GetProperty(nameof(IEventBoundary.Aggregate)) is statically referenced via nameof and the closed-generic IEventBoundary<TAggregate> preserves the Aggregate property by virtue of being instantiated by codegen. AOT consumers pre-generate via TypeLoadMode.Static.")]
+    [UnconditionalSuppressMessage("AOT", "IL3050",
+        Justification = "MakeGenericType closes IEventBoundary<TAggregate> at codegen time; AOT consumers pre-generate via TypeLoadMode.Static.")]
     public override Variable Modify(IChain chain, ParameterInfo parameter, IServiceContainer container,
         GenerationRules rules)
     {
@@ -73,8 +80,13 @@ public class BoundaryModelAttribute : WolverineParameterAttribute, IDataRequirem
 
         new PolecatPersistenceFrameProvider().ApplyTransactionSupport(chain, container);
 
-        var loader = new LoadBoundaryFrame(aggregateType);
-        chain.Middleware.Add(loader);
+        var loader = chain.Middleware.OfType<LoadBoundaryFrame>()
+            .FirstOrDefault(f => f.AggregateType == aggregateType);
+        if (loader == null)
+        {
+            loader = new LoadBoundaryFrame(aggregateType);
+            chain.Middleware.Add(loader);
+        }
 
         var boundary = loader.Boundary;
 
@@ -101,14 +113,14 @@ public class BoundaryModelAttribute : WolverineParameterAttribute, IDataRequirem
         if (parameter.ParameterType == aggregateType || parameter.ParameterType.IsNullable() &&
             parameter.ParameterType.GetInnerTypeFromNullable() == aggregateType)
         {
-            firstCall.TrySetArgument(parameter.Name, aggregateVariable);
+            firstCall.TrySetArgument(parameter.Name!, aggregateVariable);
         }
 
-        AggregateHandling.StoreDeferredMiddlewareVariable(chain, parameter.Name, aggregateVariable);
+        AggregateHandling.StoreDeferredMiddlewareVariable(chain, parameter.Name!, aggregateVariable);
 
         foreach (var methodCall in chain.Middleware.OfType<MethodCall>())
         {
-            if (!methodCall.TrySetArgument(parameter.Name, aggregateVariable))
+            if (!methodCall.TrySetArgument(parameter.Name!, aggregateVariable))
             {
                 methodCall.TrySetArgument(aggregateVariable);
             }

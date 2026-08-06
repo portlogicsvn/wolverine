@@ -11,7 +11,6 @@ public class FakeEndpoint
     }
 
     #region sample_override_operation_id_for_openapi
-
     // Override the operation id within the generated OpenAPI
     // metadata
     [WolverineGet("/fake/hello/async", OperationId = "OverriddenId")]
@@ -83,3 +82,39 @@ public static class NoDependencyEndpoints
 }
 
 public class BigResponse;
+
+#region sample_openapi_summary_and_description
+public static class OpenApiMetadataEndpoints
+{
+    [WolverineGet("/openapi/with-summary",
+        OperationId = "GetWithSummary",
+        Summary = "Gets a greeting with summary",
+        Description = "This endpoint returns a simple greeting and demonstrates OpenAPI summary and description support")]
+    public static string GetWithSummary()
+    {
+        return "Hello with summary";
+    }
+
+    [WolverinePost("/openapi/with-operation-id", OperationId = "CustomPostOperation")]
+    public static string PostWithOperationId(Question question)
+    {
+        return "Posted";
+    }
+
+    [WolverineGet("/openapi/default-metadata")]
+    public static string GetDefaultMetadata()
+    {
+        return "Default";
+    }
+
+    [WolverineDelete("/openapi/with-all-metadata",
+        OperationId = "DeleteWithAllMetadata",
+        Summary = "Deletes a resource",
+        Description = "Performs a delete operation with full OpenAPI metadata")]
+    public static string DeleteWithAllMetadata()
+    {
+        return "Deleted";
+    }
+}
+
+#endregion

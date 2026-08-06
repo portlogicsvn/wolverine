@@ -15,8 +15,6 @@ using Wolverine.Kafka;
 using Wolverine.Marten;
 using Wolverine.Runtime.Partitioning;
 using Xunit;
-using Xunit.Abstractions;
-
 namespace SlowTests;
 
 public class Bug_concurrency_with_global_partitioning
@@ -89,10 +87,10 @@ public class Bug_concurrency_with_global_partitioning
         // Clean up the soccer schema from previous test runs to avoid stale durable messages
         await using (var conn = new Npgsql.NpgsqlConnection(Servers.PostgresConnectionString))
         {
-            await conn.OpenAsync();
+            await conn.OpenAsync(TestContext.Current.CancellationToken);
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = "DROP SCHEMA IF EXISTS soccer CASCADE;";
-            await cmd.ExecuteNonQueryAsync();
+            await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         }
 
         var tracker = new ExceptionTracker();
@@ -100,16 +98,17 @@ public class Bug_concurrency_with_global_partitioning
 
         // Stand up 3 SampleService hosts to simulate a multi-node cluster.
         // Start the first host alone so it creates the Marten schema without DDL races.
-        using var sampleService1 = await BuildSampleServiceHost("SampleService1", tracker, destinationTracker).StartAsync();
-        using var sampleService2 = await BuildSampleServiceHost("SampleService2", tracker, destinationTracker).StartAsync();
-        using var sampleService3 = await BuildSampleServiceHost("SampleService3", tracker, destinationTracker).StartAsync();
+        using var sampleService1 = await BuildSampleServiceHost("SampleService1", tracker, destinationTracker).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
+        using var sampleService2 = await BuildSampleServiceHost("SampleService2", tracker, destinationTracker).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
+        using var sampleService3 = await BuildSampleServiceHost("SampleService3", tracker, destinationTracker).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var hosts = new[] { sampleService1, sampleService2, sampleService3 };
 
         // Allow Kafka consumer group rebalancing to stabilize before sending messages
-        await Task.Delay(15.Seconds());
+        await Task.Delay(15.Seconds(), TestContext.Current.CancellationToken);
 
-        var cts = new CancellationTokenSource(30.Seconds());
+        using var cts = new CancellationTokenSource(30.Seconds());
+        cts.CancelAfter(30.Seconds());
 
         // Simulate 6 institutions publishing concurrently, spreading across hosts
         var institutionIds = Enumerable.Range(1, 6)
@@ -161,7 +160,7 @@ public class Bug_concurrency_with_global_partitioning
         await Task.WhenAll(tasks);
 
         // Give time for in-flight messages to finish processing
-        await Task.Delay(10.Seconds());
+        await Task.Delay(10.Seconds(), TestContext.Current.CancellationToken);
 
         // === Duplicate Envelope.Id analysis ===
         Console.WriteLine("=== Duplicate Envelope.Id analysis ===");
@@ -311,38 +310,37 @@ public class ExceptionTracker : ILoggerProvider
 
 public class SoccerEventTypeOne
 {
-    public string Id { get; set; }
-    public string PersonId { get; set; }
-    public string Name { get; set; }
-    public int Age { get; set; }
+    public required string Id { get; init; }
+    public required string PersonId { get; init; }
+    public required string Name { get; init; }
+    public required int Age { get; init; }
 }
 
 public class SoccerEventTypeTwo
 {
-    public string Id { get; set; }
-    public string PersonId { get; set; }
-    public string Occupation { get; set; }
+    public required string Id { get; init; }
+    public required string PersonId { get; init; }
+    public required string Occupation { get; init; }
 }
 
-public class SoccerInternalEventTypeOne
+public record SoccerInternalEventTypeOne
 {
-    public string Id { get; set; }
-    public string PersonId { get; set; }
-    public DateTime Date { get; set; }
+    public required string Id { get; init; }
+    public required string PersonId { get; init; }
+    public required DateTime Date { get; init; }
 }
 
 public class SoccerExternalEventTypeOne
 {
-    public string Id { get; set; }
+    public required string Id { get; init; }
 }
 
 #endregion
 
 #region Aggregate
-
 public class SoccerAggregate
 {
-    public string Id { get; set; }
+    public string Id { get; set; } = string.Empty;
     public Dictionary<string, string> NamesById { get; set; } = [];
     public Dictionary<string, string> OccupationsByName { get; set; } = [];
 
@@ -367,7 +365,6 @@ public class SoccerAggregate
 #endregion
 
 #region Handlers
-
 [AggregateHandler]
 public static class SoccerEventTypeOneHandler
 {

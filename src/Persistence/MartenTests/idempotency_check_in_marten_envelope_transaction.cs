@@ -21,11 +21,13 @@ public class idempotency_check_in_marten_envelope_transaction : IAsyncLifetime
 {
     private IHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery().IncludeType(typeof(MaybeIdempotentHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Services.AddMarten(m =>
                 {
                     m.Connection(Servers.PostgresConnectionString);
@@ -36,9 +38,10 @@ public class idempotency_check_in_marten_envelope_transaction : IAsyncLifetime
         await _host.RebuildAllEnvelopeStorageAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _host.StopAsync();
+        _host.Dispose();
     }
 
     [Fact]
@@ -99,6 +102,8 @@ public class idempotency_with_inline_or_buffered_endpoints_end_to_end
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery().IncludeType(typeof(MaybeIdempotentHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 // TODO -- make this the default
                 opts.OnException<DuplicateIncomingEnvelopeException>().Discard();
                 opts.Policies.AutoApplyTransactions(idempotency);
@@ -109,7 +114,7 @@ public class idempotency_with_inline_or_buffered_endpoints_end_to_end
                     m.Connection(Servers.PostgresConnectionString);
                     m.DatabaseSchemaName = "idempotent";
                 }).IntegrateWithWolverine();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var messageId = Guid.NewGuid();
         var tracked1 = await host.SendMessageAndWaitAsync(new MaybeIdempotent(messageId));
@@ -140,6 +145,8 @@ public class idempotency_with_inline_or_buffered_endpoints_end_to_end
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery().IncludeType(typeof(MaybeIdempotentHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 // TODO -- make this the default
                 opts.OnException<DuplicateIncomingEnvelopeException>().Discard();
                 opts.Policies.AutoApplyTransactions(idempotency);
@@ -152,7 +159,7 @@ public class idempotency_with_inline_or_buffered_endpoints_end_to_end
                     m.Connection(Servers.PostgresConnectionString);
                     m.DatabaseSchemaName = "idempotent";
                 }).IntegrateWithWolverine();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var messageId = Guid.NewGuid();
         var tracked1 = await host.SendMessageAndWaitAsync(new MaybeIdempotent(messageId));

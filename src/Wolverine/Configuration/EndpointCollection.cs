@@ -48,6 +48,17 @@ public interface IEndpointCollection : IAsyncDisposable
     Task StopListenerAsync(Endpoint endpoint, CancellationToken cancellationToken);
 
     IListenerCircuit? FindListenerCircuit(Uri address);
+
+    /// <summary>
+    /// Is the listening endpoint at this address scoped to a single node in the cluster -- i.e.
+    /// <see cref="ListenerScope.Exclusive"/> or <see cref="ListenerScope.PinnedToLeader"/> rather than
+    /// <see cref="ListenerScope.CompetingConsumers"/>? Inbox recovery for these endpoints is owned by the
+    /// node hosting the listener itself, *not* by the database's durability agent. See GH-3590.
+    /// </summary>
+    bool IsSingleNodeListener(Uri address)
+    {
+        return EndpointFor(address) is { ListenerScope: not ListenerScope.CompetingConsumers };
+    }
 }
 
 public class EndpointCollection : IEndpointCollection
@@ -135,6 +146,7 @@ public class EndpointCollection : IEndpointCollection
 
         foreach (var listener in _listeners.Values)
         {
+            var loopHealth = receiveLoopHealthOf(listener);
             snapshots.Add(new EndpointHealthSnapshot(
                 Uri: listener.Uri,
                 EndpointName: listener.Endpoint.EndpointName,
@@ -144,7 +156,10 @@ public class EndpointCollection : IEndpointCollection
                 LastQueueActivityAt: listener.LastQueueActivityAt,
                 LastMessageSentAt: null,
                 SenderLatched: false,
-                BufferLimit: listener.Endpoint.BufferingLimits?.Maximum));
+                BufferLimit: listener.Endpoint.BufferingLimits?.Maximum,
+                ConnectionState: connectionStateOf(listener),
+                ReceiveLoopStatus: loopHealth?.ReceiveLoopStatus ?? ReceiveLoopStatus.Unknown,
+                LastReceiveLoopActivityAt: loopHealth?.LastReceiveLoopActivityAt));
         }
 
         foreach (var sender in _senders.Enumerate().Select(x => x.Value))
@@ -158,10 +173,67 @@ public class EndpointCollection : IEndpointCollection
                 LastQueueActivityAt: null,
                 LastMessageSentAt: sender.LastMessageSentAt,
                 SenderLatched: sender.Latched,
-                BufferLimit: null));
+                BufferLimit: null,
+                ConnectionState: connectionStateOf(sender)));
         }
 
         return snapshots;
+    }
+
+    // Resolve the background receive-loop health for a listener. The agent itself may report it, otherwise reach
+    // through to the IListener it owns. Listeners with no managed loop (push transports, local queues) report null.
+    private static IReportReceiveLoopHealth? receiveLoopHealthOf(IListeningAgent agent)
+    {
+        if (agent is IReportReceiveLoopHealth reporter)
+        {
+            return reporter;
+        }
+
+        if (agent is ListeningAgent { Listener: IReportReceiveLoopHealth listenerReporter })
+        {
+            return listenerReporter;
+        }
+
+        return null;
+    }
+
+    // Resolve the underlying transport channel/connection state for a listener. The agent itself may report it
+    // (IReportConnectionState), otherwise reach through to the IListener it owns. Transports without a connection
+    // notion fall through to Unknown.
+    private static TransportConnectionState connectionStateOf(IListeningAgent agent)
+    {
+        if (agent is IReportConnectionState reporter)
+        {
+            return reporter.ConnectionState;
+        }
+
+        if (agent is ListeningAgent { Listener: IReportConnectionState listenerReporter })
+        {
+            return listenerReporter.ConnectionState;
+        }
+
+        return TransportConnectionState.Unknown;
+    }
+
+    // Resolve the underlying transport channel/connection state for a sending agent. The agent itself may report it,
+    // otherwise reach through to the ISender it wraps (SendingAgent / InlineSendingAgent both expose Sender).
+    private static TransportConnectionState connectionStateOf(ISendingAgent agent)
+    {
+        if (agent is IReportConnectionState reporter)
+        {
+            return reporter.ConnectionState;
+        }
+
+        var sender = agent switch
+        {
+            SendingAgent sa => sa.Sender,
+            InlineSendingAgent ia => ia.Sender,
+            _ => null
+        };
+
+        return sender is IReportConnectionState senderReporter
+            ? senderReporter.ConnectionState
+            : TransportConnectionState.Unknown;
     }
 
     public ISendingAgent GetOrBuildSendingAgent(Uri address, Action<Endpoint>? configureNewEndpoint = null)
@@ -298,6 +370,23 @@ public class EndpointCollection : IEndpointCollection
         }
     }
 
+    private ImHashMap<Uri, bool> _singleNodeListeners = ImHashMap<Uri, bool>.Empty;
+
+    public bool IsSingleNodeListener(Uri address)
+    {
+        // Cached because this is asked on every durability agent recovery pass, once per distinct
+        // received_at destination, and EndpointFor() is a linear scan across every transport.
+        if (_singleNodeListeners.TryFind(address, out var isSingleNode))
+        {
+            return isSingleNode;
+        }
+
+        isSingleNode = EndpointFor(address) is { ListenerScope: not ListenerScope.CompetingConsumers };
+        _singleNodeListeners = _singleNodeListeners.AddOrUpdate(address, isSingleNode);
+
+        return isSingleNode;
+    }
+
     public IListenerCircuit? FindListenerCircuit(Uri address)
     {
         if (address.Scheme == TransportConstants.Local)
@@ -364,17 +453,17 @@ public class EndpointCollection : IEndpointCollection
                     : _runtime.Storage.Outbox;
 
                 return new DurableSendingAgent(sender, _options.Durability,
-                    _runtime.LoggerFactory.CreateLogger<DurableSendingAgent>(), _runtime.MessageTracking,
+                    _runtime.LoggerFactory.CreateLogger<DurableSendingAgent>(), _runtime.MessageTrackingFor(endpoint),
                     outbox, endpoint, _runtime, sendingPolicies);
 
             case EndpointMode.BufferedInMemory:
                 return new BufferedSendingAgent(_runtime.LoggerFactory.CreateLogger<BufferedSendingAgent>(),
-                    _runtime.MessageTracking, sender, _runtime.DurabilitySettings,
+                    _runtime.MessageTrackingFor(endpoint), sender, _runtime.DurabilitySettings,
                     endpoint, _runtime, sendingPolicies);
 
             case EndpointMode.Inline:
                 return new InlineSendingAgent(_runtime.LoggerFactory.CreateLogger<InlineSendingAgent>(), sender,
-                    endpoint, _runtime.MessageTracking,
+                    endpoint, _runtime.MessageTrackingFor(endpoint),
                     _runtime.DurabilitySettings, _runtime, sendingPolicies);
         }
 

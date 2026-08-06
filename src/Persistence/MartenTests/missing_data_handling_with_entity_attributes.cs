@@ -16,11 +16,15 @@ public class missing_data_handling_with_entity_attributes : IAsyncLifetime
 {
     private IHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery()
+                    .IncludeType(typeof(GuidThingHandler))
+                    .IncludeType(typeof(ThingHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Policies.AutoApplyTransactions();
                 opts.Services.AddMarten(m =>
                 {
@@ -31,9 +35,10 @@ public class missing_data_handling_with_entity_attributes : IAsyncLifetime
             }).StartAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _host.StopAsync();
+        _host.Dispose();
     }
 
     [Fact]
@@ -58,7 +63,7 @@ public class missing_data_handling_with_entity_attributes : IAsyncLifetime
     public async Task end_to_end_with_good_data()
     {
         var thing = new Thing();
-        await _host.DocumentStore().BulkInsertDocumentsAsync([thing]);
+        await _host.DocumentStore().BulkInsertDocumentsAsync([thing], cancellation: TestContext.Current.CancellationToken);
         
         var tracked = await _host.InvokeMessageAndWaitAsync(new UseThing1(thing.Id));
         
@@ -114,7 +119,7 @@ public class missing_data_handling_with_entity_attributes : IAsyncLifetime
     public async Task end_to_end_with_guid_identity_entity()
     {
         var guidThing = new GuidThing();
-        await _host.DocumentStore().BulkInsertDocumentsAsync([guidThing]);
+        await _host.DocumentStore().BulkInsertDocumentsAsync([guidThing], cancellation: TestContext.Current.CancellationToken);
 
         var tracked = await _host.InvokeMessageAndWaitAsync(new UseGuidThing1(guidThing.Id));
 

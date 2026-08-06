@@ -40,7 +40,7 @@ public class dynamically_spin_up_new_durability_agents_for_new_tenant_databases 
         return builder.ConnectionString;
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         await using var conn = new NpgsqlConnection(Servers.PostgresConnectionString);
         await conn.OpenAsync();
@@ -59,6 +59,8 @@ public class dynamically_spin_up_new_durability_agents_for_new_tenant_databases 
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery().IncludeType(typeof(PeristDocHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 // This is too extreme for real usage, but helps tests to run faster
                 opts.Durability.NodeReassignmentPollingTime = 1.Seconds();
                 opts.Durability.HealthCheckPollingTime = 1.Seconds();
@@ -93,7 +95,7 @@ public class dynamically_spin_up_new_durability_agents_for_new_tenant_databases 
         await tenancy.ClearAllDatabaseRecordsAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _host.StopAsync();
         _host.Dispose();
@@ -139,7 +141,7 @@ public class dynamically_spin_up_new_durability_agents_for_new_tenant_databases 
 
         var store = _host.Services.GetRequiredService<IDocumentStore>();
         using var session = store.LightweightSession("tenant1");
-        var doc = await session.LoadAsync<PersistedDoc>(command.Id);
+        var doc = await session.LoadAsync<PersistedDoc>(command.Id, TestContext.Current.CancellationToken);
 
         doc.ShouldNotBeNull();
     }
@@ -151,6 +153,8 @@ public class dynamically_spin_up_new_durability_agents_for_new_tenant_databases 
         using var otherHost = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery().IncludeType(typeof(PeristDocHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 // This is too extreme for real usage, but helps tests to run faster
                 opts.Durability.NodeReassignmentPollingTime = 1.Seconds();
                 opts.Durability.HealthCheckPollingTime = 1.Seconds();
@@ -177,7 +181,7 @@ public class dynamically_spin_up_new_durability_agents_for_new_tenant_databases 
                     // the configured tenant databases on startup
                     .ApplyAllDatabaseChangesOnStartup();
             })
-            .StartAsync();
+            .StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var tenancy = (MasterTableTenancy)theStore.Options.Tenancy;
         await tenancy.AddDatabaseRecordAsync("tenant1", tenant1ConnectionString);
@@ -189,7 +193,7 @@ public class dynamically_spin_up_new_durability_agents_for_new_tenant_databases 
 
         var store = otherHost.Services.GetRequiredService<IDocumentStore>();
         using var session = store.LightweightSession("tenant1");
-        var doc = await session.LoadAsync<PersistedDoc>(command.Id);
+        var doc = await session.LoadAsync<PersistedDoc>(command.Id, TestContext.Current.CancellationToken);
 
         doc.ShouldNotBeNull();
     }

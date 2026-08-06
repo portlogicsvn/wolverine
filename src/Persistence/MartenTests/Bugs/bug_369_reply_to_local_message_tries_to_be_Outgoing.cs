@@ -17,13 +17,17 @@ public class bug_369_reply_to_local_message_tries_to_be_Outgoing : PostgresqlCon
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery()
+                    .IncludeType(typeof(PingHandler))
+                    .IncludeType(typeof(PongHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Services.AddMarten(Servers.PostgresConnectionString)
                     .IntegrateWithWolverine();
 
                 opts.Services.AddResourceSetupOnStartup();
 
                 opts.Policies.UseDurableInboxOnAllListeners();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var tracked = await host.SendMessageAndWaitAsync(new Ping());
 

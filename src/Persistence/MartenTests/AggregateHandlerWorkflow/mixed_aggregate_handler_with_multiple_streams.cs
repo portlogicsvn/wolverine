@@ -1,6 +1,8 @@
 using IntegrationTests;
 using Marten;
+using JasperFx.Events;
 using Marten.Events;
+using JasperFx.Events.Projections;
 using Marten.Events.Projections;
 using Microsoft.Extensions.Hosting;
 using Shouldly;
@@ -18,6 +20,8 @@ public class mixed_aggregate_handler_with_multiple_streams
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery().IncludeType(typeof(MakePurchaseHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 MartenServiceCollectionExtensions.AddMarten(opts.Services, m =>
                 {
                     m.Connection(Servers.PostgresConnectionString);
@@ -26,12 +30,12 @@ public class mixed_aggregate_handler_with_multiple_streams
                     m.Projections.Snapshot<XAccount>(SnapshotLifecycle.Inline);
                     m.Projections.Snapshot<Inventory>(SnapshotLifecycle.Inline);
                 }).IntegrateWithWolverine();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         using var session = host.DocumentStore().LightweightSession();
         var inventoryId = session.Events.StartStream<Inventory>(new InventoryStarted("XFX", 100, 10)).Id;
         var accountId = session.Events.StartStream<XAccount>(new XAccountOpened(2000)).Id;
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         var (tracked, account) = await host.InvokeMessageAndWaitAsync<XAccount>(new MakePurchase(accountId, inventoryId, 30));
         account!.Balance.ShouldBe(1700);
@@ -83,8 +87,7 @@ public class Inventory
 
 public record MakePurchase(Guid XAccountId, Guid InventoryId, int Number);
 
-#region sample_MakePurchaseHandler
-
+#region sample_makepurchasehandler
 public static class MakePurchaseHandler
 {
     // See how we used the generic version

@@ -10,6 +10,7 @@ using PolecatTests.Distribution.TripDomain;
 using Shouldly;
 using Wolverine.Configuration.Capabilities;
 using Wolverine.Polecat.Distribution;
+using Wolverine.Runtime.Agents;
 
 namespace PolecatTests.Distribution;
 
@@ -32,7 +33,11 @@ public class subscription_descriptor_agent_uris
         };
     }
 
-    [Fact]
+    // Skipped: Polecat 4.0.0-alpha.1 was built against JasperFx 2.0.0-alpha.4 and references
+    // JasperFx.Descriptors.OptionsDescription.Children, which doesn't exist in JasperFx
+    // 2.0.0-alpha.8 (the version Wolverine pins). Re-enable when Polecat publishes a 4.0.x
+    // build against a newer JasperFx alpha.
+    [Fact(Skip = "Polecat 4.0-alpha.1 MissingFieldException on JasperFx 2.0-alpha.8 OptionsDescription.Children — pending Polecat rebuild")]
     public async Task agent_uris_match_event_subscription_family_uris()
     {
         using var host = await Host.CreateDefaultBuilder()
@@ -47,7 +52,7 @@ public class subscription_descriptor_agent_uris
                     opts.Projections.Add<DayProjection>(ProjectionLifecycle.Async);
                     opts.Projections.Add<DistanceProjection>(ProjectionLifecycle.Async);
                 });
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var store = host.Services.GetRequiredService<IDocumentStore>();
         var eventStore = (IEventStore)store;
@@ -96,7 +101,7 @@ public class subscription_descriptor_agent_uris
         allAgentUris.Length.ShouldBe(3);
     }
 
-    [Fact]
+    [Fact(Skip = "Polecat 4.0-alpha.1 MissingFieldException on JasperFx 2.0-alpha.8 OptionsDescription.Children — pending Polecat rebuild")]
     public async Task agent_uris_are_empty_for_inline_projections()
     {
         using var host = await Host.CreateDefaultBuilder()
@@ -109,7 +114,7 @@ public class subscription_descriptor_agent_uris
 
                     opts.Projections.Add<TripProjection>(ProjectionLifecycle.Inline);
                 });
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var store = host.Services.GetRequiredService<IDocumentStore>();
         var eventStore = (IEventStore)store;

@@ -1,14 +1,10 @@
-using System.Diagnostics.CodeAnalysis;
-using System.Linq.Expressions;
-using System.Reflection;
-using System.Text.Json;
+using Asp.Versioning;
 using JasperFx;
 using JasperFx.CodeGeneration;
 using JasperFx.CodeGeneration.Frames;
 using JasperFx.CodeGeneration.Model;
 using JasperFx.CodeGeneration.Services;
 using JasperFx.Core;
-using Wolverine.Http.Antiforgery;
 using JasperFx.Core.Reflection;
 using JasperFx.Descriptors;
 using Microsoft.AspNetCore.Builder;
@@ -18,7 +14,13 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.AspNetCore.Routing.Patterns;
 using Microsoft.Extensions.DependencyInjection;
+using System.Diagnostics.CodeAnalysis;
+using System.Linq.Expressions;
+using System.Reflection;
+using System.Text.Json;
+using System.Text.RegularExpressions;
 using Wolverine.Configuration;
+using Wolverine.Http.Antiforgery;
 using Wolverine.Http.CodeGen;
 using Wolverine.Http.ContentNegotiation;
 using Wolverine.Http.Metadata;
@@ -30,7 +32,7 @@ using ServiceContainer = JasperFx.ServiceContainer;
 
 namespace Wolverine.Http;
 
-public partial class HttpChain : Chain<HttpChain, ModifyHttpChainAttribute>, ICodeFile, IEndpointNameMetadata, IEndpointSummaryMetadata, IEndpointDescriptionMetadata, IDescribeMyself
+public partial class HttpChain : Chain<HttpChain, ModifyHttpChainAttribute>, ICodeFile, IEndpointNameMetadata, IEndpointSummaryMetadata, IEndpointDescriptionMetadata, IDescribeMyself, IRoutedChain
 {
     public static bool IsValidResponseType(Type type)
     {
@@ -55,9 +57,21 @@ public partial class HttpChain : Chain<HttpChain, ModifyHttpChainAttribute>, ICo
     public static readonly Variable[] HttpContextVariables =
         Variable.VariablesForProperties<HttpContext>(HttpGraph.Context);
 
+    // Used by CloneForVersion to sanitize ApiVersion text (e.g. "2024-01-01") into a legal
+    // identifier suffix for OperationId. Compiled once; only ASCII alphanumerics survive.
+    private static readonly Regex NonAlphanumeric = new(@"[^A-Za-z0-9]", RegexOptions.Compiled);
+
     internal Variable? RequestBodyVariable { get; set; }
 
+    /// <summary>
+    /// True when the request body is optional — i.e. a nullable [FromBody] member inside an
+    /// [AsParameters] type. Drives both the runtime read (an empty body binds null instead of 400)
+    /// and the generated OpenAPI (requestBody.required = false). See GH-3135.
+    /// </summary>
+    internal bool RequestBodyIsOptional { get; set; }
+
     private string? _fileName;
+    private string? _typeNameOverride;
     private readonly List<string> _httpMethods = [];
 
     private readonly List<Variable> _routeVariables = [];
@@ -69,7 +83,10 @@ public partial class HttpChain : Chain<HttpChain, ModifyHttpChainAttribute>, ICo
     private readonly List<HttpElementVariable> _formValueVariables = [];
 
     public string OperationId { get; set; }
-    
+    public bool HasExplicitOperationId { get; private set; }
+    public string? EndpointSummary { get; set; }
+    public string? EndpointDescription { get; set; }
+
     /// <summary>
     /// This may be overridden by some IResponseAware policies in place of the first
     /// create variable of the method call
@@ -85,11 +102,27 @@ public partial class HttpChain : Chain<HttpChain, ModifyHttpChainAttribute>, ICo
 
     // Make the assumption that the route argument has to match the parameter name
     private GeneratedType? _generatedType;
+
+    [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)]
     private Type? _handlerType;
     private string _description;
     private Type? _requestType;
 
-    public HttpChain(MethodCall method, HttpGraph parent)
+    public HttpChain(MethodCall method, HttpGraph parent) : this(method, parent, null, null)
+    {
+    }
+
+    /// <summary>
+    ///     GH-3646: routes supplied explicitly rather than by a <see cref="WolverineHttpMethodAttribute" /> —
+    ///     <see cref="HttpGraph.Add" />, and through it <c>PublishMessage&lt;T&gt;</c> / <c>SendMessage&lt;T&gt;</c> —
+    ///     have to be mapped from INSIDE the constructor, not bolted on after it. <see cref="MapToRoute" /> is what
+    ///     runs the parameter strategies that assign <see cref="RequestType" />, <see cref="IsFormData" /> and the
+    ///     HTTP methods, and <see cref="applyMetadata" /> is the constructor's last statement. Mapping the route
+    ///     afterwards left metadata built from an unassigned request type: the endpoint advertised no
+    ///     <c>IAcceptsMetadata</c> at all and carried an empty <c>HttpMethodMetadata</c>, even though the chain
+    ///     itself knew the request type perfectly well.
+    /// </summary>
+    internal HttpChain(MethodCall method, HttpGraph parent, string? httpMethod, string? url)
     {
         _description = method.ToString();
         _parent = parent ?? throw new ArgumentNullException(nameof(parent));
@@ -113,6 +146,7 @@ public partial class HttpChain : Chain<HttpChain, ModifyHttpChainAttribute>, ICo
 
         if (method.Method.TryGetAttribute<WolverineHttpMethodAttribute>(out var att))
         {
+            _typeNameOverride = att.TypeName;
             MapToRoute(att.HttpMethod, att.Template, att.Order);
             if (att.Name.IsNotEmpty())
             {
@@ -127,7 +161,25 @@ public partial class HttpChain : Chain<HttpChain, ModifyHttpChainAttribute>, ICo
             if (att.OperationId.IsNotEmpty())
             {
                 OperationId = att.OperationId;
+                HasExplicitOperationId = true;
             }
+
+            if (att.Summary.IsNotEmpty())
+            {
+                EndpointSummary = att.Summary;
+            }
+
+            if (att.Description.IsNotEmpty())
+            {
+                EndpointDescription = att.Description;
+            }
+        }
+
+        // Applied after the attribute so an explicit route still wins, exactly as it did when HttpGraph.Add
+        // called MapToRoute() on the constructed chain. See GH-3646.
+        if (httpMethod != null && url != null)
+        {
+            MapToRoute(httpMethod, url);
         }
 
         OperationId ??= $"{Method.HandlerType.FullNameInCode()}.{Method.Method.Name}";
@@ -211,6 +263,17 @@ public partial class HttpChain : Chain<HttpChain, ModifyHttpChainAttribute>, ICo
         RequestType ??= typeof(void);
     }
 
+    /// <summary>
+    /// Append a deterministic suffix to the generated C# type name so two routes that would otherwise
+    /// derive the same identifier (e.g. "/a$b" and "/a-b" both sanitizing to "a_b") stay unique. Called
+    /// by <see cref="HttpGraph"/> only for chains whose generated name actually collides.
+    /// </summary>
+    internal void DisambiguateTypeName(string suffix)
+    {
+        _fileName = $"{_fileName}_{suffix}";
+        _description = _fileName;
+    }
+
     [IgnoreDescription]
     public RoutePattern? RoutePattern { get; internal set; }
 
@@ -235,6 +298,88 @@ public partial class HttpChain : Chain<HttpChain, ModifyHttpChainAttribute>, ICo
     /// Required TenancyMode for this http chain
     /// </summary>
     public TenancyMode? TenancyMode { get; set; }
+
+    /// <summary>API version declared for this endpoint via [ApiVersion] or fluent configuration. Null when the endpoint is version-neutral.</summary>
+    public ApiVersion? ApiVersion { get; set; }
+
+    /// <summary>
+    /// True when this endpoint has been explicitly marked version-neutral via
+    /// <see cref="Asp.Versioning.ApiVersionNeutralAttribute"/>. Neutral chains keep their declared
+    /// route, are skipped by version-aware route rewriting, duplicate detection on the version axis,
+    /// and response-header emission, and satisfy <see cref="ApiVersioning.UnversionedPolicy.RequireExplicit"/>.
+    /// </summary>
+    public bool IsApiVersionNeutral { get; set; }
+
+    /// <summary>Sunset policy for this endpoint's API version. Populated by configuration during app startup.</summary>
+    public SunsetPolicy? SunsetPolicy { get; set; }
+
+    /// <summary>Deprecation policy for this endpoint's API version. Populated by configuration during app startup.</summary>
+    public DeprecationPolicy? DeprecationPolicy { get; set; }
+
+    /// <summary>Fluent helper to declare an API version on this chain. Returns this chain.</summary>
+    public HttpChain HasApiVersion(ApiVersion version)
+    {
+        ApiVersion = version;
+        return this;
+    }
+
+    /// <summary>
+    /// Builds a fresh <see cref="HttpChain"/> from the same handler method so it can serve a
+    /// distinct API version. The clone re-runs the standard ctor pipeline (attributes, configure
+    /// methods, parameter matching, implied middleware), so attribute-driven policies — auth,
+    /// fluent validation, before/after middleware, cascading messages — are reapplied per version.
+    /// The clone's <see cref="ApiVersion"/> is set to <paramref name="version"/> and its
+    /// <see cref="DeprecationPolicy"/> is set when <paramref name="isDeprecated"/> is true.
+    /// </summary>
+    /// <remarks>
+    /// Used by multi-version expansion at bootstrap. Expansion runs before any policy in the
+    /// HTTP pipeline so middleware, route prefix, and downstream policies are applied to clones
+    /// uniformly with the source chain.
+    /// </remarks>
+    internal HttpChain CloneForVersion(ApiVersion version, bool isDeprecated)
+    {
+        // Each clone needs its own MethodCall so JasperFx codegen can wire each handler frame
+        // independently. Re-using the source MethodCall makes the second clone's codegen throw
+        // "Frame chain is being re-arranged" when JasperFx tries to set Next on a frame that's
+        // already chained from the first clone.
+        var clonedMethodCall = new MethodCall(Method.HandlerType, Method.Method);
+        var clone = new HttpChain(clonedMethodCall, _parent)
+        {
+            ServiceProviderSource = ServiceProviderSource,
+            ApiVersion = version
+        };
+
+        // Multi-version expansion produces N chains sharing the same handler method, so the
+        // ctor-derived OperationId collides across clones. Suffix it with the version to keep
+        // ASP.NET Core's "endpoint names must be globally unique" invariant intact.
+        // Sanitize by replacing every non-alphanumeric character so date-based versions like
+        // 2024-01-01 still produce a legal identifier (2024_01_01) instead of leaking hyphens.
+        var versionSuffix = NonAlphanumeric.Replace(version.ToString(), "_");
+        clone.OperationId = $"{clone.OperationId}_v{versionSuffix}";
+
+        if (isDeprecated)
+        {
+            clone.DeprecationPolicy ??= new DeprecationPolicy();
+        }
+
+        // Strip [ApiVersion] / [MapToApiVersion] attributes that don't match this clone's version.
+        // applyMetadata() copied every class- and method-level attribute onto the clone, so without
+        // this pass each clone's ASP.NET Core endpoint metadata reports ALL of the multi-version
+        // declarations and OpenAPI tooling reports each clone as implementing every sibling version.
+        clone.Metadata.Add(builder =>
+        {
+            for (var i = builder.Metadata.Count - 1; i >= 0; i--)
+            {
+                var m = builder.Metadata[i];
+                if (m is ApiVersionAttribute a && !a.Versions.Contains(version))
+                    builder.Metadata.RemoveAt(i);
+                else if (m is MapToApiVersionAttribute mp && !mp.Versions.Contains(version))
+                    builder.Metadata.RemoveAt(i);
+            }
+        });
+
+        return clone;
+    }
 
     public static HttpChain ChainFor<T>(Expression<Action<T>> expression, HttpGraph? parent = null)
     {
@@ -392,15 +537,28 @@ public partial class HttpChain : Chain<HttpChain, ModifyHttpChainAttribute>, ICo
             .WithMetadata(new HttpMethodMetadata(_httpMethods));
             //.WithMetadata(Method.Method);
 
-        if (HasRequestType)
+        // Checked outside the HasRequestType branch below on purpose. On a GET a complex parameter binds
+        // from the query string rather than the body, so no Accepts metadata is produced -- but the
+        // attribute itself still reaches the endpoint metadata through the GetCustomAttributes() loop at
+        // the end of this method, and ContentTypeEndpointSelectorPolicy filters candidates on the
+        // attribute directly. The endpoint is just as unreachable, via the other policy. See GH-3648.
+        if (Method.Method.TryGetAttribute<AcceptsContentTypeAttribute>(out var declaredAccepts))
+        {
+            assertCanReceiveARequestBody(
+                $"it is decorated with [AcceptsContentType(\"{declaredAccepts.ContentTypes.Join("\", \"")}\")]");
+        }
+
+        if (HasRequestType && ReadsRequestBody)
         {
             if (IsFormData)
             {
+                assertCanReceiveARequestBody("its [AsParameters] or [FromForm] members bind from a form");
                 Metadata.Accepts(RequestType, true, "application/x-www-form-urlencoded", "multipart/form-data");
             }
-            else if (Method.Method.TryGetAttribute<AcceptsContentTypeAttribute>(out var acceptsAtt))
+            else if (declaredAccepts != null)
             {
-                Metadata.Accepts(RequestType, false, acceptsAtt.ContentTypes[0], acceptsAtt.ContentTypes[1..]);
+                Metadata.Accepts(RequestType, false, declaredAccepts.ContentTypes[0],
+                    declaredAccepts.ContentTypes[1..]);
             }
             else
             {
@@ -409,6 +567,8 @@ public partial class HttpChain : Chain<HttpChain, ModifyHttpChainAttribute>, ICo
         }
         else if (FileParameters.Any())
         {
+            assertCanReceiveARequestBody(
+                $"it takes the file parameter '{FileParameters[0].Name}', which is read from a form");
             Metadata.Accepts(typeof(IFormFile), true, "application/x-www-form-urlencoded", "multipart/form-data");
         }
 
@@ -416,6 +576,34 @@ public partial class HttpChain : Chain<HttpChain, ModifyHttpChainAttribute>, ICo
 
         foreach (var attribute in Method.HandlerType.GetCustomAttributes()) Metadata.WithMetadata(attribute);
         foreach (var attribute in Method.Method.GetCustomAttributes()) Metadata.WithMetadata(attribute);
+    }
+
+    // GET and HEAD only. DELETE is deliberately NOT included: a request body on DELETE has no defined
+    // semantics but is not forbidden, and some APIs do rely on it -- failing those at startup would be a
+    // gratuitous break. See GH-3648.
+    private static readonly string[] BodylessHttpMethods = ["GET", "HEAD"];
+
+    /// <summary>
+    ///     Fail fast when a chain would advertise a request body on an HTTP method that cannot carry one.
+    ///     This is never a configuration anyone wants: ASP.NET Core's <c>AcceptsMatcherPolicy</c> compiles
+    ///     <c>IAcceptsMetadata</c> into content-type edges in the route matcher, so such an endpoint is
+    ///     silently dropped from candidate selection and every request to it returns a bare <b>404</b> --
+    ///     not a 415, not an error, and nothing is logged. That is what made GH-3591/GH-3630 so hard to
+    ///     diagnose, and the endpoint is unreachable either way. See GH-3648.
+    /// </summary>
+    private void assertCanReceiveARequestBody(string why)
+    {
+        if (_httpMethods.Count == 0 || !_httpMethods.All(x => BodylessHttpMethods.Contains(x)))
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            $"HTTP endpoint {Method.HandlerType.FullNameInCode()}.{Method.Method.Name} is mapped to " +
+            $"{_httpMethods.Join("/")} {RoutePattern?.RawText}, but declares a request body because {why}. " +
+            $"A {_httpMethods.Join("/")} request carries no body, so ASP.NET Core would drop this endpoint from " +
+            "route matching entirely and every request to it would return 404. Either map it to a method that " +
+            "takes a body (POST/PUT/PATCH), or bind from the query string, route, or headers instead.");
     }
 
     private void applyAntiforgeryMetadata()
@@ -579,7 +767,8 @@ public partial class HttpChain : Chain<HttpChain, ModifyHttpChainAttribute>, ICo
                 if (RouteParameterStrategy.CanParse(inner))
                 {
                     //variable = new ParsedNullableQueryStringValue(parameterType, parameterName).Variable;
-                    variable = new ReadHttpFrame(BindingSource.QueryString, parameterType, key).Variable;
+                    variable = new ReadHttpFrame(BindingSource.QueryString, parameterType, key,
+                        rejectUnparseableValue: _parent.RejectUnparseableQueryValues).Variable;
                     variable.Name = key;
                     _querystringVariables.Add(variable);
                 }
@@ -587,14 +776,16 @@ public partial class HttpChain : Chain<HttpChain, ModifyHttpChainAttribute>, ICo
 
             if (parameterType.IsArray && RouteParameterStrategy.CanParse(parameterType.GetElementType()!))
             {
-                variable = new ParsedArrayQueryStringValue(parameterType, key).Variable;
+                variable = new ParsedArrayQueryStringValue(parameterType, key,
+                    rejectUnparseableValue: _parent.RejectUnparseableQueryValues).Variable;
                 variable.Name = key;
                 _querystringVariables.Add(variable);
             }
 
             if (ParsedCollectionQueryStringValue.CanParse(parameterType))
             {
-                variable = new ParsedCollectionQueryStringValue(parameterType, key).Variable;
+                variable = new ParsedCollectionQueryStringValue(parameterType, key,
+                    rejectUnparseableValue: _parent.RejectUnparseableQueryValues).Variable;
                 variable.Name = key;
                 _querystringVariables.Add(variable);
             }
@@ -602,7 +793,8 @@ public partial class HttpChain : Chain<HttpChain, ModifyHttpChainAttribute>, ICo
             if (RouteParameterStrategy.CanParse(parameterType))
             {
                 //variable = new ParsedQueryStringValue(parameterType, parameterName).Variable;
-                variable = new ReadHttpFrame(BindingSource.QueryString, parameterType, parameterName).Variable;
+                variable = new ReadHttpFrame(BindingSource.QueryString, parameterType, parameterName,
+                    rejectUnparseableValue: _parent.RejectUnparseableQueryValues).Variable;
                 variable.Name = key;
                 _querystringVariables.Add(variable);
             }
@@ -614,6 +806,29 @@ public partial class HttpChain : Chain<HttpChain, ModifyHttpChainAttribute>, ICo
         }
 
         return variable;
+    }
+
+    private readonly Dictionary<string, Type> _declaredRouteParameterTypes = new(StringComparer.OrdinalIgnoreCase);
+
+    IReadOnlyList<string> IRoutedChain.RouteParameterNames =>
+        RoutePattern?.Parameters.Select(x => x.Name).ToArray() ?? [];
+
+    void IRoutedChain.DeclareRouteParameterType(string routeParameterName, Type parameterType)
+    {
+        if (RoutePattern == null) return;
+        if (!RoutePattern.Parameters.Any(x => x.Name.EqualsIgnoreCase(routeParameterName))) return;
+
+        _declaredRouteParameterTypes[routeParameterName] = parameterType;
+    }
+
+    /// <summary>
+    /// The CLR type declared for a route parameter by middleware that binds it outside of the endpoint
+    /// method signature — see <see cref="IRoutedChain.DeclareRouteParameterType"/>. Only consulted when
+    /// nothing else in the chain, and no route constraint, can type the parameter. See GH-3420.
+    /// </summary>
+    private Type? declaredRouteParameterType(string routeParameterName)
+    {
+        return _declaredRouteParameterTypes.TryGetValue(routeParameterName, out var type) ? type : null;
     }
 
     public bool FindRouteVariable(ParameterInfo parameter, [NotNullWhen(true)]out Variable? variable)
@@ -664,8 +879,8 @@ public partial class HttpChain : Chain<HttpChain, ModifyHttpChainAttribute>, ICo
 
     public bool FindRouteVariable(Type variableType, string routeOrParameterName, [NotNullWhen(true)]out Variable? variable)
     {
-        var matched =
-            _routeVariables.FirstOrDefault(x => x.VariableType == variableType && x.Usage.EqualsIgnoreCase(routeOrParameterName));
+        var matched = _routeVariables.OfType<HttpElementVariable>()
+            .FirstOrDefault(x => x.VariableType == variableType && x.Name.EqualsIgnoreCase(routeOrParameterName));
         if (matched is not null)
         {
             variable = matched;
@@ -729,9 +944,21 @@ public partial class HttpChain : Chain<HttpChain, ModifyHttpChainAttribute>, ICo
         return frame.Variable;
     }
 
-    string IEndpointNameMetadata.EndpointName => ToString();
+    string IEndpointNameMetadata.EndpointName => HasExplicitOperationId ? OperationId : ToString();
 
-    string IEndpointSummaryMetadata.Summary => ToString();
+    string IEndpointSummaryMetadata.Summary => EndpointSummary ?? ToString();
+
+    /// <summary>
+    /// Sets an explicit operation ID (endpoint name) and marks it as explicit so it is used
+    /// as the endpoint name in the ASP.NET Core routing infrastructure. This is used by policies
+    /// that need to disambiguate endpoints that share the same handler method name (e.g. 
+    /// <see cref="ApiVersioning.ApiVersioningPolicy"/>).
+    /// </summary>
+    internal void SetExplicitOperationId(string operationId)
+    {
+        OperationId = operationId;
+        HasExplicitOperationId = true;
+    }
 
     public List<ParameterInfo> FileParameters { get; } = [];
 
@@ -739,6 +966,17 @@ public partial class HttpChain : Chain<HttpChain, ModifyHttpChainAttribute>, ICo
     public bool HasRequestType => RequestType != null && RequestType != typeof(void);
 
     public bool IsFormData { get; internal set; }
+
+    /// <summary>
+    ///     True when this chain actually reads a request body — a JSON body, a form, or uploaded files.
+    ///     An <c>[AsParameters]</c> type whose members all bind from the query string, route, or headers
+    ///     reads no body at all, so the chain must not advertise <c>Accepts</c> metadata for one: ASP.NET
+    ///     Core's <c>AcceptsMatcherPolicy</c> builds content-type edges into the route matcher from that
+    ///     metadata, and a request that carries no matching Content-Type is then dropped from candidate
+    ///     selection entirely — a 404, not a 415. See GH-3630.
+    /// </summary>
+    internal bool ReadsRequestBody { get; set; } = true;
+
     public Type? ComplexQueryStringType { get; set; }
 
     /// <summary>
@@ -747,6 +985,17 @@ public partial class HttpChain : Chain<HttpChain, ModifyHttpChainAttribute>, ICo
     /// FluentValidation to also validate the AsParameters type itself.
     /// </summary>
     public Type? AsParametersType { get; internal set; }
+
+    /// <summary>
+    /// The codegen variable for the object bound from an <c>[AsParameters]</c> parameter, if any.
+    /// Other middleware that searches for a value with <see cref="ValueSource.Anything"/> (notably the
+    /// Marten <c>[ReadAggregate]</c>/<c>[WriteAggregate]</c> aggregate-id resolution) reads members off
+    /// this object rather than re-using the route/query read frames that <c>AsParametersBindingFrame</c>
+    /// owns and generates inline — sharing those owned frames produces a cyclic Next reference and a
+    /// StackOverflow during code generation.
+    /// </summary>
+    public Variable? AsParametersVariable { get; internal set; }
+
     public ServiceProviderSource ServiceProviderSource { get; set; } = ServiceProviderSource.IsolatedAndScoped;
 
     internal Variable BuildJsonDeserializationVariable()

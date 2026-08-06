@@ -17,6 +17,9 @@ internal partial class TrackedSession : ITrackedSession
     private readonly IList<ITrackedCondition> _conditions = new List<ITrackedCondition>();
 
     private Cache<Guid, EnvelopeHistory> _envelopes = new(id => new EnvelopeHistory(id));
+
+    // _statuses and _exceptions are appended from concurrent transport listener threads,
+    // so all access is synchronized by locking on the collection instance itself
     private readonly List<EnvelopeRecord> _statuses = new();
 
     private readonly IList<Exception> _exceptions = new List<Exception>();
@@ -31,10 +34,57 @@ internal partial class TrackedSession : ITrackedSession
 
     private Stopwatch _stopwatch = new();
 
-    private readonly List<Func<Type, bool>> _ignoreMessageRules = [t => t.CanBeCastTo<IAgentCommand>()];
+    // Custom, test-supplied ignore rules (via IgnoreMessageTypes). Framework + system-command
+    // filtering is handled directly in isIgnoredMessageType so the system-command rule can be
+    // toggled off by IncludeSystemCommands().
+    private readonly List<Func<Type, bool>> _ignoreMessageRules = [];
+    private bool _ignoreSystemCommands = true;
     private CancellationTokenSource _cancellation = new();
 
     private TrackingStatus _status = TrackingStatus.Active;
+
+    // Framework/infrastructure traffic should never hold a tracked session open.
+    private bool isIgnoredMessageType(Type? messageType)
+    {
+        if (messageType == null)
+        {
+            return false;
+        }
+
+        // Acknowledgements are always tracked: the session's acknowledgement APIs
+        // (SendMessageAndWaitForAcknowledgementAsync, AssertAnyFailureAcknowledgements) depend on them.
+        if (messageType == typeof(Acknowledgement) || messageType == typeof(FailureAcknowledgement))
+        {
+            return false;
+        }
+
+        // Wolverine's own agent commands are framework chatter, never test-relevant activity.
+        if (messageType.CanBeCastTo<IAgentCommand>())
+        {
+            return true;
+        }
+
+        // System commands — e.g. continuously-published monitoring telemetry — are ignored by default
+        // so a never-ending feed can't keep IsCompleted() false until the session times out.
+        // IncludeSystemCommands() opts them back in for tests that assert on that traffic. NOTE: this is
+        // deliberately NOT keyed off INotToBeRouted; that marker governs conventional routing, not
+        // tracking, and real messages (e.g. CritterWatch's monitoring commands) legitimately carry it
+        // while still needing to be trackable.
+        if (_ignoreSystemCommands && messageType.CanBeCastTo<ISystemCommand>())
+        {
+            return true;
+        }
+
+        return _ignoreMessageRules.Any(x => x(messageType));
+    }
+
+    /// <summary>
+    /// Stop ignoring <see cref="ISystemCommand"/> traffic so this session tracks and can assert on it.
+    /// </summary>
+    public void IncludeSystemCommands()
+    {
+        _ignoreSystemCommands = false;
+    }
 
     public TrackedSession(IHost host)
     {
@@ -141,26 +191,47 @@ internal partial class TrackedSession : ITrackedSession
             .ToArray();
     }
 
+    // GH-3825: order by EnvelopeRecord.Sequence, not SessionTime. SessionTime is whole
+    // milliseconds, so an entire receive batch shares one value and OrderBy falls back to the
+    // enumeration order of _envelopes -- a Guid-keyed cache with no relationship to the order the
+    // activity actually happened in. Every ordering assertion written against Received/Sent was
+    // silently at the mercy of that.
     public EnvelopeRecord[] AllRecordsInOrder()
     {
-        return _envelopes.SelectMany(x => x.Records).Concat(_statuses).OrderBy(x => x.SessionTime).ToArray();
+        return _envelopes.SelectMany(x => x.Records).Concat(statusesSnapshot()).OrderBy(x => x.Sequence).ToArray();
     }
 
     public EnvelopeRecord[] AllRecordsInOrder(MessageEventType eventType)
     {
         return _envelopes
             .SelectMany(x => x.Records)
-            .Concat(_statuses)
+            .Concat(statusesSnapshot())
             .Where(x => x.MessageEventType == eventType)
-            .OrderBy(x => x.SessionTime)
+            .OrderBy(x => x.Sequence)
             .ToArray();
     }
 
     public IReadOnlyList<Exception> AllExceptions()
     {
         return _envelopes.SelectMany(x => x.Records)
-            .Select(x => x.Exception).Where(x => x != null).Concat(_exceptions)
+            .Select(x => x.Exception).Where(x => x != null).Concat(exceptionsSnapshot())
             .Distinct().ToList()!;
+    }
+
+    private EnvelopeRecord[] statusesSnapshot()
+    {
+        lock (_statuses)
+        {
+            return _statuses.ToArray();
+        }
+    }
+
+    private Exception[] exceptionsSnapshot()
+    {
+        lock (_exceptions)
+        {
+            return _exceptions.ToArray();
+        }
     }
 
     public void AssertCondition(string message, Func<bool> condition)
@@ -195,16 +266,48 @@ internal partial class TrackedSession : ITrackedSession
     internal async Task ReplayAll(IMessageContext context, EnvelopeRecord[] records)
     {
         var envelopes = records.Select(x => x.Envelope!).Distinct().ToArray();
+        var bus = context as MessageBus;
 
-        foreach (var envelope in envelopes)
+        foreach (var capturedEnvelope in envelopes)
         {
-            if (envelope!.Destination!.Scheme == TransportConstants.Local)
+            // Captured records for scheduled sends to non-native-scheduling
+            // transports are wrappers around the original envelope (see
+            // EnvelopeScheduleExtensions.ForScheduledSend). In production the
+            // durable scheduler eventually fires the wrapper through
+            // ScheduledSendEnvelopeHandler, which unwraps the inner and
+            // copies the wrapper's context-correlation fields onto it before
+            // forwarding. Replay doesn't go through that round-trip — there's
+            // no broker, no serialization — so we have to do the same unwrap
+            // and stamp here so the inner envelope's destination + tenant /
+            // correlation / user fields drive the replay. See GH-2571 / PR #2572.
+            var dispatched = capturedEnvelope;
+            if (capturedEnvelope.MessageType == TransportConstants.ScheduledEnvelope &&
+                capturedEnvelope.Message is Envelope inner)
             {
-                await context.InvokeAsync(envelope.Message!);
+                inner.CopyContextCorrelationFrom(capturedEnvelope);
+                dispatched = inner;
+            }
+
+            // The replay context is fresh — its bus.TenantId / CorrelationId /
+            // UserName start out null. Propagate the dispatched envelope's
+            // values onto the bus so the outgoing envelope that InvokeAsync /
+            // SendAsync builds picks them up via TrackEnvelopeCorrelation.
+            // Without this, a scheduled message published under
+            // TenantId="red" would replay under no tenant.
+            if (bus != null)
+            {
+                bus.TenantId = dispatched.TenantId;
+                bus.CorrelationId = dispatched.CorrelationId;
+                bus.UserName = dispatched.UserName;
+            }
+
+            if (dispatched.Destination!.Scheme == TransportConstants.Local)
+            {
+                await context.InvokeAsync(dispatched.Message!);
             }
             else
             {
-                await context.EndpointFor(envelope.Destination).SendAsync(envelope.Message);
+                await context.EndpointFor(dispatched.Destination).SendAsync(dispatched.Message);
             }
         }
     }
@@ -220,6 +323,7 @@ internal partial class TrackedSession : ITrackedSession
     public RecordCollection NoHandlers => new(MessageEventType.NoHandlers, this);
     public RecordCollection NoRoutes => new(MessageEventType.NoRoutes, this);
     public RecordCollection MovedToErrorQueue => new(MessageEventType.MovedToErrorQueue, this);
+    public RecordCollection AutoFaultsPublished => new(MessageEventType.AutoFaultPublished, this);
     public RecordCollection Requeued => new(MessageEventType.Requeued, this);
     public RecordCollection Executed => new(MessageEventType.ExecutionFinished, this);
 
@@ -247,9 +351,10 @@ internal partial class TrackedSession : ITrackedSession
     
     public void AssertNoExceptionsWereThrown()
     {
-        if (_exceptions.Count > 0)
+        var exceptions = exceptionsSnapshot();
+        if (exceptions.Length > 0)
         {
-            throw new AggregateException(_exceptions);
+            throw new AggregateException(exceptions);
         }
     }
 
@@ -269,6 +374,17 @@ internal partial class TrackedSession : ITrackedSession
         }
     }
 
+    /// <summary>
+    /// Cap the diagnostic envelope-record grid at this many rows when reporting a timeout.
+    /// A noisy test (e.g. a chaos-monkey'd integration scenario emitting thousands of
+    /// alert / heartbeat / DLQ envelopes during the tracked window) can otherwise OOM
+    /// the StringBuilder.ToString() inside Grid.Write before the timeout message is
+    /// ever surfaced to the test — the OOM masks the real timeout cause.
+    /// Truncate to the last <see cref="ActivityGridRowLimit"/> records (most recent
+    /// = most useful for diagnosing where things hung), and surface the omitted count.
+    /// </summary>
+    internal const int ActivityGridRowLimit = 500;
+
     internal string BuildActivityMessage(string description)
     {
         var writer = new StringWriter();
@@ -285,6 +401,12 @@ internal partial class TrackedSession : ITrackedSession
         }
         else
         {
+            if (records.Length > ActivityGridRowLimit)
+            {
+                var skipped = records.Length - ActivityGridRowLimit;
+                writer.WriteLine($"(showing last {ActivityGridRowLimit} of {records.Length} envelope records — earlier {skipped} omitted for readability)");
+                records = records[^ActivityGridRowLimit..];
+            }
             writeGrid(grid, records, writer);
         }
 
@@ -295,11 +417,12 @@ internal partial class TrackedSession : ITrackedSession
             foreach (var condition in _conditions) writer.WriteLine($"{condition} ({condition.IsCompleted()})");
         }
 
-        if (_exceptions.Any())
+        var exceptions = exceptionsSnapshot();
+        if (exceptions.Any())
         {
             writer.WriteLine();
             writer.WriteLine("Exceptions detected: ");
-            foreach (var exception in _exceptions)
+            foreach (var exception in exceptions)
             {
                 writer.WriteLine(exception.ToString());
                 writer.WriteLine();
@@ -387,11 +510,11 @@ internal partial class TrackedSession : ITrackedSession
 
         // Ignore these
         var messageType = envelope.Message?.GetType();
-        if (_ignoreMessageRules.Any(x => x(messageType!)))
+        if (isIgnoredMessageType(messageType))
         {
             return;
         }
-        
+
         // Really just doing this idempotently
         var history = _envelopes[envelope.Id];
         if (history.Records.Any(r =>
@@ -408,7 +531,7 @@ internal partial class TrackedSession : ITrackedSession
     {
         // Ignore these
         var messageType = envelope.Message?.GetType();
-        if (messageType != null && _ignoreMessageRules.Any(x => x(messageType)))
+        if (isIgnoredMessageType(messageType))
         {
             return;
         }
@@ -434,7 +557,36 @@ internal partial class TrackedSession : ITrackedSession
 
         if (ex != null)
         {
-            _exceptions.Add(ex);
+            lock (_exceptions)
+            {
+                _exceptions.Add(ex);
+            }
+        }
+
+        // Auto-fault detection: if this is a Sent event for an envelope that the failure
+        // pipeline auto-published as a Fault<T>, also record an AutoFaultPublished event
+        // for assertion via ITrackedSession.AutoFaultsPublished.
+        if (eventType == MessageEventType.Sent
+            && envelope.Headers.TryGetValue(FaultHeaders.AutoPublished, out var marker)
+            && marker == "true")
+        {
+            var autoFaultRecord = new EnvelopeRecord(MessageEventType.AutoFaultPublished, envelope,
+                _stopwatch.ElapsedMilliseconds, null)
+            {
+                ServiceName = serviceName,
+                UniqueNodeId = uniqueNodeId
+            };
+
+            if (AlwaysTrackExternalTransports || _otherHosts.Any())
+            {
+                history.RecordCrossApplication(autoFaultRecord);
+            }
+            else
+            {
+                history.RecordLocally(autoFaultRecord);
+            }
+
+            foreach (var condition in _conditions) condition.Record(autoFaultRecord);
         }
 
         if (IsCompleted())
@@ -447,23 +599,29 @@ internal partial class TrackedSession : ITrackedSession
     {
         if (!_executionComplete) return false;
 
-        if (_conditions.Any(x => x.IsCompleted()))
+        if (_conditions.Any())
         {
-            return true;
+            // ALL of the conditions, not ANY. This used to short-circuit on the first satisfied
+            // condition, which made the final All(...) check below unreachable and silently broke
+            // every session that registers more than one condition -- e.g. three chained
+            // WaitForMessageToBeReceivedAt calls for a fan-out exchange returned as soon as the
+            // FIRST receiver handled the message, so assertions against the other two receivers'
+            // state raced the handlers that were still running. With a single condition ANY and ALL
+            // are the same, which is why this survived: almost every session registers just one.
+            // GH-3824.
+            return _conditions.All(x => x.IsCompleted());
         }
 
-        if (!_envelopes.All(x => x.IsComplete()))
-        {
-            return false;
-        }
-
-        return !_conditions.Any() || _conditions.All(x => x.IsCompleted());
+        return _envelopes.All(x => x.IsComplete());
     }
 
     public void LogException(Exception exception, string? serviceName)
     {
         Debug.WriteLine($"Exception Occurred in {serviceName}: {exception}");
-        _exceptions.Add(exception);
+        lock (_exceptions)
+        {
+            _exceptions.Add(exception);
+        }
     }
 
     public void AddCondition(ITrackedCondition condition)
@@ -476,7 +634,7 @@ internal partial class TrackedSession : ITrackedSession
     {
         var conditions = $"Conditions:\n{_conditions.Select(x => x.ToString())!.Join("\n")}";
         var activity = $"Activity:\n{AllRecordsInOrder().Select(x => x.ToString()).Join("\n")}";
-        var exceptions = $"Exceptions:\n{_exceptions.Select(x => x.ToString()).Join("\n")}";
+        var exceptions = $"Exceptions:\n{exceptionsSnapshot().Select(x => x.ToString()).Join("\n")}";
 
         return $"{conditions}\n\n{activity}\\{exceptions}";
     }
@@ -489,7 +647,10 @@ internal partial class TrackedSession : ITrackedSession
     public void LogStatus(string message)
     {
         var record = new EnvelopeRecord(MessageEventType.Status, null, _stopwatch.ElapsedMilliseconds, null);
-        _statuses.Add(record);
+        lock (_statuses)
+        {
+            _statuses.Add(record);
+        }
     }
 }
 

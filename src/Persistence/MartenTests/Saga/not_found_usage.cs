@@ -15,11 +15,13 @@ public class not_found_usage : IAsyncLifetime
 {
     private IHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery().IncludeType(typeof(InvitationPolicy));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Services.AddMarten(m =>
                 {
                     m.DisableNpgsqlLogging = true;
@@ -31,9 +33,10 @@ public class not_found_usage : IAsyncLifetime
             }).StartAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _host.StopAsync();
+        _host.Dispose();
     }
 
     [Fact]
@@ -47,7 +50,7 @@ public class not_found_usage : IAsyncLifetime
         await using var query = _host.DocumentStore().LightweightSession();
         
         // Should be deleted at this point
-        (await query.LoadAsync<InvitationPolicy>(id)).ShouldBeNull();
+        (await query.LoadAsync<InvitationPolicy>(id, TestContext.Current.CancellationToken)).ShouldBeNull();
         
         // NotFound should fire here, and no exceptions
         await _host.InvokeMessageAndWaitAsync(new InvitationTimeout( id));

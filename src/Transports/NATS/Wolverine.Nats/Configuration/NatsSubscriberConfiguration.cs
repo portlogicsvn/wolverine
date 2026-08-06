@@ -25,4 +25,27 @@ public class NatsSubscriberConfiguration
 
         return this;
     }
+
+    /// <summary>
+    /// Override the suffix used to derive the NATS JetStream scheduling subject for native scheduled sends
+    /// (default <c>.scheduled</c>). The derived subject must stay covered by the destination's stream.
+    /// </summary>
+    public NatsSubscriberConfiguration UseScheduleSubjectSuffix(string suffix)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(suffix, nameof(suffix));
+
+        add(endpoint => endpoint.ScheduleSubjectSuffix = suffix);
+        return this;
+    }
+
+    /// <summary>
+    /// Add a static header written to every message published to this subject.
+    /// </summary>
+    public NatsSubscriberConfiguration AddOutgoingHeader(string key, string value)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(key, nameof(key));
+
+        add(endpoint => endpoint.CustomHeaders[key] = value);
+        return this;
+    }
 }

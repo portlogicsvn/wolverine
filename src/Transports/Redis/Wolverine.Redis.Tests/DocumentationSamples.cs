@@ -9,6 +9,7 @@ using StackExchange.Redis;
 using Wolverine.Configuration;
 using Wolverine.Redis.Internal;
 using Wolverine.Transports;
+using Wolverine.Transports.Sending;
 
 namespace Wolverine.Redis.Tests;
 
@@ -17,7 +18,6 @@ public class DocumentationSamples
     public static async Task configure()
     {
         #region sample_bootstrapping_with_redis
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -83,7 +83,6 @@ public class DocumentationSamples
     public static async Task configure_with_database_ids()
     {
         #region sample_redis_database_configuration
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -114,10 +113,9 @@ public class DocumentationSamples
     public static async Task configure_with_uri_helpers()
     {
         #region sample_redis_uri_helpers
-
         // Using URI builder helpers
-        var ordersUri = RedisTransport.BuildRedisStreamUri("orders", databaseId: 1);
-        var paymentsUri = RedisTransport.BuildRedisStreamUri("payments", databaseId: 2, "payment-processors");
+        var ordersUri = RedisEndpointUri.Stream("orders", databaseId: 1);
+        var paymentsUri = RedisEndpointUri.Stream("payments", databaseId: 2, "payment-processors");
 
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -139,7 +137,6 @@ public class DocumentationSamples
     public static async Task working_with_multiple_databases()
     {
         #region sample_multiple_database_usage
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -166,10 +163,57 @@ public class DocumentationSamples
 
         #endregion
     }
+
+    public static async Task named_broker()
+    {
+        #region sample_redis_named_broker
+        using var host = await Host.CreateDefaultBuilder()
+            .UseWolverine(opts =>
+            {
+                // The default Redis broker
+                opts.UseRedisTransport("localhost:6379");
+
+                // An additional, independent Redis broker identified by name
+                opts.AddNamedRedisBroker(new BrokerName("secondary"), "localhost:6399");
+
+                // Publish a message type to a stream on the named broker
+                opts.PublishMessage<OrderCreated>()
+                    .ToRedisStreamOnNamedBroker(new BrokerName("secondary"), "orders");
+
+                // Listen to a stream on the named broker
+                opts.ListenToRedisStreamOnNamedBroker(new BrokerName("secondary"), "orders", "order-processors");
+            }).StartAsync();
+
+        #endregion
+    }
+
+    public static async Task multi_tenancy()
+    {
+        #region sample_redis_multi_tenancy
+        using var host = await Host.CreateDefaultBuilder()
+            .UseWolverine(opts =>
+            {
+                opts.UseRedisTransport("localhost:6379")
+                    .AutoProvision()
+
+                    // Route messages that carry a tenant id to that tenant's own Redis server;
+                    // messages with no (or an unknown) tenant id fall back to the shared connection
+                    .ConfigureMultiTenancy(TenantedIdBehavior.FallbackToDefault)
+
+                    // Each tenant gets its own dedicated Redis server
+                    .AddTenant("tenant1", "redis-tenant1:6379")
+                    .AddTenant("tenant2", "redis-tenant2:6379");
+
+                // The stream topology is shared; the connection is chosen per message from Envelope.TenantId
+                opts.PublishMessage<OrderCreated>().ToRedisStream("orders");
+                opts.ListenToRedisStream("orders", "order-processors");
+            }).StartAsync();
+
+        #endregion
+    }
 }
 
-#region sample_RedisInstrumentation_middleware
-
+#region sample_redisinstrumentation_middleware
 public static class RedisInstrumentation
 {
     // Just showing what data elements are available to use for 
@@ -183,8 +227,7 @@ public static class RedisInstrumentation
 
 #endregion
 
-#region sample_OurRedisJsonMapper
-
+#region sample_ourredisjsonmapper
 // Simplistic envelope mapper that expects every message to be of
 // type "T" and serialized as JSON that works perfectly well w/ our
 // application's default JSON serialization

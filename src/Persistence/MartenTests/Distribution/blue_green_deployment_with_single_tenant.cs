@@ -1,17 +1,16 @@
+using IntegrationTests;
 using JasperFx.Core;
 using MartenTests.Distribution.Support;
+using Shouldly;
 using Wolverine;
 using Wolverine.Marten.Distribution;
-using Xunit.Abstractions;
-
+using Wolverine.Runtime.Agents;
+using Xunit;
 namespace MartenTests.Distribution;
 
-public class blue_green_deployment_with_single_tenant : SingleTenantContext
+public class blue_green_deployment_with_single_tenant(ITestOutputHelper output)
+    : SingleTenantContext(output)
 {
-    public blue_green_deployment_with_single_tenant(ITestOutputHelper output) : base(output)
-    {
-    }
-
     [Fact]
     public async Task spin_up_single_blue_and_single_green_host()
     {
@@ -23,7 +22,21 @@ public class blue_green_deployment_with_single_tenant : SingleTenantContext
             w.ExpectRunningAgents(theOriginalHost, 3);
             w.ExpectRunningAgents(greenHost, 3);
         }, 30.Seconds());
-        
-        // TODO -- tighten the assertions here!
+
+        var db = Servers.PostgresDatabaseName;
+        var originalUris = await GetAgentUrisAsync(theOriginalHost);
+        originalUris.ShouldBe([
+            $"event-subscriptions://marten/main/localhost.{db}/day/all",
+            $"event-subscriptions://marten/main/localhost.{db}/distance/all",
+            $"event-subscriptions://marten/main/localhost.{db}/trip/all"
+        ], ignoreOrder: true);
+        var greenUris = await GetAgentUrisAsync(greenHost);
+        greenUris.ShouldBe([
+            $"event-subscriptions://marten/main/localhost.{db}/day/all",
+            $"event-subscriptions://marten/main/localhost.{db}/distance/all",
+            $"event-subscriptions://marten/main/localhost.{db}/ending/all",
+            $"event-subscriptions://marten/main/localhost.{db}/starting/all",
+            $"event-subscriptions://marten/main/localhost.{db}/trip/all/v2"
+        ], ignoreOrder: true);
     }
 }

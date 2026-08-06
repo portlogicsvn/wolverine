@@ -18,8 +18,7 @@ using Wolverine.Runtime.Routing;
 using Wolverine.Tracking;
 using Wolverine.Transports.Tcp;
 using Wolverine.Util;
-using Xunit.Abstractions;
-
+using Xunit;
 namespace MartenTests;
 
 public class event_streaming : PostgresqlContext, IAsyncLifetime
@@ -33,7 +32,7 @@ public class event_streaming : PostgresqlContext, IAsyncLifetime
         _output = output;
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         var receiverPort = PortFinder.GetAvailablePort();
 
@@ -78,10 +77,17 @@ public class event_streaming : PostgresqlContext, IAsyncLifetime
                     {
                         opts.Connection(Servers.PostgresConnectionString);
                         opts.Logger(new TestOutputMartenLogger(_output));
+
+                        // Fast event forwarding publishes events in BeforeSaveChanges, before commit.
+                        // Marten's default Quick append mode does not assign IEvent.Sequence until the
+                        // server-side INSERT, so Rich mode is required for the forwarded events to carry a sequence.
+                        opts.Events.AppendMode = EventAppendMode.Rich;
                     })
-                    .IntegrateWithWolverine(x => x.MessageStorageSchemaName = "sender").EventForwardingToWolverine(opts =>
+                    .IntegrateWithWolverine(x =>
                     {
-                        opts.SubscribeToEvent<SecondEvent>().TransformedTo(e => new SecondMessage(e.StreamId, e.Sequence));
+                        x.MessageStorageSchemaName = "sender";
+                        x.UseFastEventForwarding = true;
+                        x.SubscribeToEvent<SecondEvent>().TransformedTo(e => new SecondMessage(e.StreamId, e.Sequence));
                     });
 
                 services.AddResourceSetupOnStartup();
@@ -90,7 +96,7 @@ public class event_streaming : PostgresqlContext, IAsyncLifetime
         await theSender.ResetResourceState();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await theReceiver.StopAsync();
         await theSender.StopAsync();
@@ -143,17 +149,18 @@ public class event_streaming : PostgresqlContext, IAsyncLifetime
     [Fact]
     public async Task execution_of_forwarded_events_can_be_awaited_from_tests()
     {
-        var host = await Host.CreateDefaultBuilder()
+        using var host = await Host.CreateDefaultBuilder()
             .UseWolverine()
             .ConfigureServices(services =>
             {
                 services.AddMarten(Servers.PostgresConnectionString)
-                    .IntegrateWithWolverine().EventForwardingToWolverine(opts =>
+                    .IntegrateWithWolverine(opts =>
                     {
+                        opts.UseFastEventForwarding = true;
                         opts.SubscribeToEvent<SecondEvent>().TransformedTo(e =>
                             new SecondMessage(e.StreamId, e.Sequence));
                     });
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var aggregateId = Guid.NewGuid();
         await host.SaveInMartenAndWaitForOutgoingMessagesAsync(session =>
@@ -163,7 +170,7 @@ public class event_streaming : PostgresqlContext, IAsyncLifetime
 
         using var store = host.Services.GetRequiredService<IDocumentStore>();
         await using var session = store.LightweightSession();
-        var events = await session.Events.FetchStreamAsync(aggregateId);
+        var events = await session.Events.FetchStreamAsync(aggregateId, token: TestContext.Current.CancellationToken);
         events.Count.ShouldBe(2);
         events[0].Data.ShouldBeOfType<SecondEvent>();
         events[1].Data.ShouldBeOfType<FourthEvent>();
@@ -208,12 +215,8 @@ public class TriggeredEvent
 
 public class TriggerEventHandler
 {
-    private static readonly TaskCompletionSource<TriggeredEvent> _source = new();
-    public static Task<TriggeredEvent> Waiter => _source.Task;
-
     public void Handle(TriggeredEvent message)
     {
-        _source.SetResult(message);
     }
 
     #region sample_execution_of_forwarded_events_second_message_to_fourth_event
@@ -240,7 +243,7 @@ public class TestOutputMartenLogger : IMartenLogger, IMartenSessionLogger, ILogg
     {
         if (logLevel == LogLevel.Error)
         {
-            _output.WriteLine(exception?.ToString());
+            _output.WriteLine(exception?.ToString() ?? formatter(state, exception));
         }
     }
 
@@ -341,6 +344,17 @@ public class TestOutputMartenLogger : IMartenLogger, IMartenSessionLogger, ILogg
 
     private class NoopTestOutputHelper : ITestOutputHelper
     {
+        // xUnit v3 widened ITestOutputHelper with Output and the two Write overloads.
+        public string Output => string.Empty;
+
+        public void Write(string message)
+        {
+        }
+
+        public void Write(string format, params object[] args)
+        {
+        }
+
         public void WriteLine(string message)
         {
         }

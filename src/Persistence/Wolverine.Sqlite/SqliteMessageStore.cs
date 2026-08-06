@@ -1,4 +1,5 @@
 using System.Data.Common;
+using System.Diagnostics.CodeAnalysis;
 using ImTools;
 using JasperFx;
 using JasperFx.Core;
@@ -42,6 +43,14 @@ internal class SqliteMessageStore : MessageDatabase<SqliteConnection>
         Id = new DatabaseId(descriptor.ServerName, descriptor.DatabaseName);
     }
 
+    // typeof(DatabaseSagaSchema<,>).CloseAndBuildAs<IDatabaseSagaSchema>(...) at L67
+    // closes the saga schema generic over (sagaType, idType) at startup. Same
+    // chunk D / I / J / K / AE / AF CloseAndBuildAs pattern: AOT-clean apps
+    // preserve saga state types via TrimmerRootDescriptor. Cross-link to #2769.
+    [UnconditionalSuppressMessage("Trimming", "IL2026",
+        Justification = "DatabaseSagaSchema<,> closed over runtime saga / id types at startup; AOT consumers preserve via TrimmerRootDescriptor. See AOT guide / #2769.")]
+    [UnconditionalSuppressMessage("AOT", "IL3050",
+        Justification = "DatabaseSagaSchema<,> closed over runtime saga / id types at startup; AOT consumers preserve via TrimmerRootDescriptor. See AOT guide / #2769.")]
     public SqliteMessageStore(DatabaseSettings databaseSettings, DurabilitySettings settings, DbDataSource dataSource,
         ILogger<SqliteMessageStore> logger, IEnumerable<SagaTableDefinition> sagaTypes) : base(databaseSettings, dataSource,
         settings, logger, new SqliteMigrator(), SqliteProvider.Instance)
@@ -90,8 +99,17 @@ internal class SqliteMessageStore : MessageDatabase<SqliteConnection>
     {
         if (ex is SqliteException sqliteException)
         {
-            return sqliteException.SqliteErrorCode == 19 || // SQLITE_CONSTRAINT
-                   sqliteException.Message.Contains("UNIQUE constraint failed");
+            // SQLITE_CONSTRAINT_PRIMARYKEY (1555) or SQLITE_CONSTRAINT_UNIQUE (2067)
+            if (sqliteException.SqliteExtendedErrorCode == 1555
+                || sqliteException.SqliteExtendedErrorCode == 2067)
+            {
+                return true;
+            }
+
+            // Fallback: SQLITE_CONSTRAINT (19) plus message-match
+            return sqliteException.SqliteErrorCode == 19
+                && (sqliteException.Message.Contains("UNIQUE constraint failed")
+                    || sqliteException.Message.Contains("PRIMARY KEY"));
         }
 
         return false;
@@ -152,19 +170,59 @@ internal class SqliteMessageStore : MessageDatabase<SqliteConnection>
             .ExecuteNonQueryAsync();
     }
 
-    protected override async Task<bool> TryAttainLockAsync(int lockId, SqliteConnection connection, CancellationToken token)
+    // Polling lock: delegate to the AdvisoryLock instance. The previous override here
+    // ran INSERT OR IGNORE and returned true unconditionally, which falsely reported
+    // "lock acquired" whenever another row already held the slot. SqliteAdvisoryLock
+    // checks the affected row count.
+    protected override Task<bool> TryAttainLockAsync(int lockId, SqliteConnection connection, CancellationToken token)
     {
-        // SQLite uses BEGIN EXCLUSIVE TRANSACTION for locking
-        // We'll use a simple advisory lock table approach
+        return AdvisoryLock.TryAttainLockAsync(lockId, token);
+    }
+
+    protected override Task ReleaseLockAsync(int lockId, SqliteConnection connection, CancellationToken token)
+    {
+        return AdvisoryLock.ReleaseLockAsync(lockId);
+    }
+
+    // Migration lock: SQLite's row-based wolverine_locks scheme can't be used here,
+    // because the table itself is created by the migration the lock is supposed to
+    // serialize. Use BEGIN EXCLUSIVE TRANSACTION instead — it doesn't depend on any
+    // schema and is automatically released when the connection closes (so process
+    // crashes during migration don't leave stale locks).
+    protected override async Task<bool> acquireMigrationLockAsync(int lockId, SqliteConnection conn, CancellationToken token)
+    {
+        const int maxAttempts = 10;
+        for (var attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            try
+            {
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = "BEGIN EXCLUSIVE TRANSACTION";
+                await cmd.ExecuteNonQueryAsync(token);
+                return true;
+            }
+            catch (SqliteException ex) when (ex.SqliteErrorCode == 5 /* SQLITE_BUSY */
+                                              || ex.SqliteErrorCode == 6 /* SQLITE_LOCKED */)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(100 * (attempt + 1)), token);
+            }
+        }
+
+        return false;
+    }
+
+    protected override async Task releaseMigrationLockAsync(int lockId, SqliteConnection conn, CancellationToken token)
+    {
         try
         {
-            await connection.CreateCommand($"INSERT OR IGNORE INTO wolverine_locks (lock_id, acquired_at) VALUES ({lockId}, datetime('now'))")
-                .ExecuteNonQueryAsync(token);
-            return true;
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "COMMIT";
+            await cmd.ExecuteNonQueryAsync(token);
         }
         catch
         {
-            return false;
+            // Best-effort. Closing the connection rolls back the transaction
+            // without ill effect — the migration itself succeeded.
         }
     }
 
@@ -281,7 +339,7 @@ internal class SqliteMessageStore : MessageDatabase<SqliteConnection>
 
             var builder = new DbCommandBuilder(conn);
             WriteLoadScheduledEnvelopeSql(builder, DateTimeOffset.UtcNow);
-            var cmd = builder.Compile();
+            await using var cmd = builder.Compile();
             cmd.Connection = conn;
             cmd.Transaction = tx;
 
@@ -295,13 +353,20 @@ internal class SqliteMessageStore : MessageDatabase<SqliteConnection>
             }
 
             var ids = string.Join(",", envelopes.Select(e => $"'{e.Id:D}'"));
-            var reassign = conn.CreateCommand(
+            await using var reassign = conn.CreateCommand(
                 $"update {DatabaseConstants.IncomingTable} set owner_id = @owner, status = '{EnvelopeStatus.Incoming}' where lower(id) IN ({ids})");
             reassign.Transaction = tx;
             await reassign.With("owner", durabilitySettings.AssignedNodeNumber)
                 .ExecuteNonQueryAsync(_cancellation);
 
             await tx.CommitAsync(cancellationToken);
+
+            // Stamp owning store on each row so downstream pipeline routes its
+            // writes back here. See GH-2576.
+            foreach (var envelope in envelopes)
+            {
+                envelope.Store = this;
+            }
 
             await runtime.EnqueueDirectlyAsync(envelopes);
         }
@@ -461,6 +526,16 @@ internal class SqliteMessageStore : MessageDatabase<SqliteConnection>
             lockTable.AddColumn("lock_id", "INTEGER").AsPrimaryKey();
             lockTable.AddColumn("acquired_at", "TEXT").NotNull();
             yield return lockTable;
+
+            // Dynamic listener registry (GH-2685). Provisioned only when the opt-in
+            // flag is set so existing apps see no migration churn.
+            if (Durability.EnableDynamicListeners)
+            {
+                var listenerTable =
+                    new Weasel.Sqlite.Tables.Table(new SqliteObjectName(DatabaseConstants.ListenersTableName));
+                listenerTable.AddColumn("uri", "TEXT").AsPrimaryKey();
+                yield return listenerTable;
+            }
         }
 
         foreach (var table in _otherTables)
@@ -523,7 +598,8 @@ internal class SqliteMessageStore : MessageDatabase<SqliteConnection>
         {
             while (deleted > 0)
             {
-                deleted = await conn.CreateCommand(sql).ExecuteNonQueryAsync();
+                await using var cmd = conn.CreateCommand(sql);
+                deleted = await cmd.ExecuteNonQueryAsync();
                 await Task.Delay(10);
             }
         }

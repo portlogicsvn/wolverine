@@ -95,6 +95,7 @@ internal class CircuitBreaker : IAsyncDisposable, IMessageSuccessTracker
     private readonly Block<object[]> _processingBlock;
     private readonly double _ratio;
     private readonly IWolverineObserver? _observer;
+    private bool _disposed;
 
     public CircuitBreaker(CircuitBreakerOptions options, IListenerCircuit circuit, IWolverineObserver? observer = null)
     {
@@ -119,8 +120,13 @@ internal class CircuitBreaker : IAsyncDisposable, IMessageSuccessTracker
 
     public async ValueTask DisposeAsync()
     {
+        if (_disposed)
+            return;
+        _disposed = true;
         await _cancellation.CancelAsync();
         _processingBlock.Complete();
+        await _batching.DisposeAsync();
+        _cancellation.Dispose();
     }
 
     public Task TagSuccessAsync()
@@ -177,9 +183,7 @@ internal class CircuitBreaker : IAsyncDisposable, IMessageSuccessTracker
 
         if (failures > 0 && ShouldStopProcessing())
         {
-            using var activity = WolverineTracing.ActivitySource.StartActivity(WolverineTracing.CircuitBreakerTripped);
-            activity?.SetTag(WolverineTracing.EndpointAddress, _circuit.Endpoint.Uri);
-            await _circuit.PauseAsync(Options.PauseTime);
+            await _circuit.PauseWithDrainAsync(Options.PauseTime);
 
             if (_observer != null)
             {

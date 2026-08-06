@@ -2,7 +2,8 @@
 
     <PropertyGroup>
         <Description>MemoryPack serialization for Wolverine Applications</Description>
-        <PackageId>Portlogics.WolverineFx.MemoryPack</PackageId>
+        <PackageId>WolverineFx.MemoryPack</PackageId>
+        <IsAotCompatible>true</IsAotCompatible>
     </PropertyGroup>
 
     <ItemGroup>

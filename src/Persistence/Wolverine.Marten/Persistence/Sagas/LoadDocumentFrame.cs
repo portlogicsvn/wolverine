@@ -5,6 +5,7 @@ using JasperFx.Core.Reflection;
 using Marten;
 using Marten.Metadata;
 using Wolverine.Marten.Codegen;
+using IRevisioned = JasperFx.IRevisioned;
 
 namespace Wolverine.Marten.Persistence.Sagas;
 
@@ -98,7 +99,10 @@ internal class LoadDocumentFrame : AsyncFrame, IBatchableFrame
         if (Saga.VariableType.CanBeCastTo<IRevisioned>() && Saga.VariableType.CanBeCastTo<Saga>())
         {
             writer.WriteComment($"{Saga.VariableType.FullNameInCode()} implements {typeof(IRevisioned).FullNameInCode()}, so Wolverine will try to update based on the revision as a concurrency protection");
-            writer.Write($"var {ExpectedSagaRevision} = 0;");
+            // 0L because IDocumentOperations.UpdateRevision(entity, long revision) takes a long
+            // revision parameter, even though IRevisioned.Version is an int. The int saga.Version + 1
+            // below widens into this long variable, which then flows to UpdateRevision unchanged.
+            writer.Write($"var {ExpectedSagaRevision} = 0L;");
             writer.Write($"BLOCK:if ({Saga.Usage} != null)");
             writer.Write($"{ExpectedSagaRevision} = {Saga.Usage}.{nameof(IRevisioned.Version)} + 1;");
             writer.FinishBlock();

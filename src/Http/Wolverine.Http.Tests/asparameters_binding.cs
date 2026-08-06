@@ -16,7 +16,6 @@ public class asparameters_binding : IntegrationContext
     public async Task fill_all_fields()
     {
         #region sample_using_asparameters_test
-
         var result = await Host.Scenario(x => x
             .Post
             .FormData(new Dictionary<string, string>
@@ -35,7 +34,7 @@ public class asparameters_binding : IntegrationContext
             .QueryString("IntegerNotUsed", "3")
             .ToUrl("/api/asparameters1")
         );
-        var response = result.ReadAsJson<AsParametersQuery>();
+        var response = await result.ReadAsJsonAsync<AsParametersQuery>();
         response.EnumFromForm.ShouldBe(Direction.East);
         response.StringFromForm.ShouldBe("string2");
         response.IntegerFromForm.ShouldBe(2);
@@ -76,7 +75,7 @@ public class asparameters_binding : IntegrationContext
             .QueryString("IntegerNotUsed", "3")
             .ToUrl("/api/asparameters1")
         );
-        var response = result.ReadAsJson<AsParametersQuery>();
+        var response = await result.ReadAsJsonAsync<AsParametersQuery>();
         response.StringHeader.ShouldBeNull();
         response.NumberHeader.ShouldBe(5);
         response.NullableHeader.ShouldBeNull();
@@ -110,7 +109,7 @@ public class asparameters_binding : IntegrationContext
                     .ToUrl("/api/asparameters1");
             }
         );
-        var response = result.ReadAsJson<AsParametersQuery>();
+        var response = await result.ReadAsJsonAsync<AsParametersQuery>();
         response.StringHeader.ShouldBe("Red");
         response.NumberHeader.ShouldBe(303);
         response.NullableHeader.ShouldBe(13);
@@ -127,7 +126,7 @@ public class asparameters_binding : IntegrationContext
             // x.Post.Url("/asp2/croaker/42");
         });
 
-        var response = result.ReadAsJson<AsParametersQuery2>();
+        var response = await result.ReadAsJsonAsync<AsParametersQuery2>();
 
         // Routes
         response.Id.ShouldBe("croaker");
@@ -157,7 +156,7 @@ public class asparameters_binding : IntegrationContext
             x.WithRequestHeader("x-direction", "East");
         });
 
-        var value = result.ReadAsJson<AsParameterRecord>();
+        var value = await result.ReadAsJsonAsync<AsParameterRecord>();
         value.Id.ShouldBe("idvalue");
         value.Number.ShouldBe(2);
         value.Direction.ShouldBe(Direction.East);
@@ -222,6 +221,45 @@ public class asparameters_binding : IntegrationContext
                 .QueryString("Name", "Jeremy")
                 .QueryString("Age", "51");
 
+            x.StatusCodeShouldBe(400);
+        });
+    }
+
+    // GH-3135 WS3: a nullable [FromBody] member is optional — a missing body binds null and the
+    // endpoint runs (200) instead of returning 400 ("input does not contain any JSON tokens").
+    [Fact]
+    public async Task nullable_from_body_missing_binds_null()
+    {
+        var result = await Scenario(x =>
+        {
+            x.Post.Url("/api/3135/optional-body?Name=Jeremy");
+            x.StatusCodeShouldBe(200);
+        });
+
+        (await result.ReadAsTextAsync()).ShouldBe("no-body");
+    }
+
+    [Fact]
+    public async Task nullable_from_body_present_binds_value()
+    {
+        var result = await Scenario(x =>
+        {
+            x.Post.Json(new WolverineWebApi.AddPassengerPayload("Bob"))
+                .ToUrl("/api/3135/optional-body")
+                .QueryString("Name", "Jeremy");
+            x.StatusCodeShouldBe(200);
+        });
+
+        (await result.ReadAsTextAsync()).ShouldBe("body:Bob");
+    }
+
+    // Regression guard: a NON-nullable [FromBody] member is still required — a missing body 400s.
+    [Fact]
+    public async Task non_nullable_from_body_missing_still_fails()
+    {
+        await Scenario(x =>
+        {
+            x.Post.Url($"/api/3135/journey/{Guid.NewGuid()}/passenger");
             x.StatusCodeShouldBe(400);
         });
     }

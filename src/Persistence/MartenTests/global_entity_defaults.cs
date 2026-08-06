@@ -14,11 +14,13 @@ public class global_entity_defaults : IAsyncLifetime
 {
     private IHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery().IncludeType(typeof(GlobalThingHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Policies.AutoApplyTransactions();
 
                 // Set global defaults
@@ -33,9 +35,10 @@ public class global_entity_defaults : IAsyncLifetime
             }).StartAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _host.StopAsync();
+        _host.Dispose();
     }
 
     [Fact]
@@ -60,7 +63,7 @@ public class global_entity_defaults : IAsyncLifetime
     public async Task end_to_end_with_good_data()
     {
         var thing = new GlobalThing();
-        await _host.DocumentStore().BulkInsertDocumentsAsync([thing]);
+        await _host.DocumentStore().BulkInsertDocumentsAsync([thing], cancellation: TestContext.Current.CancellationToken);
 
         var tracked = await _host.InvokeMessageAndWaitAsync(new UseGlobalThing1(thing.Id));
 

@@ -14,7 +14,7 @@ public class batch_querying_support : PostgresqlContext, IAsyncLifetime
 {
     private IHost theHost = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         theHost = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -27,11 +27,15 @@ public class batch_querying_support : PostgresqlContext, IAsyncLifetime
 
                 }).UseLightweightSessions().IntegrateWithWolverine();
 
+                opts.Discovery.DisableConventionalDiscovery()
+                    .IncludeType(typeof(DoStuffWithDocsHandler))
+                    .IncludeType(typeof(ReadAggregateWithDocsHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Services.AddResourceSetupOnStartup();
             }).StartAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await theHost.StopAsync();
         theHost.Dispose();
@@ -50,7 +54,7 @@ public class batch_querying_support : PostgresqlContext, IAsyncLifetime
         var doc3 = new Doc3{Id = Guid.NewGuid().ToString()};
         session.Store(doc3);
 
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         await theHost.InvokeAsync(new DoStuffWithDocs(doc1.Id, doc2.Id, doc3.Id));
     }
@@ -68,7 +72,7 @@ public class batch_querying_support : PostgresqlContext, IAsyncLifetime
         var streamId = Guid.NewGuid();
         session.Events.StartStream<LetterAggregate>(streamId, new AEvent(), new BEvent(), new BEvent(), new DEvent());
 
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
         
         await theHost.InvokeAsync(new ReadAggregateWithDocs(doc1.Id, doc2.Id, streamId));
     }

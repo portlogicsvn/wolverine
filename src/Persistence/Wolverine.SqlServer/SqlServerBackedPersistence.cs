@@ -6,6 +6,7 @@ using JasperFx.Core.Reflection;
 using JasperFx.MultiTenancy;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
 using Weasel.Core;
 using Weasel.Core.Migrations;
@@ -176,12 +177,17 @@ internal class SqlServerBackedPersistence : IWolverineExtension, ISqlServerBacke
         options.CodeGeneration.Sources.Add(new DatabaseBackedPersistenceMarker());
         options.CodeGeneration.Sources.Add(new SagaStorageVariableSource());
 
+        // Weasel-managed tenant partitioning support for conjoined EF Core multi-tenancy
+        options.Services.TryAddEnumerable(ServiceDescriptor
+            .Singleton<ITenantPartitioningProviderFactory, Wolverine.SqlServer.MultiTenancy.
+                SqlServerTenantPartitioningProviderFactory>());
+
         options.Services.AddSingleton<Migrator, SqlServerMigrator>();
         
         options.Services.AddSingleton<IMessageStore>(s => BuildMessageStore(s.GetRequiredService<IWolverineRuntime>()));
 
         options.Services.AddSingleton<IDatabaseSource, MessageDatabaseDiscovery>();
-        
+
         if (_transportConfigurations.Any())
         {
             // var transport = options.Transports.GetOrCreate<SqlServerTransport>();
@@ -192,6 +198,16 @@ internal class SqlServerBackedPersistence : IWolverineExtension, ISqlServerBacke
             //     transportConfiguration(expression);
             // }
         }
+
+        // CritterWatch / saga-explorer diagnostic surface — every saga
+        // persisted via Wolverine's lightweight (SQL Server-backed) saga
+        // storage is owned by this provider. The runtime aggregator
+        // picks this up alongside any Marten / EF Core / RavenDB
+        // diagnostics in mixed-storage hosts.
+        options.Services.AddSingleton<Wolverine.Persistence.Sagas.ISagaStoreDiagnostics>(s =>
+            new Wolverine.RDBMS.Sagas.DatabaseSagaStoreDiagnostics(
+                s.GetRequiredService<IWolverineRuntime>(),
+                (IMessageDatabase)s.GetRequiredService<IMessageStore>()));
     }
     
     public IMessageStore BuildMessageStore(IWolverineRuntime runtime)
@@ -223,8 +239,6 @@ internal class SqlServerBackedPersistence : IWolverineExtension, ISqlServerBacke
             return new MultiTenantedMessageStore(defaultStore, runtime,
                 new SqlServerTenantedMessageStore(runtime, this, sagaTables){DataSource = ConnectionStringTenancy});
         }
-
-        settings.Role = Role;
         
         var store = new SqlServerMessageStore(settings, runtime.DurabilitySettings,
             logger, sagaTables);
@@ -250,12 +264,14 @@ internal class SqlServerBackedPersistence : IWolverineExtension, ISqlServerBacke
         return new DatabaseSettings
         {
             CommandQueuesEnabled = CommandQueuesEnabled,
-            Role = MessageStoreRole.Main,
+            Role = Role,
             ConnectionString = ConnectionString,
             ScheduledJobLockId = ScheduledJobLockId,
             SchemaName = EnvelopeStorageSchemaName,
-            AddTenantLookupTable = UseMasterTableTenancy,
-            TenantConnections = TenantConnections
+            AddTenantLookupTable = UseMasterTableTenancy || _options.Durability.TenantRegistryRequired,
+            TenantConnections = TenantConnections,
+            // Propagate the AutoCreate override (see #2780).
+            AutoCreate = AutoCreate
         };
     }
 
@@ -313,6 +329,18 @@ internal class SqlServerBackedPersistence : IWolverineExtension, ISqlServerBacke
         configure(source);
 
         TenantConnections = source;
+
+        // GH-3023: surface the MasterTenantSource through DI as IDynamicTenantSource<string> so
+        // store-agnostic admin consumers can drive the dynamic-tenancy lifecycle through the
+        // abstraction — parity with the PostgreSQL provider (GH-3016). Registered at config time
+        // (before the container is built); the factory defers to IMessageStore resolution, which is
+        // what constructs the MasterTenantSource and assigns ConnectionStringTenancy.
+        _options.Services.AddSingleton<IDynamicTenantSource<string>>(s =>
+        {
+            _ = s.GetRequiredService<IMessageStore>();
+            return (IDynamicTenantSource<string>)ConnectionStringTenancy!;
+        });
+
         return this;
     }
 

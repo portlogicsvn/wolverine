@@ -1,5 +1,6 @@
 using IncidentService;
 using Marten;
+using JasperFx.Events.Projections;
 using Marten.Events.Projections;
 using JasperFx;
 using JasperFx.Events.Daemon;
@@ -9,13 +10,7 @@ using Wolverine.Marten;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
-// Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
 builder.Services.AddOpenApi();
-
-//builder swagger commands
-builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
 
 builder.Services.AddMarten(opts =>
 {
@@ -60,21 +55,17 @@ var app = builder.Build();
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
+    app.MapGet("/", () => Results.Redirect("/openapi/v1.json"));
 }
 
 app.MapWolverineEndpoints();
-
-app.UseSwagger();
-app.UseSwaggerUI();
-app.MapGet("/", () => Results.Redirect("/swagger"));
 
 // Using the expanded command line options for the Critter Stack
 // that are helpful for code generation, database migrations, and diagnostics
 return await app.RunJasperFxCommands(args);
 
 
-#region sample_Program_marker
-
+#region sample_program_marker
 // Adding this just makes it easier to bootstrap your
 // application in a test harness project. Only a convenience
 public partial class Program{}

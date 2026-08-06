@@ -30,7 +30,7 @@ using var host = await Host.CreateDefaultBuilder()
         opts.PublishAllMessages().ToRabbitExchange("exchange1");
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Samples.cs#L304-L324' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_publish_to_rabbitmq_routing_key' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Samples.cs#L317-L336' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_publish_to_rabbitmq_routing_key' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 At development time -- or occasionally in production systems -- you may want to have the messaging
@@ -47,7 +47,7 @@ using var host = await Host.CreateDefaultBuilder()
             .AutoPurgeOnStartup();
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Samples.cs#L329-L338' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_autopurge_rabbitmq' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Samples.cs#L341-L349' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_autopurge_rabbitmq' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Or you can be more selective and only have certain queues of volatile messages purged
@@ -64,7 +64,7 @@ using var host = await Host.CreateDefaultBuilder()
             .DeclareQueue("queue2", q => q.PurgeOnStartup = true);
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Samples.cs#L343-L353' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_autopurge_selective_queues' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Samples.cs#L354-L363' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_autopurge_selective_queues' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Wolverine's Rabbit MQ integration also supports the [Oakton stateful resource](https://jasperfx.github.io/oakton/guide/host/resources.html) model,
@@ -137,11 +137,56 @@ app.MapGet("/", () => "Hello World!");
 // Actually important to return the exit code here!
 return await app.RunJasperFxCommands(args);
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/KitchenSink/MartenAndRabbitIssueService/Program.cs#L11-L75' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_kitchen_sink_bootstrapping' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/KitchenSink/MartenAndRabbitIssueService/Program.cs#L11-L74' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_kitchen_sink_bootstrapping' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Note that this stateful resource model is also available at the command line as well for deploy time
 management.
+
+## Externally-Owned Queues and Exchanges <Badge type="tip" text="6.6" />
+
+Sometimes a queue or exchange your application uses is owned and managed by a *different* system,
+and the identity your application connects with simply does not have the `configure` or `delete`
+permissions to create or remove it. In that case you want Wolverine to *use* the queue or exchange,
+but never try to declare it at startup (even with `AutoProvision()` turned on) and never delete it
+during a resource teardown. Mark the endpoint as `ExternallyOwned()` to get exactly that behavior:
+
+```csharp
+using var host = await Host.CreateDefaultBuilder()
+    .UseWolverine(opts =>
+    {
+        opts.UseRabbitMq()
+            // AutoProvision is on for the resources this app *does* own...
+            .AutoProvision();
+
+        // ...but this queue belongs to another team. Listen to it,
+        // but never declare it at startup or delete it on teardown,
+        // and don't try to set up or tear down its bindings.
+        opts.ListenToRabbitQueue("shared-orders")
+            .ExternallyOwned();
+
+        // Same idea for an exchange we publish to but do not own
+        opts.PublishMessage<OrderPlaced>()
+            .ToRabbitExchange("shared-events")
+            .ExternallyOwned();
+    }).StartAsync();
+```
+
+When an endpoint is marked `ExternallyOwned()`, Wolverine will:
+
+* Skip declaring the queue or exchange at startup, regardless of `AutoProvision()`
+* Skip deleting it during a `resources teardown` (or the Oakton/JasperFx resource commands)
+* Skip setting up or tearing down any bindings for that resource
+
+This applies to queue listeners, queue subscribers, and exchange subscribers alike.
+
+::: tip
+`ExternallyOwned()` is distinct from `DeclarePassive`. A `DeclarePassive` exchange still makes a
+*passive* declaration against the broker at startup to verify that the resource already exists
+(failing fast if it does not), whereas an externally-owned resource never touches the broker for
+declaration at all. As of Wolverine 6.6, a `DeclarePassive` exchange is also left alone during
+resource teardown — Wolverine will not delete a resource it only verified rather than created.
+:::
 
 ## Exchange-to-Exchange Bindings
 
@@ -196,7 +241,7 @@ runtime.ModifyRabbitMqObjects(o =>
 // Unbind a queue from an exchange
 runtime.UnBindRabbitMqQueue(queueName, exchangeName, bindingKey);
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/dynamic_object_creation_smoke_tests.cs#L33-L49' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_dynamic_creation_of_rabbit_mq_objects' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/dynamic_object_creation_smoke_tests.cs#L34-L49' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_dynamic_creation_of_rabbit_mq_objects' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Quorum Queues or Streams <Badge type="tip" text="3.10" />
@@ -207,14 +252,14 @@ are largely not impacted otherwise.
 
 Here are your options for configuring one or many queues as opting into being a "Quorum Queue" or a "Stream":
 
-<!-- snippet: sample_configuring_quorum_or_streams_in_rabbit_MQ -->
+<!-- snippet: sample_configuring_quorum_or_streams_in_rabbit_mq -->
 <a id='snippet-sample_configuring_quorum_or_streams_in_rabbit_mq'></a>
 ```cs
 var builder = Host.CreateApplicationBuilder();
 builder.UseWolverine(opts =>
 {
     opts
-        .UseRabbitMq(builder.Configuration.GetConnectionString("rabbit"))
+        .UseRabbitMq(builder.Configuration.GetConnectionString("rabbit")!)
         
         // You can configure the queue type for declaration with this
         // usage as well
@@ -235,7 +280,7 @@ builder.UseWolverine(opts =>
     
 });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Samples.cs#L566-L593' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_configuring_quorum_or_streams_in_rabbit_mq' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Samples.cs#L568-L594' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_configuring_quorum_or_streams_in_rabbit_mq' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 There are just a few things to know:
@@ -249,7 +294,7 @@ If you need to declare Rabbit MQ queues, exchanges, or bindings within a [Wolver
 you can quickly access and make additions to the Rabbit MQ integration with your Wolverine application
 like so:
 
-<!-- snippet: sample_RabbitMQ_configuration_in_wolverine_extension -->
+<!-- snippet: sample_rabbitmq_configuration_in_wolverine_extension -->
 <a id='snippet-sample_rabbitmq_configuration_in_wolverine_extension'></a>
 ```cs
 public class MyModuleExtension : IWolverineExtension
@@ -265,7 +310,7 @@ public class MyModuleExtension : IWolverineExtension
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Samples.cs#L640-L655' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_rabbitmq_configuration_in_wolverine_extension' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Samples.cs#L641-L655' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_rabbitmq_configuration_in_wolverine_extension' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Identifier Prefixing for Shared Brokers

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using JasperFx.Core;
+using JasperFx.Descriptors;
 using JasperFx.Resources;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.DependencyInjection;
@@ -23,9 +24,9 @@ public class SignalRTransport : Endpoint, ITransport, IListener, ISender
     public SignalRTransport() : base($"{ProtocolName}://wolverine".ToUri(), EndpointRole.Application)
     {
         IsListener = true;
+        BrokerRole = "hub";
 
         #region sample_signalr_default_json_configuration
-
         JsonOptions = new(JsonSerializerOptions.Web) { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
         JsonOptions.Converters.Add(new JsonStringEnumConverter());
 
@@ -70,6 +71,7 @@ public class SignalRTransport : Endpoint, ITransport, IListener, ISender
         return new ValueTask();
     }
 
+    [IgnoreDescription]
     public IHubContext<Hub>? HubContext { get; private set; }
     public Type HubType { get; internal set; } = typeof(WolverineHub);
 
@@ -81,8 +83,10 @@ public class SignalRTransport : Endpoint, ITransport, IListener, ISender
 
     internal ILogger<SignalRTransport>? Logger { get; set; }
 
+    [IgnoreDescription]
     public JsonSerializerOptions JsonOptions { get; set; }
 
+    [IgnoreDescription]
     public IReceiver? Receiver { get; private set; }
     
     internal async Task ReceiveAsync(HubCallerContext context, string json)
@@ -117,6 +121,7 @@ public class SignalRTransport : Endpoint, ITransport, IListener, ISender
         return new ValueTask<IListener>(this);
     }
 
+    [IgnoreDescription]
     public IHandlerPipeline? Pipeline => Receiver?.Pipeline;
 
     ValueTask IChannelCallback.CompleteAsync(Envelope envelope)

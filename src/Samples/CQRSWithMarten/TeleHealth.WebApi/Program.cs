@@ -16,7 +16,6 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Host.ApplyJasperFxExtensions();
 
 #region sample_configuring_wolverine_event_subscriptions
-
 builder.Host.UseWolverine(opts =>
 {
     // I'm choosing to process any ChartingFinished event messages
@@ -44,9 +43,7 @@ builder.Host.UseWolverine(opts =>
 
 builder.Services.AddControllers();
 
-// Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
-builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddOpenApi();
 
 builder.Services.AddWolverineHttp();
 
@@ -58,7 +55,6 @@ builder.Services.AddMarten(opts =>
 });
 
 #region sample_opting_into_wolverine_event_publishing
-
 builder.Services.AddMarten(opts =>
     {
         var connString = builder
@@ -79,29 +75,24 @@ builder.Services.AddMarten(opts =>
 
         opts.Projections.Add<AppointmentProjection>(ProjectionLifecycle.Inline);
         opts.Projections
-            .Snapshot<ProviderShift>(SnapshotLifecycle.Async);
+            .Snapshot<ProviderShift>(JasperFx.Events.Projections.SnapshotLifecycle.Async);
     })
 
     // This adds a hosted service to run
     // asynchronous projections in a background process
     .AddAsyncDaemon(DaemonMode.HotCold)
 
-    // I added this to enroll Marten in the Wolverine outbox
-    .IntegrateWithWolverine()
-
-    // I also added this to opt into events being forward to
-    // the Wolverine outbox during SaveChangesAsync()
-    .EventForwardingToWolverine();
+    // Enroll Marten in the Wolverine outbox and opt into
+    // forwarding events to the Wolverine outbox on SaveChangesAsync()
+    .IntegrateWithWolverine(x => x.UseFastEventForwarding = true);
 
 #endregion
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
 {
-    app.UseSwagger();
-    app.UseSwaggerUI();
+    app.MapOpenApi();
 }
 
 app.MapWolverineEndpoints();

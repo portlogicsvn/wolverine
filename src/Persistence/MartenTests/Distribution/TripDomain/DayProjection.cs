@@ -1,3 +1,5 @@
+using JasperFx;
+using JasperFx.Events.Projections;
 using Marten.Events.Projections;
 using Marten.Schema;
 
@@ -10,7 +12,7 @@ public class Ending
     [Identity] public int Day { get; set; }
 }
 
-public class EndingProjection : MultiStreamProjection<Ending, int>
+public partial class EndingProjection : MultiStreamProjection<Ending, int>
 {
     public EndingProjection()
     {
@@ -32,7 +34,7 @@ public class Starting
     [Identity] public int Day { get; set; }
 }
 
-public class StartingProjection : MultiStreamProjection<Starting, int>
+public partial class StartingProjection : MultiStreamProjection<Starting, int>
 {
     public StartingProjection()
     {
@@ -47,7 +49,7 @@ public class StartingProjection : MultiStreamProjection<Starting, int>
     }
 }
 
-public class DayProjection : MultiStreamProjection<Day, int>
+public partial class DayProjection : MultiStreamProjection<Day, int>
 {
     public DayProjection()
     {

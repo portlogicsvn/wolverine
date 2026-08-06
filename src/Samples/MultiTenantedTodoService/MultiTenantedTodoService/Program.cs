@@ -11,7 +11,6 @@ var builder = WebApplication.CreateBuilder(args);
 var connectionString = "Host=localhost;Port=5433;Database=postgres;Username=postgres;password=postgres";
 
 #region sample_configuring_wolverine_for_marten_multi_tenancy
-
 // Adding Marten for persistence
 builder.Services.AddMarten(m =>
     {
@@ -36,13 +35,11 @@ builder.Services.AddMarten(m =>
 #endregion
 
 #region sample_add_resource_setup_on_startup
-
 builder.Services.AddResourceSetupOnStartup();
 
 #endregion
 
 #region sample_wolverine_setup_for_marten_multitenancy
-
 // Wolverine usage is required for WolverineFx.Http
 builder.Host.UseWolverine(opts =>
 {
@@ -57,23 +54,18 @@ builder.Host.UseWolverine(opts =>
 
 #endregion
 
-// Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
-builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddOpenApi();
 
 builder.Services.AddWolverineHttp();
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
 {
-    app.UseSwagger();
-    app.UseSwaggerUI();
+    app.MapOpenApi();
 }
 
 #region sample_configuring_tenant_id_detection_for_todo_service
-
 // Let's add in Wolverine HTTP endpoints to the routing tree
 app.MapWolverineEndpoints(opts =>
 {

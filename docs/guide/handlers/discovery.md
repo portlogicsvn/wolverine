@@ -34,7 +34,7 @@ using var host = await Host.CreateDefaultBuilder()
         Console.WriteLine(opts.DescribeHandlerMatch(typeof(MyMissingMessageHandler)));
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/HandlerDiscoverySamples.cs#L148-L160' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_describe_handler_match' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/HandlerDiscoverySamples.cs#L140-L151' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_describe_handler_match' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Even if the report itself isn't exactly clear to you, using this textual report in a Wolverine issue or
@@ -57,6 +57,23 @@ We highly recommend you use [WebApplicationFactory](https://learn.microsoft.com/
 to bootstrap your application in integration tests to avoid any problems around Wolverine's application assembly determination.
 :::
 
+::: warning The application assembly is pinned process-wide (test harnesses)
+The resolved application assembly is cached in a **process-wide static** the first time any host in the process
+falls through to the automatic call-stack determination. In a normal application that runs a single host this is
+harmless. But in a **test process that stands up multiple Wolverine hosts** (xUnit/vstest), whichever test class
+runs *first* pins the scanned assembly for every later host that doesn't set one explicitly — so if an earlier host
+resolved to a referenced assembly (a shared `Tests.Common`, the app-under-test, …), conventional handlers defined in
+a *different* assembly silently disappear for the whole run.
+
+The symptom is quiet and downstream — `No routes can be determined for Envelope … (SomeMessage)` at info level, or
+null scatter/gather results — and it is **order-dependent**: the suite passes in isolation, fails in a full run, and
+can flip between builds as recompilation reshuffles test order.
+
+Wolverine now logs a **warning at startup** when a host adopts an application assembly that differs from where it was
+actually registered, naming both assemblies. If you see that warning (or the routing symptom above), set the
+application assembly explicitly on the affected host, or add the missing assembly to discovery — see just below.
+:::
+
 In testing scenarios, if you're bootstrapping the application independently somehow of the application's "official" configuration, you may have to help
 Wolverine out a little bit and explicitly tell it what the application assembly is:
 
@@ -72,7 +89,7 @@ using var host = Host.CreateDefaultBuilder()
         opts.ApplicationAssembly = typeof(Program).Assembly;
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/BootstrappingSamples.cs#L10-L21' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_overriding_application_assembly' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/BootstrappingSamples.cs#L10-L20' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_overriding_application_assembly' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 To pull in handlers from other assemblies, you can either decorate an assembly with this attribute:
@@ -84,7 +101,7 @@ using Wolverine.Attributes;
 
 [assembly: WolverineModule]
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/OrderExtension/Handlers.cs#L1-L7' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_wolverine_module_attribute' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/OrderExtension/Handlers.cs#L1-L6' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_wolverine_module_attribute' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Or you can programmatically add additional assemblies to the handler discovery with this syntax:
@@ -99,7 +116,7 @@ using var host = Host.CreateDefaultBuilder()
         opts.Discovery.IncludeAssembly(typeof(MessageFromOtherAssembly).Assembly);
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/BootstrappingSamples.cs#L26-L35' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_adding_extra_assemblies_to_type_discovery' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/BootstrappingSamples.cs#L25-L33' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_adding_extra_assemblies_to_type_discovery' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Handler Type Discovery
@@ -127,7 +144,7 @@ In all cases, Wolverine assumes that the first argument is the incoming message.
 
 To make that concrete, here are some valid handler method signatures:
 
-<!-- snippet: sample_ValidMessageHandlers -->
+<!-- snippet: sample_validmessagehandlers -->
 <a id='snippet-sample_validmessagehandlers'></a>
 ```cs
 [WolverineHandler]
@@ -181,7 +198,7 @@ public class ValidMessageHandlers
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/HandlerExamples.cs#L10-L63' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_validmessagehandlers' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/HandlerExamples.cs#L10-L62' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_validmessagehandlers' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 The valid method names are:
@@ -194,7 +211,7 @@ The valid method names are:
 And also specific to sagas: 
 
 1. Start / StartAsync
-2. Starts / StartAsync
+2. Starts / StartsAsync
 3. Orchestrate / OrchestrateAsync
 4. Orchestrates / OrchestratesAsync
 5. StartOrHandle / StartOrHandleAsync
@@ -213,7 +230,7 @@ conventional handler discovery
 You can completely turn off any automatic discovery of message handlers through type scanning by
 using this syntax in your `WolverineOptions`:
 
-<!-- snippet: sample_ExplicitHandlerDiscovery -->
+<!-- snippet: sample_explicithandlerdiscovery -->
 <a id='snippet-sample_explicithandlerdiscovery'></a>
 ```cs
 using var host = await Host.CreateDefaultBuilder()
@@ -223,7 +240,7 @@ using var host = await Host.CreateDefaultBuilder()
         opts.Discovery.DisableConventionalDiscovery();
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/HandlerExamples.cs#L227-L236' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_explicithandlerdiscovery' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/HandlerExamples.cs#L218-L226' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_explicithandlerdiscovery' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Replacing the Handler Discovery Rules <Badge type="tip" text="3.10" />
@@ -247,7 +264,7 @@ using var host = await Host.CreateDefaultBuilder()
         });
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/CoreTests/Configuration/HandlerDiscoveryTests.cs#L36-L51' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_replacing_handler_discovery_rules' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/CoreTests/Configuration/HandlerDiscoveryTests.cs#L36-L50' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_replacing_handler_discovery_rules' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Explicitly Ignoring Methods
@@ -255,7 +272,7 @@ using var host = await Host.CreateDefaultBuilder()
 You can force Wolverine to disregard a candidate message handler action at either the class or method
 level by using the `[WolverineIgnore]` attribute like this:
 
-<!-- snippet: sample_WolverineIgnoreAttribute -->
+<!-- snippet: sample_wolverineignoreattribute -->
 <a id='snippet-sample_wolverineignoreattribute'></a>
 ```cs
 public class NetflixHandler : IMovieSink
@@ -304,7 +321,7 @@ public class BlockbusterHandler
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/CoreTests/Configuration/find_handlers_with_the_default_handler_discovery.cs#L237-L285' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_wolverineignoreattribute' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/CoreTests/Configuration/find_handlers_with_the_default_handler_discovery.cs#L237-L284' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_wolverineignoreattribute' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 
@@ -320,7 +337,7 @@ from those naming conventions you can either supplement the handler discovery or
 
 At a minimum, you can disable the built in discovery, add additional type filtering criteria, or register specific handler classes with the code below:
 
-<!-- snippet: sample_CustomHandlerApp -->
+<!-- snippet: sample_customhandlerapp -->
 <a id='snippet-sample_customhandlerapp'></a>
 ```cs
 using var host = await Host.CreateDefaultBuilder()
@@ -344,5 +361,5 @@ using var host = await Host.CreateDefaultBuilder()
             .IncludeType<SimpleHandler>();
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/HandlerDiscoverySamples.cs#L120-L143' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_customhandlerapp' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/HandlerDiscoverySamples.cs#L113-L135' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_customhandlerapp' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->

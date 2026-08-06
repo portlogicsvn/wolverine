@@ -1,6 +1,7 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
 using JasperFx;
+using JasperFx.CodeGeneration;
 using JasperFx.Core.IoC;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -9,10 +10,14 @@ using Microsoft.AspNetCore.Mvc.ApiExplorer;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.AspNetCore.Routing.Matching;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using Wolverine.Configuration;
+using JasperFx.Events;
 using Wolverine.Configuration.Capabilities;
+using Wolverine.Http.ApiVersioning;
 using Wolverine.Http.CodeGen;
+using Wolverine.Http.Diagnostics;
 using Wolverine.Http.Transport;
 using Wolverine.Http.Validation;
 using Wolverine.Http.Validation.Internals;
@@ -160,13 +165,41 @@ public static class WolverineHttpEndpointRouteBuilderExtensions
         services.AddType(typeof(IApiDescriptionProvider), typeof(WolverineApiDescriptionProvider),
             ServiceLifetime.Singleton);
         services.AddSingleton<WolverineHttpOptions>();
-        services.AddSingleton<NewtonsoftHttpSerialization>();
+        // NewtonsoftHttpSerialization moved to the WolverineFx.Http.Newtonsoft
+        // companion package in 6.0. The package's AddWolverineHttpNewtonsoft()
+        // service-collection extension registers the singleton on demand; only
+        // apps that call UseNewtonsoftJsonForSerialization() pay for it now.
         services.AddSingleton<HttpTransportExecutor>();
+
+        // GH-3690 — the HTTP transport's send side needs an IWolverineHttpTransportClient and an
+        // IHttpClientFactory. Every application had to register both by hand, and the samples that got it
+        // wrong failed at runtime rather than at startup. Register them here: TryAdd so an application
+        // that supplies its own implementation (e.g. the CloudEvents variant) still wins, and a named
+        // client of the transport's own so envelope traffic is configurable in one place instead of
+        // inheriting the application's default HttpClient settings.
+        services.AddHttpClient(HttpTransport.HttpClientName);
+        services.TryAddScoped<IWolverineHttpTransportClient, WolverineHttpTransportClient>();
 
         services.AddSingleton(typeof(IProblemDetailSource<>), typeof(ProblemDetailSource<>));
         services.AddSingleton<MatcherPolicy, ContentTypeEndpointSelectorPolicy>();
 
         services.AddSingleton<ICapabilityDescriptor, HttpCapabilityDescriptor>();
+
+        // Issue #84 — surface the Wolverine HTTP graph as an
+        // IHttpGraphUsageSource so ServiceCapabilities.HttpGraphs picks
+        // it up at the same point as event-stores / document-stores /
+        // db-contexts. The corresponding HttpCapabilityDescriptor stays
+        // registered for back-compat with monitoring agents that haven't
+        // shipped the richer reader yet.
+        services.AddSingleton<IHttpGraphUsageSource, HttpGraphUsageSource>();
+
+        // Registered unconditionally — harmless when no versioned endpoint uses it.
+        services.AddSingleton<ApiVersionHeaderWriter>(sp =>
+        {
+            var httpOptions = sp.GetRequiredService<WolverineHttpOptions>();
+            var versioningOptions = httpOptions.ApiVersioning ?? new WolverineApiVersioningOptions();
+            return new ApiVersionHeaderWriter(versioningOptions);
+        });
 
         services.ConfigureWolverine(opts =>
         {
@@ -206,11 +239,26 @@ public static class WolverineHttpEndpointRouteBuilderExtensions
         options.TenantIdDetection.Services = serviceProvider; // Hokey, but let this go
         options.Endpoints = new HttpGraph(runtime.Options, serviceProvider.GetRequiredService<IServiceContainer>());
 
+        // Held rather than read now: endpoints mapped *after* this call still land in the same live
+        // DataSources collection, and an ApiExplorer read is the only thing that needs them. See GH-3421.
+        options.RouteBuilder = endpoints;
+
         configure?.Invoke(options);
-        
+
         options.Policies.Add(new ProblemDetailsFromMiddleware());
+
+        // If ApiVersioning is enabled, append a finalization policy that re-positions the header
+        // writer to index 0 of every relevant chain after every user-supplied policy has run.
+        // FluentValidation / DataAnnotations / RequestId / TenantId middleware all also insert at
+        // index 0; the writer must outrank them so its OnStarting callback registers before any
+        // short-circuit return. See ApiVersionHeaderFinalizationPolicy.
+        var versioningPolicy = options.Policies.OfType<ApiVersioning.ApiVersioningPolicy>().FirstOrDefault();
+        if (versioningPolicy is not null)
+        {
+            options.Policies.Add(new ApiVersioning.ApiVersionHeaderFinalizationPolicy(versioningPolicy.ChainsRequiringHeaderEmission));
+        }
         
-        if (Environment.CommandLine.Contains("codegen", StringComparison.OrdinalIgnoreCase))
+        if (DynamicCodeBuilder.WithinCodegenCommand)
         {
             options.WarmUpRoutes = RouteWarmup.Lazy;
         }
@@ -218,6 +266,7 @@ public static class WolverineHttpEndpointRouteBuilderExtensions
         options.JsonSerializerOptions = new Lazy<JsonSerializerOptions>(() => serviceProvider.GetService<IOptions<JsonOptions>>()?.Value?.SerializerOptions ?? new JsonSerializerOptions());
 
         options.Endpoints.AutoAntiforgeryOnFormEndpoints = options._autoAntiforgeryOnFormEndpoints;
+        options.Endpoints.RejectUnparseableQueryValues = options.RejectUnparseableQueryValues;
         options.Endpoints.DiscoverEndpoints(options);
         runtime.Options.Parts.Add(options.Endpoints);
 

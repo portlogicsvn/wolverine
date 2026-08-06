@@ -272,6 +272,15 @@ public class MarkItemReady
 }
 ```
 
+::: tip
+The Polecat integration recognizes both its own `Wolverine.Polecat.IdentityAttribute` and the
+shared `JasperFx.IdentityAttribute` used elsewhere in the Critter Stack (and by the
+[Marten integration](../marten/event-sourcing)). If you maintain a single, store-agnostic
+command/aggregate source that is compiled against both Marten and Polecat, decorate the identity
+member with the shared `JasperFx.IdentityAttribute` (i.e. `using JasperFx;`) and it will be honored
+by both stores — no per-store attribute alias is required.
+:::
+
 ## Forwarding Events
 
 See [Event Forwarding](./event-forwarding) for more information.
@@ -553,7 +562,7 @@ public record PcNkOrderCreated(PcNkOrderNumber OrderNumber, string CustomerName)
 public record PcNkItemAdded(string ItemName, decimal Price);
 public record PcNkOrderCompleted;
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/PolecatTests/natural_key_aggregate_handler_workflow.cs#L123-L160' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_wolverine_polecat_natural_key_aggregate' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/PolecatTests/natural_key_aggregate_handler_workflow.cs#L125-L161' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_wolverine_polecat_natural_key_aggregate' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ### Using Natural Keys in Command Handlers
@@ -567,7 +576,7 @@ public record AddPcNkOrderItem(PcNkOrderNumber OrderNum, string ItemName, decima
 public record AddPcNkOrderItems(PcNkOrderNumber OrderNum, (string Name, decimal Price)[] Items);
 public record CompletePcNkOrder(PcNkOrderNumber OrderNum);
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/PolecatTests/natural_key_aggregate_handler_workflow.cs#L162-L168' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_wolverine_polecat_natural_key_commands' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/PolecatTests/natural_key_aggregate_handler_workflow.cs#L163-L168' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_wolverine_polecat_natural_key_commands' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Wolverine uses the natural key type on the command property to call `FetchForWriting<TAggregate, TNaturalKey>()` under the covers, resolving the stream by the natural key in a single database round-trip.
@@ -603,7 +612,7 @@ public static class PcNkOrderHandler
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/PolecatTests/natural_key_aggregate_handler_workflow.cs#L170-L196' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_wolverine_polecat_natural_key_handlers' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/PolecatTests/natural_key_aggregate_handler_workflow.cs#L170-L195' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_wolverine_polecat_natural_key_handlers' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 For more details on how natural keys work at the Polecat level, see the [Polecat natural keys documentation](/events/natural-keys).
@@ -711,8 +720,14 @@ namespace MartenTests.Dcb.University;
 /// Ported from the Axon SubscribeStudentToCourseCommandHandler.State which uses
 /// EventCriteria.either() to load events matching CourseId OR StudentId.
 /// </summary>
-public class SubscriptionState
+public partial class SubscriptionState
 {
+    // Required so the aggregate can be registered as a single-stream projection
+    // (LiveStreamAggregation), which is what makes the JasperFx.Events source generator
+    // emit the dispatcher that FetchForWritingByTags<SubscriptionState> resolves. For the
+    // boundary (tag-query) path this Id is not stream-bound — it just satisfies the
+    // single-stream projection shape, the same way Marten's own DCB aggregates carry one.
+    public string Id { get; set; } = null!;
     public CourseId? CourseId { get; private set; }
     public int CourseCapacity { get; private set; }
     public int StudentsSubscribedToCourse { get; private set; }
@@ -758,8 +773,45 @@ public class SubscriptionState
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/MartenTests/Dcb/University/SubscriptionState.cs#L1-L55' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_wolverine_dcb_subscription_state' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/MartenTests/Dcb/University/SubscriptionState.cs#L1-L61' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_wolverine_dcb_subscription_state' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
+
+### Identity-less Boundary Aggregates with `[BoundaryAggregate]`
+
+A boundary aggregate is built from `Apply` / `Create` methods, and the source generator emits the evolver that `FetchForWritingByTags<T>()` (and `AggregateByTagsAsync<T>()`) resolve at runtime. The generator normally discovers the aggregate's identity (`TId`) from an `Id` property or an `[AggregateIdentity]` member. A *true* boundary aggregate, though, has **no single-stream identity** — it spans multiple streams by tag — so the generator cannot infer a `TId`, emits nothing, and the DCB fetch throws:
+
+```
+JasperFx.Events.Projections.InvalidProjectionException : No source-generated dispatcher found for ...
+```
+
+Mark such an identity-less aggregate with `[BoundaryAggregate]` (from `JasperFx.Events.Aggregation`) to opt it into evolver generation:
+
+```cs
+using JasperFx.Events.Aggregation;
+
+[BoundaryAggregate]
+public partial class SubscriptionState
+{
+    // No Id property, no [AggregateIdentity] — spans streams by tag only
+    public CourseId? CourseId { get; private set; }
+    public StudentId? StudentId { get; private set; }
+
+    public void Apply(StudentEnrolledInFaculty e) => StudentId = e.StudentId;
+    public void Apply(CourseCreated e) => CourseId = e.CourseId;
+    // ... remaining Apply methods
+}
+```
+
+Requirements:
+
+- The aggregate must be `partial` and live in an assembly that references the `JasperFx.Events.SourceGenerator` analyzer.
+- The `[BoundaryAggregate]` attribute must sit on the type **in its own defining assembly** — that is the compilation the generator emits into and the assembly the runtime scans (`typeof(T).Assembly`) when resolving the evolver.
+
+::: tip
+This is only needed for the **identity-less** case. An aggregate that carries an `Id` (or an `[AggregateIdentity]` member) — like the `SubscriptionState` shown above, which keeps an `Id` and is registered as a live single-stream projection — already gets an evolver and needs no marker.
+:::
+
+The `[BoundaryAggregate]` marker comes from JasperFx.Events 2.0.0-alpha.21 / JasperFx.Events.SourceGenerator 2.0.0-alpha.13 ([jasperfx#324](https://github.com/JasperFx/jasperfx/issues/324)). See the [Polecat DCB documentation](https://github.com/JasperFx/polecat/issues/122) for the canonical attribute reference; the note here covers the Wolverine handler-side workflow.
 
 ### Using the `[BoundaryModel]` Attribute
 

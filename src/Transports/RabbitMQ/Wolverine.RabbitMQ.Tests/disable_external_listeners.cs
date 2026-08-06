@@ -14,7 +14,6 @@ public class disable_external_listeners
         using var host = await Host.CreateDefaultBuilder()
 
             #region sample_disable_all_listeners
-
             .UseWolverine(opts =>
             {
                 // This will disable all message listening to
@@ -26,7 +25,7 @@ public class disable_external_listeners
                 // This could never, ever work
                 opts.UseRabbitMq().AutoProvision();
                 opts.ListenToRabbitQueue("incoming");
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         #endregion
 

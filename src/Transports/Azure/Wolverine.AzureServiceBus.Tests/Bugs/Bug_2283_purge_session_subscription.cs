@@ -6,12 +6,11 @@ using Xunit;
 
 namespace Wolverine.AzureServiceBus.Tests.Bugs;
 
-[Trait("Category", "Flaky")]
 public class Bug_2283_purge_session_subscription : IAsyncLifetime
 {
     private IHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         // This should not throw even though the subscription has sessions enabled
         // and AutoPurgeOnStartup is set. Before the fix, PurgeAsync on a session-enabled
@@ -34,7 +33,7 @@ public class Bug_2283_purge_session_subscription : IAsyncLifetime
             }).StartAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _host.StopAsync();
         _host.Dispose();
@@ -95,7 +94,7 @@ public class Bug_2283_purge_session_subscription : IAsyncLifetime
                     .FromTopic("bug2283")
                     .RequireSessions(1)
                     .ProcessInline();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         // Send new messages through host2 and verify only the new ones arrive
         Func<IMessageContext, Task> sendNew = async bus =>
@@ -111,7 +110,7 @@ public class Bug_2283_purge_session_subscription : IAsyncLifetime
         var received = session.Received.MessagesOf<Bug2283Message>().Select(x => x.Name).ToArray();
         received.ShouldContain("New1");
 
-        await host2.StopAsync();
+        await host2.StopAsync(TestContext.Current.CancellationToken);
     }
 }
 

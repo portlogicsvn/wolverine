@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using FluentValidation;
 using JasperFx;
 using JasperFx.Core.IoC;
@@ -27,12 +28,45 @@ public static class WolverineFluentValidationExtensions
 {
     /// <summary>
     ///     Apply FluentValidation middleware to message handlers that have known validators
+    ///     in the underlying container, with full access to FluentValidation configuration.
+    /// </summary>
+    /// <param name="options"></param>
+    /// <param name="configure">Action to configure FluentValidation behavior and validator options</param>
+    /// <returns></returns>
+    public static WolverineOptions UseFluentValidation(this WolverineOptions options,
+        Action<FluentValidationConfiguration> configure)
+    {
+        var config = new FluentValidationConfiguration();
+        configure(config);
+        return options.UseFluentValidation(config.RegistrationBehavior, config.IncludeInternalTypes);
+    }
+
+    /// <summary>
+    ///     Apply FluentValidation middleware to message handlers that have known validators
     ///     in the underlying container
     /// </summary>
     /// <param name="options"></param>
+    /// <param name="behavior"></param>
+    /// <param name="includeInternalTypes">When true, also discovers validators with internal visibility</param>
     /// <returns></returns>
+    // The DiscoverAndRegisterValidators path runs FluentValidation's
+    // AssemblyScanner over options.ApplicationAssembly. AssemblyScanResult
+    // .ValidatorType is `Type` without DAM annotations, so the trimmer cannot
+    // verify that ServiceDescriptor's ctor requirement (PublicConstructors)
+    // is satisfied. The scan path is inherently not AOT-friendly — AOT
+    // consumers should use RegistrationBehavior.ExplicitRegistration and
+    // wire validators by hand, which is fully trim-clean. See AOT guide.
+    [UnconditionalSuppressMessage("Trimming", "IL2026",
+        Justification = "FluentValidation AssemblyScanner discovery path is non-AOT by design; AOT consumers use RegistrationBehavior.ExplicitRegistration. See AOT guide.")]
+    [UnconditionalSuppressMessage("Trimming", "IL2067",
+        Justification = "ConnectImplementationsToTypesClosing closure receives an unannotated Type; HasConstructorsWithArguments inspects the validator's public constructors. The validator types are statically referenced by user code (the IValidator<T> implementations) and preserved by the assembly scan's discovery. Non-AOT path; AOT consumers use RegistrationBehavior.ExplicitRegistration.")]
+    [UnconditionalSuppressMessage("Trimming", "IL2072",
+        Justification = "AssemblyScanResult.ValidatorType is not DAM-annotated by FluentValidation; the scan path is non-AOT by design. AOT consumers use RegistrationBehavior.ExplicitRegistration. See AOT guide.")]
+    [UnconditionalSuppressMessage("AOT", "IL3050",
+        Justification = "JasperFx ServiceCollectionExtensions.Scan closes open-generic IValidator<T> registrations via MakeGenericType at startup. The validator assemblies are statically known to the application; AOT consumers use RegistrationBehavior.ExplicitRegistration.")]
     public static WolverineOptions UseFluentValidation(this WolverineOptions options,
-        RegistrationBehavior behavior = RegistrationBehavior.DiscoverAndRegisterValidators)
+        RegistrationBehavior behavior = RegistrationBehavior.DiscoverAndRegisterValidators,
+        bool includeInternalTypes = false)
     {
         if (options.Services.Any(x => x.ServiceType == typeof(WolverineFluentValidationMarker)))
         {
@@ -59,13 +93,37 @@ public static class WolverineFluentValidationExtensions
                             "Wolverine (and JasperFx) have not been able to determine the ApplicationAssembly. Please set that explicitly");
                     }
                 }
-                
-                options.Services.Scan(x =>
-                {
-                    foreach (var assembly in options.Assemblies) x.Assembly(assembly);
 
-                    x.ConnectImplementationsToTypesClosing(typeof(IValidator<>), type => type.HasConstructorsWithArguments() ? ServiceLifetime.Scoped : ServiceLifetime.Singleton);
-                });
+                // Use FluentValidation's own AssemblyScanner when internal types are needed,
+                // since Lamar's ConnectImplementationsToTypesClosing only finds public types.
+                if (includeInternalTypes)
+                {
+                    var scanResults =
+                        global::FluentValidation.AssemblyScanner.FindValidatorsInAssemblies(options.Assemblies,
+                            includeInternalTypes: true);
+
+                    foreach (var result in scanResults)
+                    {
+                        var lifetime = result.ValidatorType.HasConstructorsWithArguments()
+                            ? ServiceLifetime.Scoped
+                            : ServiceLifetime.Singleton;
+
+                        options.Services.TryAdd(new ServiceDescriptor(result.InterfaceType, result.ValidatorType,
+                            lifetime));
+                    }
+                }
+                else
+                {
+                    options.Services.Scan(x =>
+                    {
+                        foreach (var assembly in options.Assemblies) x.Assembly(assembly);
+
+                        x.ConnectImplementationsToTypesClosing(typeof(IValidator<>),
+                            type => type.HasConstructorsWithArguments()
+                                ? ServiceLifetime.Scoped
+                                : ServiceLifetime.Singleton);
+                    });
+                }
             }
         });
 

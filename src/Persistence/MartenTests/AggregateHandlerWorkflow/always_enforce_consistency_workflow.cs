@@ -3,7 +3,9 @@ using JasperFx;
 using JasperFx.CodeGeneration;
 using JasperFx.Resources;
 using Marten;
+using JasperFx.Events;
 using Marten.Events;
+using JasperFx.Events.Projections;
 using Marten.Events.Projections;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -20,7 +22,7 @@ public class always_enforce_consistency_workflow : PostgresqlContext, IAsyncLife
     private IDocumentStore theStore = null!;
     private Guid theStreamId;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         theHost = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -35,13 +37,17 @@ public class always_enforce_consistency_workflow : PostgresqlContext, IAsyncLife
                     .IntegrateWithWolverine();
 
                 opts.Services.AddResourceSetupOnStartup();
-                opts.CodeGeneration.TypeLoadMode = TypeLoadMode.Auto;
+                opts.Discovery.DisableConventionalDiscovery()
+                    .IncludeType(typeof(ConsistentPropertyHandler))
+                    .IncludeType(typeof(ConsistentAggregateHandlerUsage))
+                    .IncludeType(typeof(ConsistentParamHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
             }).StartAsync();
 
         theStore = theHost.Services.GetRequiredService<IDocumentStore>();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await theHost.StopAsync();
         theHost.Dispose();
@@ -173,7 +179,6 @@ public record ConsistencyAEvent;
 #endregion
 
 #region Commands
-
 // Happy path commands
 public record ConsistentIncrementA(Guid ConsistencyAggregateId);
 public record ConsistentDoNothing(Guid ConsistencyAggregateId);

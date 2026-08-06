@@ -1,5 +1,6 @@
 using Azure.Messaging.ServiceBus;
 using JasperFx.Core;
+using JasperFx.Descriptors;
 using Microsoft.Extensions.Logging;
 using Wolverine.Configuration;
 using Wolverine.Runtime;
@@ -22,15 +23,27 @@ public interface IAzureServiceBusListeningEndpoint
     ///     with an empty list of messages. Default is 5 seconds.
     /// </summary>
     public TimeSpan MaximumWaitTime { get; set; }
+
+    /// <summary>
+    ///     The number of messages that the underlying Azure Service Bus receiver eagerly buffers
+    ///     on the client ahead of any ReceiveMessagesAsync() calls. The default is 0 (prefetch is
+    ///     disabled). Be aware that prefetched messages age against the queue's message lock
+    ///     duration while they sit in the client buffer, so an oversized prefetch combined with
+    ///     slow handlers leads to lock-lost redeliveries.
+    /// </summary>
+    public int PrefetchCount { get; set; }
 }
 
 public abstract class AzureServiceBusEndpoint : Endpoint<IAzureServiceBusEnvelopeMapper, AzureServiceBusEnvelopeMapper>, IBrokerEndpoint, IAzureServiceBusListeningEndpoint
 {
+    private int? _prefetchCount;
+
     public AzureServiceBusEndpoint(AzureServiceBusTransport parent, Uri uri, EndpointRole role) : base(uri, role)
     {
         Parent = parent;
     }
 
+    [IgnoreDescription]
     public AzureServiceBusTransport Parent { get; }
 
     /// <summary>
@@ -46,6 +59,78 @@ public abstract class AzureServiceBusEndpoint : Endpoint<IAzureServiceBusEnvelop
     ///     with an empty list of messages. Default is 5 seconds.
     /// </summary>
     public TimeSpan MaximumWaitTime { get; set; } = 5.Seconds();
+
+    /// <summary>
+    ///     The number of messages that the underlying Azure Service Bus receiver eagerly buffers
+    ///     on the client ahead of any ReceiveMessagesAsync() calls. Falls back to the transport-wide
+    ///     default (see AzureServiceBusTransport.PrefetchCount) unless explicitly set on this
+    ///     endpoint. The ultimate default is 0 (prefetch is disabled). Be aware that prefetched
+    ///     messages age against the queue's message lock duration while they sit in the client
+    ///     buffer, so an oversized prefetch combined with slow handlers leads to lock-lost
+    ///     redeliveries.
+    /// </summary>
+    public int PrefetchCount
+    {
+        get => _prefetchCount ?? Parent.PrefetchCount;
+        set
+        {
+            if (value < 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(value), value,
+                    "PrefetchCount cannot be negative");
+            }
+
+            _prefetchCount = value;
+        }
+    }
+
+    private int? _maximumConcurrentCalls;
+
+    /// <summary>
+    ///     How many messages an <c>Inline</c> or session-processor listener for this endpoint hands
+    ///     to the handler pipeline at once. This maps to the Azure Service Bus SDK's
+    ///     <c>MaxConcurrentCalls</c>, which Wolverine never set -- so inline Azure Service Bus
+    ///     listeners ran strictly one message at a time on the SDK default, and the only way to
+    ///     change that was the raw <see cref="ConfigureProcessor" /> hook. Null keeps the SDK
+    ///     default of 1. Does not apply to the default Buffered/Durable batch receive loop, which
+    ///     scales through MaximumParallelMessages instead. See GH-3494.
+    /// </summary>
+    public int? MaximumConcurrentCalls
+    {
+        get => _maximumConcurrentCalls;
+        set
+        {
+            if (value is < 1)
+            {
+                throw new ArgumentOutOfRangeException(nameof(value), value,
+                    "MaximumConcurrentCalls must be at least 1");
+            }
+
+            _maximumConcurrentCalls = value;
+        }
+    }
+
+    /// <summary>
+    ///     Optional customization of the Azure Service Bus <see cref="ServiceBusProcessorOptions" /> used
+    ///     by inline listeners for this endpoint. Wolverine reserves control of the properties it depends
+    ///     on for correct message acknowledgement (see AzureServiceBusTransport.Listening), so those will
+    ///     be re-asserted after this action runs.
+    /// </summary>
+    [IgnoreDescription]
+    public Action<ServiceBusProcessorOptions>? ConfigureProcessor { get; set; }
+
+    /// <summary>
+    ///     Optional customization of the Azure Service Bus <see cref="ServiceBusSessionProcessorOptions" /> used
+    ///     by session-enabled listeners for this endpoint. Setting this (directly, or the <c>SessionIds</c>
+    ///     collection via <c>RequireSessionsWithOnlyTheseIdentifiers(...)</c>) switches the session listener away
+    ///     from the default <c>AcceptNextSession</c> loop to a <see cref="ServiceBusSessionProcessor" />. Wolverine
+    ///     reserves control of the properties it depends on for message acknowledgement (currently
+    ///     <c>ReceiveMode</c> and <c>AutoCompleteMessages</c>), which are re-asserted after this action runs. Unlike
+    ///     <see cref="ConfigureProcessor" />, this is a multicast delegate so the <c>SessionIds</c> sugar and any
+    ///     explicit customization compose rather than overwrite each other.
+    /// </summary>
+    [IgnoreDescription]
+    public Action<ServiceBusSessionProcessorOptions>? ConfigureSessionProcessor { get; set; }
 
     public abstract ValueTask<bool> CheckAsync();
     public abstract ValueTask TeardownAsync(ILogger logger);

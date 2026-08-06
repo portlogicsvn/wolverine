@@ -33,10 +33,41 @@ builder.UseWolverine(opts =>
 
 // continue with your bootstrapping...
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/RavenDbTests/DocumentationSamples.cs#L14-L37' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_bootstrapping_with_ravendb' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/RavenDbTests/DocumentationSamples.cs#L14-L36' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_bootstrapping_with_ravendb' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Also see [RavenDb's own documentation](https://ravendb.net/docs/article-page/6.0/csharp/start/guides/aws-lambda/existing-project) for bootstrapping RavenDb inside of a .NET application. 
+
+## Aspire Integration
+
+RavenDB has an excellent Aspire integration story. The `CommunityToolkit.Aspire.Hosting.RavenDB` package adds RavenDB to the AppHost, and `CommunityToolkit.Aspire.RavenDB.Client` registers `IDocumentStore` in DI. Since Wolverine's `UseRavenDbPersistence()` reads `IDocumentStore` from DI, it works with no extra configuration.
+
+**AppHost** (`CommunityToolkit.Aspire.Hosting.RavenDB` NuGet):
+```csharp
+var ravendb = builder.AddRavenDB("ravendb")
+    .AddDatabase("wolverine");
+
+builder.AddProject<Projects.MyWorker>("worker")
+    .WithReference(ravendb)
+    .WaitFor(ravendb);
+```
+
+**Service project** (`CommunityToolkit.Aspire.RavenDB.Client` NuGet registers `IDocumentStore` in DI):
+```csharp
+var builder = Host.CreateApplicationBuilder(args);
+
+// Registers IDocumentStore in DI — Wolverine picks it up automatically
+builder.AddRavenDBClient("ravendb");
+
+builder.UseWolverine(opts =>
+{
+    // That's it — UseRavenDbPersistence() reads IDocumentStore from DI
+    opts.UseRavenDbPersistence();
+    opts.Policies.AutoApplyTransactions();
+});
+
+await builder.Build().RunAsync();
+```
 
 ## Message Persistence
 
@@ -57,12 +88,12 @@ public class Order : Saga
 {
     // Just use this for the identity
     // of RavenDb backed sagas
-    public string Id { get; set; }
-    
+    public string Id { get; set; } = null!;
+
     // Handle and Start methods...
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/RavenDbTests/DocumentationSamples.cs#L41-L52' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_ravendb_saga' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/RavenDbTests/DocumentationSamples.cs#L40-L50' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_ravendb_saga' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 There's nothing else to do, if RavenDb integration is applied to your Wolverine, it's going to kick in
@@ -89,7 +120,7 @@ public class CreateDocCommandHandler
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/RavenDbTests/DocumentationSamples.cs#L60-L71' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_transactional_with_raven' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/RavenDbTests/DocumentationSamples.cs#L58-L68' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_transactional_with_raven' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Or if you choose to do this more conventionally (which folks do tend to use quite often):
@@ -122,7 +153,7 @@ public class AlternativeCreateDocCommandHandler
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/RavenDbTests/DocumentationSamples.cs#L73-L85' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_raven_using_handler_for_auto_transactions' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/RavenDbTests/DocumentationSamples.cs#L70-L81' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_raven_using_handler_for_auto_transactions' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 The transactional middleware will also be applied for any usage of the `RavenOps` [side effects](/guide/handlers/side-effects) model
@@ -141,14 +172,30 @@ public static class RecordTeamHandler
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/RavenDbTests/transactional_middleware.cs#L50-L62' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_ravendb_side_effects' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/RavenDbTests/transactional_middleware.cs#L50-L61' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_ravendb_side_effects' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## System Control Queues
 
-The RavenDb integration to Wolverine does not yet come with a built in database control queue
-mechanism, so you will need to add that from external messaging brokers as in this example
-using Azure Service Bus:
+Wolverine uses a "control queue" for low latency communication between running nodes to coordinate
+[agent assignments](/guide/durability/leadership-and-troubleshooting) such as leader election and exclusive
+listeners when running in the `Balanced` durability mode. The RavenDb integration
+ships with a **native, database-backed control queue** that requires no additional configuration —
+simply calling `opts.UseRavenDbPersistence()` (as shown at the top of this page) is enough.
+
+When running in `Balanced` mode (the default), Wolverine automatically registers a RavenDb-backed control
+endpoint that stores inter-node control messages in a `ControlMessages` collection. Each node polls for
+messages targeted at its own node id, dispatches them, and deletes them once handled. Control messages are
+also given a short expiration as a safety net for undelivered messages.
+
+::: tip
+The native control queue is only activated when the durability mode is `Balanced` and you have not already
+supplied a different node control endpoint (see below). It is not used in `Solo`, `Serverless`, or
+`MediatorOnly` modes, which do not require inter-node coordination.
+:::
+
+If you would rather use an external messaging broker for the control queue, you can still opt into that.
+For example, with Azure Service Bus:
 
 <!-- snippet: sample_enabling_azure_service_bus_control_queues -->
 <a id='snippet-sample_enabling_azure_service_bus_control_queues'></a>
@@ -173,7 +220,7 @@ builder.UseWolverine(opts =>
 
 });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Azure/Wolverine.AzureServiceBus.Tests/DocumentationSamples.cs#L193-L216' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_enabling_azure_service_bus_control_queues' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Azure/Wolverine.AzureServiceBus.Tests/DocumentationSamples.cs#L187-L209' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_enabling_azure_service_bus_control_queues' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 For local development, there is also an option to let Wolverine just use its TCP transport
@@ -182,6 +229,7 @@ as a control endpoint with this configuration option:
 ```csharp
 WolverineOptions.UseTcpForControlEndpoint();
 ```
+
 
 In the option above, Wolverine is just looking for an unused port, and assigning that found port
 as the listener for the node being bootstrapped. 
@@ -221,7 +269,7 @@ public static class RavenOps
     public static IRavenDbOp DeleteById(string id) => new DeleteById(id);
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/Wolverine.RavenDb/IRavenDbOp.cs#L36-L66' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_ravenops' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/Wolverine.RavenDb/IRavenDbOp.cs#L36-L65' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_ravenops' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 See the Wolverine [side effects](/guide/handlers/side-effects) model for more information.

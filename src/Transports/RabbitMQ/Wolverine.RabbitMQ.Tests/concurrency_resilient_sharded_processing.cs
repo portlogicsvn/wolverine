@@ -9,8 +9,6 @@ using Wolverine.Configuration;
 using Wolverine.Marten;
 using Wolverine.Tracking;
 using Xunit;
-using Xunit.Abstractions;
-
 namespace Wolverine.RabbitMQ.Tests;
 
 public class concurrency_resilient_sharded_processing
@@ -69,7 +67,6 @@ public class concurrency_resilient_sharded_processing
                 }).IntegrateWithWolverine();
 
                 #region sample_defining_partitioned_routing_for_rabbitmq
-
                 // opts is the WolverineOptions from within an Add/UseWolverine() call
                 
                 // Telling Wolverine how to assign a GroupId to a message, that we'll use
@@ -278,7 +275,7 @@ public static class LetterMessageHandler
 
 }
 
-public class SimpleAggregate : IRevisioned
+public partial class SimpleAggregate : IRevisioned
 {
     // This will be the aggregate version
     public int Version { get; set; }

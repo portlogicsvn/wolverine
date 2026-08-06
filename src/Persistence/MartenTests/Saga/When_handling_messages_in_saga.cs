@@ -17,12 +17,15 @@ public class When_handling_messages_in_saga : PostgresqlContext
             await Host.CreateDefaultBuilder()
                 .UseWolverine(opts =>
                 {
+                    opts.Discovery.DisableConventionalDiscovery()
+                        .IncludeType<UserRegistrationSaga>();
+                    opts.Durability.Mode = DurabilityMode.Solo;
                     opts.Services.AddMarten(Servers.PostgresConnectionString)
                         .IntegrateWithWolverine();
 
                     opts.Policies.AutoApplyTransactions();
                 })
-                .StartAsync();
+                .StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var subscriptionId = Guid.NewGuid();
 
@@ -47,12 +50,15 @@ public class When_handling_messages_in_saga : PostgresqlContext
             await Host.CreateDefaultBuilder()
                 .UseWolverine(opts =>
                 {
+                    opts.Discovery.DisableConventionalDiscovery()
+                        .IncludeType<UserRegistrationSaga>();
+                    opts.Durability.Mode = DurabilityMode.Solo;
                     opts.Services.AddMarten(Servers.PostgresConnectionString)
                         .IntegrateWithWolverine();
 
                     opts.Policies.AutoApplyTransactions();
                 })
-                .StartAsync();
+                .StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var subscriptionId = Guid.NewGuid();
 
@@ -69,12 +75,11 @@ public class When_handling_messages_in_saga : PostgresqlContext
             await Host.CreateDefaultBuilder()
                 .UseWolverine(opts =>
                 {
-                    // opts.Services.AddMarten(Servers.PostgresConnectionString)
-                    //     .IntegrateWithWolverine();
-                    //
-                    // opts.Policies.AutoApplyTransactions();
+                    opts.Discovery.DisableConventionalDiscovery()
+                        .IncludeType<UserRegistrationSaga>();
+                    opts.Durability.Mode = DurabilityMode.Solo;
                 })
-                .StartAsync();
+                .StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var subscriptionId = Guid.NewGuid();
 
@@ -97,12 +102,11 @@ public class When_handling_messages_in_saga : PostgresqlContext
             await Host.CreateDefaultBuilder()
                 .UseWolverine(opts =>
                 {
-                    // opts.Services.AddMarten(Servers.PostgresConnectionString)
-                    //     .IntegrateWithWolverine();
-                    //
-                    // opts.Policies.AutoApplyTransactions();
+                    opts.Discovery.DisableConventionalDiscovery()
+                        .IncludeType<UserRegistrationSaga>();
+                    opts.Durability.Mode = DurabilityMode.Solo;
                 })
-                .StartAsync();
+                .StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var subscriptionId = Guid.NewGuid();
 

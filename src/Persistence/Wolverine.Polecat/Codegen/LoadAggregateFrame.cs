@@ -4,6 +4,7 @@ using JasperFx.CodeGeneration.Frames;
 using JasperFx.CodeGeneration.Model;
 using JasperFx.Core.Reflection;
 using Polecat;
+using JasperFx.Events;
 using Polecat.Events;
 
 namespace Wolverine.Polecat.Codegen;
@@ -65,15 +66,15 @@ internal class LoadAggregateFrame : AsyncFrame
         }
         else if (_att.LoadStyle == ConcurrencyStyle.Exclusive)
         {
-            writer.WriteLine($"var {Stream.Usage} = await {_session!.Usage}.Events.FetchForExclusiveWriting<{_att.AggregateType.FullNameInCode()}>({_rawIdentity.Usage}, {_token.Usage});");
+            writer.WriteLine($"var {Stream.Usage} = await {_session!.Usage}.Events.FetchForExclusiveWriting<{_att.AggregateType.FullNameInCode()}>({_rawIdentity.Usage}, {_token!.Usage});");
         }
         else if (_version == null)
         {
-            writer.WriteLine($"var {Stream.Usage} = await {_session!.Usage}.Events.FetchForWriting<{_att.AggregateType.FullNameInCode()}>({_rawIdentity.Usage}, {_token.Usage});");
+            writer.WriteLine($"var {Stream.Usage} = await {_session!.Usage}.Events.FetchForWriting<{_att.AggregateType.FullNameInCode()}>({_rawIdentity.Usage}, {_token!.Usage});");
         }
         else
         {
-            writer.WriteLine($"var {Stream.Usage} = await {_session!.Usage}.Events.FetchForWriting<{_att.AggregateType.FullNameInCode()}>({_rawIdentity.Usage}, {_version.Usage}, {_token.Usage});");
+            writer.WriteLine($"var {Stream.Usage} = await {_session!.Usage}.Events.FetchForWriting<{_att.AggregateType.FullNameInCode()}>({_rawIdentity.Usage}, {_version.Usage}, {_token!.Usage});");
         }
 
         if (_att.AlwaysEnforceConsistency)

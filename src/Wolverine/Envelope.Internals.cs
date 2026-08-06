@@ -102,6 +102,22 @@ public partial class Envelope
     
     [JsonIgnore]
     internal bool InBatch { get; set; }
+
+    // GH-3289: identifies which coalesced group a batch member belongs to when the batch was assembled by
+    // CoalescingMessageBatcher (CoalesceBy). Members sharing a key get the same id, so ApplyItemException
+    // can poison every member that collapsed into a flagged key. Null for non-coalesced batches.
+    [JsonIgnore]
+    internal int? BatchGroupId { get; set; }
+
+    /// <summary>
+    /// Set to <c>true</c> by <see cref="Runtime.WolverineRuntime.AcquireInternalEnvelope"/>
+    /// when this envelope was pulled from <see cref="Runtime.WolverineRuntime.EnvelopePool"/>.
+    /// Consumers downstream of the acquire site (e.g. the outgoing send path's
+    /// <see cref="Transports.Sending.InlineSendingAgent"/> success branch) check this
+    /// flag to know whether they should return the envelope to the pool when the
+    /// envelope's lifecycle ends. Cleared by <see cref="Reset"/>. See wolverine#2955.
+    /// </summary>
+    internal bool FromPool { get; set; }
     
     [JsonIgnore]
     internal ISendingAgent? Sender { get; set; }
@@ -134,15 +150,23 @@ public partial class Envelope
         _startTimestamp = Stopwatch.GetTimestamp();
     }
 
-    internal long StopTiming()
+    /// <summary>
+    /// Returns the elapsed handler execution time in fractional milliseconds, or -1 if timing
+    /// never started. Previously this truncated to whole milliseconds, which — combined with the
+    /// callers' "only record positive values" guard — silently dropped every sub-millisecond
+    /// execution and biased the wolverine-execution-time histogram upward for fast handlers
+    /// (GH-3490).
+    /// </summary>
+    internal double StopTiming()
     {
         if (_startTimestamp == 0)
         {
-            return 0;
+            return -1;
         }
 
-        _elapsedMs = (long)Stopwatch.GetElapsedTime(_startTimestamp).TotalMilliseconds;
-        return _elapsedMs;
+        var elapsed = Stopwatch.GetElapsedTime(_startTimestamp).TotalMilliseconds;
+        _elapsedMs = (long)elapsed;
+        return elapsed;
     }
 
     /// <summary>
@@ -187,6 +211,7 @@ public partial class Envelope
     {
         Listener = listener;
         WireTap = wireTap;
+        ReceivedAt = now;
 
         // If this is a stream with multiple consumers, use the consumer-specific address
         if (listener is ISupportMultipleConsumers multiConsumerListener)
@@ -208,6 +233,26 @@ public partial class Envelope
             Status = EnvelopeStatus.Incoming;
             OwnerId = settings.AssignedNodeNumber;
         }
+    }
+
+    /// <summary>
+    ///     Copy the context-correlation fields (<see cref="CorrelationId"/>,
+    ///     <see cref="ConversationId"/>, <see cref="TenantId"/>, <see cref="UserName"/>,
+    ///     <see cref="ParentId"/>, <see cref="SagaId"/>) from <paramref name="source"/>
+    ///     onto this envelope. Used wherever a wrapped scheduled envelope is unwrapped
+    ///     and forwarded so the inner picks up the wrapper's context — the durable
+    ///     scheduled-send unwrap path (<c>ScheduledSendEnvelopeHandler</c>) and the
+    ///     in-memory tracked-session replay path (<c>TrackedSession.ReplayAll</c>).
+    ///     See GH-2571 / PR #2572.
+    /// </summary>
+    internal void CopyContextCorrelationFrom(Envelope source)
+    {
+        CorrelationId = source.CorrelationId;
+        ConversationId = source.ConversationId;
+        TenantId = source.TenantId;
+        UserName = source.UserName;
+        ParentId = source.ParentId;
+        SagaId = source.SagaId;
     }
 
     /// <summary>
@@ -356,6 +401,16 @@ public partial class Envelope
         activity.SetTag(WolverineTracing.MessageType, MessageType); // Wolverine specific
         activity.MaybeSetTag(WolverineTracing.PayloadSizeBytes, MessagePayloadSize);
         activity.MaybeSetTag(MetricsConstants.TenantIdKey, TenantId);
+        activity.MaybeSetTag(WolverineTracing.SagaId, SagaId);
+
+        // True when this envelope was scheduled for delayed delivery and is
+        // now being processed (or sent) past its ScheduledTime. Useful for
+        // trace consumers that want to distinguish a saga-timeout
+        // re-entrance from an immediate-delivery handle.
+        if (ScheduledTime.HasValue)
+        {
+            activity.SetTag(WolverineTracing.MessageScheduled, true);
+        }
     }
 
     internal ValueTask PersistAsync(IEnvelopeTransaction transaction)
@@ -406,5 +461,97 @@ public partial class Envelope
     {
         Status = EnvelopeStatus.Incoming;
         ScheduledTime = null;
+    }
+
+    /// <summary>
+    /// Zero every settable field so this envelope can be safely returned to
+    /// an <see cref="Microsoft.Extensions.ObjectPool.ObjectPool{T}"/>. Hand-
+    /// rolled rather than reflective so the JIT inlines it on the hot path;
+    /// the <c>Reset_zeroes_every_settable_property</c> guard test
+    /// (CoreTests) reflects over <see cref="Envelope"/>'s public surface
+    /// post-Reset to catch drift when new fields are added without being
+    /// zeroed here. See wolverine#2726.
+    ///
+    /// Reset is intentionally <b>not</b> equivalent to <c>new Envelope()</c>:
+    /// a freshly-constructed envelope assigns <see cref="Id"/> from
+    /// <see cref="IdGenerator"/> and <see cref="SentAt"/> from
+    /// <see cref="DateTimeOffset.UtcNow"/>. Reset zeroes both — the pool
+    /// consumer must re-stamp Id / SentAt before use. That's a deliberate
+    /// shape: the pool only returns "blank slates"; framing values are the
+    /// consumer's responsibility.
+    /// </summary>
+    internal void Reset()
+    {
+        // Private backing fields (Envelope.cs)
+        _data = null;
+        _deliverBy = null;
+        _deliverWithin = null;
+        _message = null;
+        _scheduleDelay = null;
+        _scheduledTime = null;
+        _headers = null;
+
+        // Private backing fields (Envelope.Internals.cs)
+        _enqueued = false;
+        _metricHeaders = null;
+        _startTimestamp = 0L;
+        _elapsedMs = 0L;
+
+        // Public settable properties — wire-protocol surface (Envelope.cs)
+        AckRequested = false;
+        Attempts = 0;
+        SendAttempts = 0;
+        SentAt = default;
+        ReceivedAt = null;
+        Source = null;
+        MessageType = null;
+        ReplyUri = null;
+        ContentType = null;
+        CorrelationId = null;
+        SagaId = null;
+        ConversationId = Guid.Empty;
+        Destination = null;
+        ParentId = null;
+        TenantId = null;
+        UserName = null;
+        AcceptedContentTypes = DefaultAcceptedContentTypes;
+        Id = Guid.Empty;
+        ReplyRequested = null;
+        TopicName = null;
+        EndpointName = null;
+        WasPersistedInOutbox = false;
+        GroupId = null;
+        DeduplicationId = null;
+        PartitionKey = null;
+        RoutingInformation = null;
+        Offset = 0L;
+        PartitionId = null;
+        KeepUntil = null;
+
+        // Public / internal settable properties — runtime-only (Envelope.Internals.cs)
+        WasPersistedInInbox = false;
+        Serializer = null;
+        ResponseType = null;
+        Response = null;
+        DoNotCascadeResponse = false;
+        AlwaysPublishResponse = false;
+        Status = default;
+        OwnerId = 0;
+        InBatch = false;
+        BatchGroupId = null;
+        FromPool = false;
+        Sender = null;
+        Listener = null;
+        IsResponse = false;
+        Failure = null;
+        Batch = null;
+        HasBeenAcked = false;
+        WireTap = null;
+        Store = null;
+    }
+
+    internal bool IsEmpty()
+    {
+        return (_message == null && (_data == null || (MessageType.IsEmpty()))) ;
     }
 }

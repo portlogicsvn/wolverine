@@ -1,4 +1,5 @@
 ﻿using System.Data.Common;
+using System.Diagnostics.CodeAnalysis;
 using ImTools;
 using JasperFx;
 using JasperFx.Core;
@@ -11,6 +12,7 @@ using Weasel.Core;
 using Weasel.Core.Migrations;
 using Weasel.Postgresql;
 using Wolverine.Logging;
+using Wolverine.Persistence;
 using Wolverine.Persistence.Durability;
 using Wolverine.Postgresql.Schema;
 using Wolverine.Postgresql.Util;
@@ -27,16 +29,22 @@ using Table = Weasel.Postgresql.Tables.Table;
 
 namespace Wolverine.Postgresql;
 
-internal class PostgresqlMessageStore : MessageDatabase<NpgsqlConnection>
+internal class PostgresqlMessageStore : MessageDatabase<NpgsqlConnection>, IConnectionBudgetProbe
 {
     private readonly string _deleteOutgoingEnvelopesSql;
     private readonly string _discardAndReassignOutgoingSql;
     private readonly string _findAtLargeEnvelopesSql;
     private readonly string _reassignIncomingSql;
+    private DatabaseServerId? _serverId;
 
     private readonly List<ISchemaObject> _externalTables = new();
-    
+
     private ImHashMap<Type, IDatabaseSagaSchema> _sagaStorage = ImHashMap<Type, IDatabaseSagaSchema>.Empty;
+
+    /// <summary>
+    /// Returns the schema name properly quoted for use as a PostgreSQL identifier in SQL statements.
+    /// </summary>
+    protected override string QuotedSchemaName => SchemaName.QuoteIdentifier();
 
 
     public PostgresqlMessageStore(DatabaseSettings databaseSettings, DurabilitySettings settings, NpgsqlDataSource dataSource,
@@ -54,20 +62,34 @@ internal class PostgresqlMessageStore : MessageDatabase<NpgsqlConnection>
         return dataSource;
     }
 
+    // typeof(DatabaseSagaSchema<,>).CloseAndBuildAs<IDatabaseSagaSchema>(...) at L89
+    // closes the saga schema generic over (sagaType, idType) at startup. Same
+    // chunk D / I / J / K CloseAndBuildAs pattern: AOT-clean apps preserve
+    // saga state types via TrimmerRootDescriptor. Cross-link to #2769.
+    [UnconditionalSuppressMessage("Trimming", "IL2026",
+        Justification = "DatabaseSagaSchema<,> closed over runtime saga / id types at startup; AOT consumers preserve via TrimmerRootDescriptor. See AOT guide / #2769.")]
+    [UnconditionalSuppressMessage("AOT", "IL3050",
+        Justification = "DatabaseSagaSchema<,> closed over runtime saga / id types at startup; AOT consumers preserve via TrimmerRootDescriptor. See AOT guide / #2769.")]
     public PostgresqlMessageStore(DatabaseSettings databaseSettings, DurabilitySettings settings, NpgsqlDataSource dataSource,
         ILogger<PostgresqlMessageStore> logger, IEnumerable<SagaTableDefinition> sagaTypes) : base(databaseSettings, dataSource,
         settings, logger, new PostgresqlMigrator(), PostgresqlProvider.Instance)
     {
         _reassignIncomingSql =
-            $"update {SchemaName}.{DatabaseConstants.IncomingTable} set owner_id = @owner, status = '{EnvelopeStatus.Incoming}' where id = ANY(@ids)";
+            $"update {QuotedSchemaName}.{DatabaseConstants.IncomingTable} set owner_id = @owner, status = '{EnvelopeStatus.Incoming}' where id = ANY(@ids)";
         _deleteOutgoingEnvelopesSql =
-            $"delete from {SchemaName}.{DatabaseConstants.OutgoingTable} WHERE id = ANY(@ids);";
+            $"delete from {QuotedSchemaName}.{DatabaseConstants.OutgoingTable} WHERE id = ANY(@ids);";
 
         _findAtLargeEnvelopesSql =
-            $"select {DatabaseConstants.IncomingFields} from {SchemaName}.{DatabaseConstants.IncomingTable} where owner_id = {TransportConstants.AnyNode} and status = '{EnvelopeStatus.Incoming}' and {DatabaseConstants.ReceivedAt} = :address limit :limit";
+            $"select {DatabaseConstants.IncomingFields} from {QuotedSchemaName}.{DatabaseConstants.IncomingTable} where owner_id = {TransportConstants.AnyNode} and status = '{EnvelopeStatus.Incoming}' and {DatabaseConstants.ReceivedAt} = :address limit :limit";
 
         _discardAndReassignOutgoingSql = _deleteOutgoingEnvelopesSql +
-                                         $";update {SchemaName}.{DatabaseConstants.OutgoingTable} set owner_id = @node where id = ANY(@rids)";
+                                         $";update {QuotedSchemaName}.{DatabaseConstants.OutgoingTable} set owner_id = @node where id = ANY(@rids)";
+
+        // Rebuild base class SQL strings with properly quoted schema name for PostgreSQL
+        _markEnvelopeAsHandledById =
+            $"update {QuotedSchemaName}.{DatabaseConstants.IncomingTable} set {DatabaseConstants.Status} = '{EnvelopeStatus.Handled}', {DatabaseConstants.KeepUntil} = @keepUntil where id = @id and {DatabaseConstants.ReceivedAt} = @uri";
+        _incrementIncomingEnvelopeAttempts =
+            $"update {QuotedSchemaName}.{DatabaseConstants.IncomingTable} set attempts = @attempts where id = @id and {DatabaseConstants.ReceivedAt} = @uri";
 
         NpgsqlDataSource = dataSource ?? throw new ArgumentNullException(nameof(dataSource));
 
@@ -108,8 +130,8 @@ internal class PostgresqlMessageStore : MessageDatabase<NpgsqlConnection>
     {
         if (ex is PostgresException postgresException)
         {
-            return
-                postgresException.Message.Contains("duplicate key value violates unique constraint");
+            if (postgresException.SqlState == "23505") return true;
+            return postgresException.Message.Contains("duplicate key value violates unique constraint");
         }
 
         return false;
@@ -128,6 +150,18 @@ internal class PostgresqlMessageStore : MessageDatabase<NpgsqlConnection>
             builder.Append(" LIMIT ");
             builder.AppendParameter(limit);
         }
+    }
+
+    public override string? BatchedDeleteExpiredHandledEnvelopesSql(int batchSize)
+    {
+        var table = $"{QuotedSchemaName}.{DatabaseConstants.IncomingTable}";
+
+        // Bound the delete via ctid so each statement holds locks for a short time. The status
+        // filter on both the inner select and the outer delete keeps partition pruning (and thus
+        // ctid uniqueness) scoped to the _handled partition when inbox partitioning is enabled.
+        return
+            $"delete from {table} where {DatabaseConstants.Status} = '{EnvelopeStatus.Handled}' and ctid in " +
+            $"(select ctid from {table} where {DatabaseConstants.Status} = '{EnvelopeStatus.Handled}' and {DatabaseConstants.KeepUntil} <= :now limit {batchSize});";
     }
 
     public override ISchemaObject AddExternalMessageTable(ExternalMessageTable definition)
@@ -168,6 +202,11 @@ internal class PostgresqlMessageStore : MessageDatabase<NpgsqlConnection>
     protected override async Task<bool> TryAttainLockAsync(int lockId, NpgsqlConnection connection, CancellationToken token)
     {
         return await connection.TryGetGlobalLock(lockId, cancellation: token) == AttainLockResult.Success;
+    }
+
+    protected override Task ReleaseLockAsync(int lockId, NpgsqlConnection connection, CancellationToken token)
+    {
+        return connection.ReleaseGlobalLock(lockId, cancellation: token);
     }
 
     protected override DbCommand buildFetchSql(NpgsqlConnection conn, DbObjectName tableName, string[] columnNames, int maxRecords)
@@ -227,7 +266,7 @@ where c.relname = '{tableName}';";
             // by VACUUM/ANALYZE, fall back to exact count
             if (reltuples <= 0 && relationSize > 0)
             {
-                var exactCount = await CreateCommand($"select count(*) from {SchemaName}.{tableName}")
+                var exactCount = await CreateCommand($"select count(*) from {QuotedSchemaName}.{tableName}")
                     .ExecuteScalarAsync();
                 return Convert.ToInt32(exactCount);
             }
@@ -242,7 +281,7 @@ where c.relname = '{tableName}';";
     private async Task fetchCountsWithGroupBy(PersistedCounts counts)
     {
         await using var reader = await CreateCommand(
-                $"select status, count(*) from {SchemaName}.{DatabaseConstants.IncomingTable} group by status")
+                $"select status, count(*) from {QuotedSchemaName}.{DatabaseConstants.IncomingTable} group by status")
             .ExecuteReaderAsync();
 
         while (await reader.ReadAsync())
@@ -337,12 +376,17 @@ join pg_catalog.pg_namespace n on n.oid = c.relnamespace and n.nspname = '{Schem
 
     protected override async Task afterTruncateEnvelopeDataAsync(DbConnection conn)
     {
+        // After deleting data, PostgreSQL's pg_class.reltuples statistics become stale.
+        // FetchCountsAsync() uses these stats for fast estimation, so we must run ANALYZE
+        // to update them after bulk deletes.
+        await conn.CreateCommand($"ANALYZE {QuotedSchemaName}.{DatabaseConstants.DeadLetterTable}")
+            .ExecuteNonQueryAsync(_cancellation);
+        await conn.CreateCommand($"ANALYZE {QuotedSchemaName}.{DatabaseConstants.OutgoingTable}")
+            .ExecuteNonQueryAsync(_cancellation);
+
         if (Durability.EnableInboxPartitioning)
         {
-            // After deleting data from partitioned tables, PostgreSQL's pg_class.reltuples
-            // statistics become stale. FetchCountsAsync() uses these stats for fast partition
-            // estimates, so we must run ANALYZE to update them after bulk deletes.
-            await conn.CreateCommand($"ANALYZE {SchemaName}.{DatabaseConstants.IncomingTable}")
+            await conn.CreateCommand($"ANALYZE {QuotedSchemaName}.{DatabaseConstants.IncomingTable}")
                 .ExecuteNonQueryAsync(_cancellation);
         }
     }
@@ -369,7 +413,7 @@ join pg_catalog.pg_namespace n on n.oid = c.relnamespace and n.nspname = '{Schem
     protected override string determineOutgoingEnvelopeSql(DurabilitySettings settings)
     {
         return
-            $"select {DatabaseConstants.OutgoingFields} from {SchemaName}.{DatabaseConstants.OutgoingTable} where owner_id = {TransportConstants.AnyNode} and destination = @destination LIMIT {settings.RecoveryBatchSize}";
+            $"select {DatabaseConstants.OutgoingFields} from {QuotedSchemaName}.{DatabaseConstants.OutgoingTable} where owner_id = {TransportConstants.AnyNode} and destination = @destination LIMIT {settings.RecoveryBatchSize}";
     }
 
     public override async Task<IReadOnlyList<Envelope>> LoadPageOfGloballyOwnedIncomingAsync(Uri listenerAddress,
@@ -394,7 +438,7 @@ join pg_catalog.pg_namespace n on n.oid = c.relnamespace and n.nspname = '{Schem
         {
             await using var conn = await NpgsqlDataSource.OpenConnectionAsync(cancellation);
             var count = await conn
-                .CreateCommand($"select count(id) from {SchemaName}.{DatabaseConstants.IncomingTable} where id = :id")
+                .CreateCommand($"select count(id) from {QuotedSchemaName}.{DatabaseConstants.IncomingTable} where id = :id")
                 .With("id", envelope.Id)
                 .ExecuteScalarAsync(cancellation);
 
@@ -404,7 +448,7 @@ join pg_catalog.pg_namespace n on n.oid = c.relnamespace and n.nspname = '{Schem
         {
             await using var conn = await NpgsqlDataSource.OpenConnectionAsync(cancellation);
             var count = await conn
-                .CreateCommand($"select count(id) from {SchemaName}.{DatabaseConstants.IncomingTable} where id = :id and {DatabaseConstants.ReceivedAt} = :destination")
+                .CreateCommand($"select count(id) from {QuotedSchemaName}.{DatabaseConstants.IncomingTable} where id = :id and {DatabaseConstants.ReceivedAt} = :destination")
                 .With("id", envelope.Id)
                 .With("destination", envelope.Destination!.ToString())
                 .ExecuteScalarAsync(cancellation);
@@ -416,7 +460,7 @@ join pg_catalog.pg_namespace n on n.oid = c.relnamespace and n.nspname = '{Schem
     public override void WriteLoadScheduledEnvelopeSql(DbCommandBuilder builder, DateTimeOffset utcNow)
     {
         builder.Append(
-            $"select {DatabaseConstants.IncomingFields} from {SchemaName}.{DatabaseConstants.IncomingTable} where status = '{EnvelopeStatus.Scheduled}' and execution_time <= ");
+            $"select {DatabaseConstants.IncomingFields} from {QuotedSchemaName}.{DatabaseConstants.IncomingTable} where status = '{EnvelopeStatus.Scheduled}' and execution_time <= ");
 
         builder.AppendParameter(utcNow);
         builder.Append($" order by execution_time LIMIT {Durability.RecoveryBatchSize};");
@@ -432,12 +476,20 @@ join pg_catalog.pg_namespace n on n.oid = c.relnamespace and n.nspname = '{Schem
         await using var conn = await NpgsqlDataSource.OpenConnectionAsync(cancellationToken);
         try
         {
+            // GH-3664: this is a transaction-scoped advisory lock, and Marten's async-daemon gap-liveness
+            // gate (marten#4953/#5057) treats ANY session with an open transaction older than an
+            // event-sequence gap as a possible reserver of that gap. This transaction must therefore stay
+            // short — do the poll's work and commit/rollback promptly, never await anything that isn't a
+            // command on this connection while it is open, and never add keepalive queries inside it
+            // (bumping state_change re-promotes the session to candidate reserver and freezes projections
+            // behind dead gaps). Long-held exclusivity belongs on a session-scoped lock on a
+            // transaction-free dedicated connection instead — see AdvisoryLock in PostgresqlNodePersistence.
             var tx = await conn.BeginTransactionAsync(cancellationToken);
             if (await tx.TryGetGlobalTxLock(Settings.ScheduledJobLockId, cancellationToken) == AttainLockResult.Success)
             {
                 var builder = new DbCommandBuilder(conn);
                 WriteLoadScheduledEnvelopeSql(builder, DateTimeOffset.UtcNow);
-                var cmd = builder.Compile();
+                await using var cmd = builder.Compile();
                 cmd.Connection = conn;
                 cmd.Transaction = tx;
 
@@ -457,6 +509,18 @@ join pg_catalog.pg_namespace n on n.oid = c.relnamespace and n.nspname = '{Schem
 
 
                 await tx.CommitAsync(cancellationToken);
+
+                // Stamp the envelope's owning store on each row so the rest of the
+                // pipeline (DelegatingMessageInbox, FlushOutgoingMessagesOnCommit,
+                // DurableReceiver._markAsHandled) routes its writes back to THIS
+                // store. Without this, an ancillary store's scheduled message wakes
+                // up with envelope.Store == null and the mark-as-handled SQL goes
+                // to the main store, leaving the row stuck Incoming.
+                // See https://github.com/JasperFx/wolverine/issues/2576.
+                foreach (var envelope in envelopes)
+                {
+                    envelope.Store = this;
+                }
 
                 // Judging that there's very little chance of errors here
                 await runtime.EnqueueDirectlyAsync(envelopes);
@@ -495,6 +559,49 @@ join pg_catalog.pg_namespace n on n.oid = c.relnamespace and n.nspname = '{Schem
         await conn.CloseAsync();
     }
 
+    /// <summary>
+    /// The Postgres cluster this database lives on (#3397). The port is carried explicitly rather
+    /// than left implicit in the host, because <see cref="DatabaseDescriptor.ServerName"/> is
+    /// host-only and two clusters co-hosted on one box would otherwise collide onto a single budget.
+    /// </summary>
+    public DatabaseServerId ServerId
+    {
+        get
+        {
+            if (_serverId.HasValue)
+            {
+                return _serverId.Value;
+            }
+
+            // Sourced from Describe() so the server id and the diagnostic descriptor can't disagree
+            // about the host/port. Cached, so the descriptor is only built once.
+            _serverId = DatabaseServerId.For(Describe());
+
+            return _serverId.Value;
+        }
+    }
+
+    public async ValueTask<int> CountServerConnectionsAsync(CancellationToken token)
+    {
+        // Server-wide, and deliberately not filtered to this database or this application:
+        // connections are a resource of the cluster, and a budget that ignored the other tenants
+        // (or the other applications) sharing it would be measuring the wrong thing. Note that
+        // behind a transaction-pooling pgBouncer this counts pooler-to-server backends rather than
+        // client sessions — see the connection-budget docs.
+        var raw = await CreateCommand("select coalesce(sum(numbackends), 0)::int from pg_catalog.pg_stat_database")
+            .ExecuteScalarAsync(token).ConfigureAwait(false);
+
+        return raw is int count ? count : 0;
+    }
+
+    public async ValueTask<int?> ProbeMaxConnectionsAsync(CancellationToken token)
+    {
+        var raw = await CreateCommand("select current_setting('max_connections')::int")
+            .ExecuteScalarAsync(token).ConfigureAwait(false);
+
+        return raw is int max && max > 0 ? max : null;
+    }
+
     public override DatabaseDescriptor Describe()
     {
         var builder = new NpgsqlConnectionStringBuilder(DataSource?.ConnectionString ?? Settings.ConnectionString);
@@ -502,6 +609,9 @@ join pg_catalog.pg_namespace n on n.oid = c.relnamespace and n.nspname = '{Schem
         {
             Engine = "PostgreSQL",
             ServerName = builder.Host ?? string.Empty,
+            // PostgreSQL carries the port separately from the host, and it matters for connection
+            // budgeting: two clusters co-hosted on one box would otherwise collide onto one budget.
+            Port = builder.Port,
             DatabaseName = builder.Database ?? string.Empty,
             Subject = GetType().FullNameInCode(),
             SubjectUri = SubjectUri,
@@ -638,6 +748,15 @@ join pg_catalog.pg_namespace n on n.oid = c.relnamespace and n.nspname = '{Schem
             restrictionTable.AddColumn<int>("node").NotNull().DefaultValue(0);
             yield return restrictionTable;
 
+            // Dynamic listener registry (GH-2685). Provisioned only when the opt-in
+            // flag is set so existing apps see no migration churn.
+            if (Durability.EnableDynamicListeners)
+            {
+                var listenerTable =
+                    new Table(new DbObjectName(SchemaName, DatabaseConstants.ListenersTableName));
+                listenerTable.AddColumn<string>("uri").AsPrimaryKey();
+                yield return listenerTable;
+            }
         }
         
         foreach (var table in _otherTables)
@@ -688,17 +807,17 @@ join pg_catalog.pg_namespace n on n.oid = c.relnamespace and n.nspname = '{Schem
         await conn.OpenAsync(CancellationToken.None);
 
         var deleted = 1;
-        
+
         var sql = $@"
         WITH todo AS (
             SELECT id
-            FROM {_settings.SchemaName}.{DatabaseConstants.IncomingTable}
+            FROM {QuotedSchemaName}.{DatabaseConstants.IncomingTable}
             WHERE status = '{EnvelopeStatus.Handled}'
             ORDER BY id
             LIMIT 10000
             FOR UPDATE SKIP LOCKED
         )
-        DELETE FROM {_settings.SchemaName}.{DatabaseConstants.IncomingTable} w
+        DELETE FROM {QuotedSchemaName}.{DatabaseConstants.IncomingTable} w
         USING todo
         WHERE w.id = todo.id;
 ";
@@ -707,7 +826,8 @@ join pg_catalog.pg_namespace n on n.oid = c.relnamespace and n.nspname = '{Schem
         {
             while (deleted > 0)
             {
-                deleted = await conn.CreateCommand(sql).ExecuteNonQueryAsync();
+                await using var cmd = conn.CreateCommand(sql);
+                deleted = await cmd.ExecuteNonQueryAsync();
                 await Task.Delay(10.Milliseconds());
             }
         }

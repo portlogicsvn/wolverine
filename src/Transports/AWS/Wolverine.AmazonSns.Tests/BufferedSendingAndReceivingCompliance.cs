@@ -11,7 +11,7 @@ public class BufferedComplianceFixture : TransportComplianceFixture, IAsyncLifet
         IsSenderOnlyTransport = true;
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         var number = Guid.NewGuid().ToString().Replace(".", "-");
 
@@ -42,10 +42,6 @@ public class BufferedComplianceFixture : TransportComplianceFixture, IAsyncLifet
         });
     }
 
-    public new async Task DisposeAsync()
-    {
-        await base.DisposeAsync();
-    }
 }
 
 public class BufferedSendingAndReceivingCompliance : TransportCompliance<BufferedComplianceFixture>

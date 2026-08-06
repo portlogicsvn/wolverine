@@ -41,10 +41,10 @@ return await Host.CreateDefaultBuilder(args)
         opts.Services.AddHostedService<PingerService>();
     }).RunJasperFxCommands(args);
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/PingPongWithRabbitMq/Pinger/Program.cs#L7-L37' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_bootstrapping_rabbitmq' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/PingPongWithRabbitMq/Pinger/Program.cs#L7-L36' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_bootstrapping_rabbitmq' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
-See the [Rabbit MQ .NET Client documentation](https://www.com/dotnet-api-guide.html#connecting) for more information about configuring the `ConnectionFactory` to connect to Rabbit MQ.
+See the [Rabbit MQ .NET Client documentation](https://www.rabbitmq.com/dotnet-api-guide.html#connecting) for more information about configuring the `ConnectionFactory` to connect to Rabbit MQ.
 
 
 ## Managing Rabbit MQ Connections
@@ -80,7 +80,7 @@ using var host = await Host.CreateDefaultBuilder()
         });
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Samples.cs#L101-L124' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_only_use_listener_connection_with_rabbitmq' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Samples.cs#L97-L119' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_only_use_listener_connection_with_rabbitmq' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 To only send Rabbit MQ messages, but never receive them:
@@ -109,29 +109,134 @@ using var host = await Host.CreateDefaultBuilder()
         });
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Samples.cs#L129-L152' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_only_use_sending_connection_with_rabbitmq' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Samples.cs#L124-L146' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_only_use_sending_connection_with_rabbitmq' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
+
+## Connecting to a RabbitMQ cluster
+
+If you run RabbitMQ in a high-availability cluster, declare each node via
+`AddClusterNode`. Wolverine forwards the list to the RabbitMQ.NET client,
+which selects a node and transparently fails over to another if the
+chosen node becomes unreachable.
+
+<!-- snippet: sample_rabbit_mq_cluster_nodes -->
+<a id='snippet-sample_rabbit_mq_cluster_nodes'></a>
+```cs
+using var host = await Host.CreateDefaultBuilder()
+    .UseWolverine(opts =>
+    {
+        // Configure the shared connection settings (credentials, TLS, etc.)
+        // first via UseRabbitMq, then declare each cluster node. The
+        // RabbitMQ.NET client picks one node and handles failover
+        // between them on connection loss.
+        opts.UseRabbitMq(f =>
+            {
+                f.UserName = "guest";
+                f.Password = "guest";
+                f.Ssl.Enabled = true;
+                f.Ssl.ServerName = "rabbit-cluster";
+            })
+            .AddClusterNode("rabbit-1.local")
+            .AddClusterNode("rabbit-2.local")
+            .AddClusterNode("rabbit-3.local");
+    }).StartAsync();
+```
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Samples.cs#L151-L170' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_rabbit_mq_cluster_nodes' title='Start of snippet'>anchor</a></sup>
+<!-- endSnippet -->
+
+`AddClusterNode(host, port)` copies the TLS settings configured on the
+`ConnectionFactory` onto the new endpoint, so a homogeneous cluster only
+needs `Ssl` configured once. To override per node — for example, with
+distinct certificates — pass an
+[`AmqpTcpEndpoint`](https://www.rabbitmq.com/client-libraries/dotnet-api-guide#endpoints)
+directly:
+
+```csharp
+opts.UseRabbitMq(f => { f.UserName = "guest"; f.Password = "guest"; })
+    .AddClusterNode(new AmqpTcpEndpoint("rabbit-1.local", 5671, new SslOption
+    {
+        Enabled = true,
+        ServerName = "rabbit-1.local",
+        CertPath = "/etc/wolverine/rabbit-1.pem"
+    }));
+```
+
+Multi-tenant configurations that share a cluster (i.e. tenants separated
+by virtual host via `AddTenant(tenantId, virtualHostName)`) inherit the
+parent transport's cluster nodes automatically. Tenants configured via
+`AddTenant(tenantId, Uri)` or `AddTenant(tenantId, Action<ConnectionFactory>)`
+do **not** inherit the cluster — those overloads are intended for tenants
+on separate brokers and bring their own connection settings. Put differently:
+virtual-host tenants share the same broker and therefore the same cluster
+topology; URI- and Action-based tenants are explicitly pointed at a
+different broker, so inheriting cluster nodes from the parent would be
+wrong.
 
 ## Aspire Integration
 
-Just note that when you use the existing Aspire integration for Rabbit MQ that Aspire "pokes" in an environment variable
-for a Rabbit MQ `Uri` and not a connection string -- even though the Aspire information is available through `IConfiguration.GetConnectionString()`.
+::: tip
+See the full [Aspire + Wolverine RabbitMQ sample](https://github.com/JasperFx/wolverine/tree/main/src/Samples/AspireWithRabbitMq) for a working end-to-end example.
+:::
 
-Be aware of this when using Aspire so that you're passing that information as a `Uri` like this:
+The recommended way to integrate Wolverine with .NET Aspire for RabbitMQ is the `UseRabbitMqUsingNamedConnection()` overload.
+Aspire injects the RabbitMQ connection string (a `amqp://...` URI) via the standard `ConnectionStrings__rabbitmq` environment variable when you use `.WithReference()` in the AppHost:
 
+**AppHost:**
 ```csharp
-var rabbitmqEndpoint = builder.Configuration.GetConnectionString("rabbitmq");
-if (rabbitmqEndpoint != null)
-{
-    builder.Host.UseWolverine(opts =>
-    {
-        // Important! Convert the "connection string" up above to a Uri
-        opts.UseRabbitMq(new Uri(rabbitmqEndpoint)).AutoProvision();
-    });
-}
+// Aspire.Hosting.RabbitMQ NuGet package
+var rabbitmq = builder.AddRabbitMQ("rabbitmq")
+    .WithManagementPlugin();
+
+builder.AddProject<Projects.MyWorker>("worker")
+    .WithReference(rabbitmq)
+    // WaitFor ensures RabbitMQ is healthy before your service starts,
+    // so AutoProvision() will always succeed.
+    .WaitFor(rabbitmq);
 ```
 
-Why does Aspire do this? We have no idea, but just don't be tripped up by this little quirk.
+**Service project:**
+```csharp
+// WolverineFx.RabbitMQ NuGet package — no Aspire.RabbitMQ.Client needed
+builder.UseWolverine(opts =>
+{
+    opts.UseRabbitMqUsingNamedConnection("rabbitmq")
+        // AutoProvision creates all declared exchanges, queues, and bindings
+        // at startup. This works reliably because Aspire's WaitFor() guarantees
+        // RabbitMQ is healthy before the service starts.
+        .AutoProvision();
+
+    opts.ListenToRabbitQueue("my-queue");
+    opts.PublishMessage<MyMessage>().ToRabbitExchange("my-exchange");
+});
+```
+
+`UseRabbitMqUsingNamedConnection` reads from `IConfiguration.GetConnectionString("rabbitmq")`.
+Aspire populates this automatically — it handles both URI-format strings (e.g., `amqp://guest:guest@localhost:5672`)
+and the key=value format.
+
+### Alternative: Using Aspire.RabbitMQ.Client
+
+If you install the `Aspire.RabbitMQ.Client` NuGet package in your service project and call `AddRabbitMQClient("rabbitmq")`,
+Aspire registers an `IConnectionFactory` in DI. Wolverine's no-argument `UseRabbitMq()` overload will automatically 
+detect and use it:
+
+```csharp
+// In service project with Aspire.RabbitMQ.Client installed:
+builder.AddRabbitMQClient("rabbitmq");
+
+builder.UseWolverine(opts =>
+{
+    // Wolverine finds IConnectionFactory from DI automatically
+    opts.UseRabbitMq()
+        .AutoProvision();
+});
+```
+
+### AutoProvision with Aspire
+
+`AutoProvision()` works correctly with Aspire as long as you use `.WaitFor(rabbitmq)` in the AppHost. This tells Aspire not
+to start your service until the RabbitMQ container health check passes, ensuring Wolverine can connect and declare all
+exchanges, queues, and bindings before processing begins.
 
 ## Enable Rabbit MQ for Wolverine Control Queues
 
@@ -155,7 +260,7 @@ using var host = await Host.CreateDefaultBuilder()
             .EnableWolverineControlQueues();
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Samples.cs#L83-L96' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_rabbit_mq_control_queues' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Samples.cs#L80-L92' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_rabbit_mq_control_queues' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 
@@ -196,7 +301,7 @@ using var host = await Host.CreateDefaultBuilder()
         });
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Samples.cs#L54-L78' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_disable_rabbit_mq_system_queue' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Samples.cs#L52-L75' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_disable_rabbit_mq_system_queue' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Of course, doing so means that you will not be able to do request/reply through Rabbit MQ with your Wolverine application.
@@ -213,7 +318,7 @@ var builder = Host.CreateApplicationBuilder();
 builder.UseWolverine(opts =>
 {
     opts
-        .UseRabbitMq(builder.Configuration.GetConnectionString("rabbitmq"))
+        .UseRabbitMq(builder.Configuration.GetConnectionString("rabbitmq")!)
 
         // Fine tune how the underlying Rabbit MQ channels from
         // this application will behave
@@ -225,7 +330,7 @@ builder.UseWolverine(opts =>
         });
 });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/channel_configuration.cs#L13-L31' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_configuring_rabbit_mq_channel_creation' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/channel_configuration.cs#L13-L30' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_configuring_rabbit_mq_channel_creation' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Global Partitioning
@@ -251,7 +356,6 @@ using var host = await Host.CreateDefaultBuilder()
             // message grouping based on Saga identity among other things
             .UseInferredMessageGrouping()
 
-
             .GlobalPartitioned(topology =>
             {
                 // Creates 5 sharded RabbitMQ queues named "sequenced1" through "sequenced5"
@@ -262,13 +366,39 @@ using var host = await Host.CreateDefaultBuilder()
             });
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Samples.cs#L721-L746' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_global_partitioned_with_rabbit_mq' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Samples.cs#L718-L744' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_global_partitioned_with_rabbit_mq' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 This creates RabbitMQ queues named `sequenced1` through `sequenced5` with companion local queues `global-sequenced1` through `global-sequenced5`. Messages are routed to the correct shard based on their group id, and Wolverine handles the coordination between nodes automatically.
+
+## Broker health monitoring
+
+The RabbitMQ transport implements [`IBrokerHealthProbe`](../broker-health-probes.md),
+so monitoring layers (such as CritterWatch) can render a non-destructive,
+point-in-time view of the broker connection -- including reconnect counts and
+TLS certificate expiry. See [Broker Health Probes](../broker-health-probes.md)
+for details on the contract and discovery pattern.
 
 ## Compatibility Note
 
 ::: info
 Wolverine with the `WolverineFX.RabbitMQ` transport has also been verified to work against [LavinMQ](https://lavinmq.com/), a modern RabbitMQ-protocol compatible message broker, using the RabbitMQ transport with 100% protocol compatibility when configured through the standard RabbitMQ integration shown above.
 :::
+
+## URI reference
+
+The `RabbitMqEndpointUri` helper class builds canonical endpoint URIs:
+
+| URI form | Helper call |
+|---|---|
+| `rabbitmq://queue/{name}` | `RabbitMqEndpointUri.Queue("name")` |
+| `rabbitmq://exchange/{name}` | `RabbitMqEndpointUri.Exchange("name")` |
+| `rabbitmq://topic/{exchange}/{routingKey}` | `RabbitMqEndpointUri.Topic("ex", "key")` |
+| `rabbitmq://exchange/{exchange}/routing/{routingKey}` | `RabbitMqEndpointUri.Routing("ex", "key")` |
+
+```csharp
+using Wolverine.RabbitMQ;
+
+var uri = RabbitMqEndpointUri.Queue("orders");
+// new Uri("rabbitmq://queue/orders")
+```

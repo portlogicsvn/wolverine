@@ -1,3 +1,4 @@
+using JasperFx;
 using JasperFx.Resources;
 using Spectre.Console;
 using Spectre.Console.Rendering;
@@ -18,9 +19,13 @@ internal class MessageStoreResource : IStatefulResource
     public Uri SubjectUri { get; }
     public Uri ResourceUri { get; }
 
-    public Task Check(CancellationToken token)
+    public async Task Check(CancellationToken token)
     {
-        return _persistence.Admin.CheckConnectivityAsync(token);
+        await _persistence.Admin.CheckConnectivityAsync(token);
+
+        // Connectivity alone isn't enough for "resources check" — verify the schema/tables actually
+        // exist so a missing or un-provisioned storage schema is reported as unhealthy.
+        await _persistence.Admin.AssertStorageExistsAsync(token);
     }
 
     public Task ClearState(CancellationToken token)
@@ -35,7 +40,12 @@ internal class MessageStoreResource : IStatefulResource
 
     public Task Setup(CancellationToken token)
     {
-        return _persistence.Admin.MigrateAsync();
+        // An explicit setup call ("resources setup" / IHost.SetupResources()) is itself the
+        // intent to provision the storage, so Setup always migrates with CreateOrUpdate
+        // regardless of the configured AutoCreate — including CreateOnly. This is deliberately
+        // broader than Weasel's DatabaseResource.Setup, which only promotes None to CreateOrUpdate;
+        // CreateOrUpdate never drops existing data, so it's safe for the explicit setup path
+        return _persistence.Admin.MigrateAsync(AutoCreate.CreateOrUpdate);
     }
 
     public async Task<IRenderable> DetermineStatus(CancellationToken token)

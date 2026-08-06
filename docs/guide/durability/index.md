@@ -26,7 +26,7 @@ getting lost en route.
 
 Consider this sample message handler from Wolverine's [AppWithMiddleware sample project](https://github.com/JasperFx/wolverine/tree/main/src/Samples/Middleware):
 
-<!-- snippet: sample_DebitAccountHandler_that_uses_IMessageContext -->
+<!-- snippet: sample_debitaccounthandler_that_uses_imessagecontext -->
 <a id='snippet-sample_debitaccounthandler_that_uses_imessagecontext'></a>
 ```cs
 [Transactional]
@@ -62,7 +62,7 @@ public static async Task Handle(
         new DeliveryOptions { DeliverWithin = 5.Seconds() });
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/Middleware/AppWithMiddleware/Account.cs#L126-L161' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_debitaccounthandler_that_uses_imessagecontext' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/Middleware/AppWithMiddleware/Account.cs#L121-L155' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_debitaccounthandler_that_uses_imessagecontext' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 The handler code above is committing changes to an `Account` in the underlying database and potentially sending out additional messages based on the state of the `Account`. 
@@ -79,15 +79,16 @@ and slow [distributed transactions](https://en.wikipedia.org/wiki/Distributed_tr
 also includes a separate *message relay* process that will send the persisted outgoing messages in background processes (it's done by marshalling the outgoing message envelopes through [TPL Dataflow](https://docs.microsoft.com/en-us/dotnet/standard/parallel-programming/dataflow-task-parallel-library) queues if you're curious.)
 
 If any node of a Wolverine system that uses durable messaging goes down before all the messages are processed, the persisted messages will be loaded from
-storage and processed when the system is restarted. Wolverine does this through its [DurabilityAgent](https://github.com/JasperFx/wolverine/blob/main/src/Wolverine/Persistence/Durability/DurabilityAgent.cs) that will run within your application through Wolverine's
+storage and processed when the system is restarted. Wolverine does this through its [DurabilityAgent](https://github.com/JasperFx/wolverine/blob/main/src/Persistence/Wolverine.RDBMS/DurabilityAgent.cs) that will run within your application through Wolverine's
 [IHostedService](https://docs.microsoft.com/en-us/aspnet/core/fundamentals/host/hosted-services?view=aspnetcore-6.0&tabs=visual-studio) runtime that is automatically registered in your system through the `UseWolverine()` extension method.
 
 ::: tip
-At the moment, Wolverine only supports Postgresql, Sql Server, and RavenDb as the underlying database and either [Marten](/guide/durability/marten) or
+Wolverine supports PostgreSQL, Sql Server, MySQL, SQLite, Oracle, RavenDb, and CosmosDB as the underlying message storage,
+and [Marten](/guide/durability/marten), [Polecat](/guide/durability/polecat/), or
 [Entity Framework Core](/guide/durability/efcore) as the application persistence framework.
 :::
 
-There are four things you need to enable for the transactional outbox (and inbox for incoming messages):
+There are three things you need to enable for the transactional outbox (and inbox for incoming messages):
 
 1. Set up message storage in your application, and manage the storage schema objects -- don't worry though, Wolverine comes with a lot of tooling to help you with that
 2. Enroll outgoing subscriber or listener endpoints in the durable storage at configuration time
@@ -123,7 +124,7 @@ using var host = await Host.CreateDefaultBuilder()
             .UseDurableOutbox();
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/PersistenceTests/Samples/DocumentationSamples.cs#L68-L80' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_make_specific_subscribers_be_durable' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/PersistenceTests/Samples/DocumentationSamples.cs#L66-L77' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_make_specific_subscribers_be_durable' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Or globally through a built in policy:
@@ -139,7 +140,7 @@ using var host = await Host.CreateDefaultBuilder()
         opts.Policies.UseDurableOutboxOnAllSendingEndpoints();
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/PersistenceTests/Samples/DocumentationSamples.cs#L53-L63' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_make_all_subscribers_be_durable' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/PersistenceTests/Samples/DocumentationSamples.cs#L52-L61' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_make_all_subscribers_be_durable' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ### Bumping out Stale Inbox/Outbox Messages <Badge type="tip" text="5.2" />
@@ -155,7 +156,7 @@ times, but it's always best to not make your system work so hard.
 
 It should *not* be possible for there to be any path where a message gets "stuck" in the outbox tables without eventually
 being sent by the originating node or recovered by a different node if the original node goes down first. However, it's 
-an imperfect world. If you are using one of the relational backed message stores for Wolverine (SQL Server or PostgreSQL at this point),
+an imperfect world. If you are using one of the relational backed message stores for Wolverine (PostgreSQL, SQL Server, MySQL, SQLite, or Oracle),
 you can "bump" a persisted record in the `wolverine_outgoing_envelopes` to be recovered and sent by the outbox by
 setting the `owner_id` field to zero.
 
@@ -186,7 +187,7 @@ using var host = await Host.CreateDefaultBuilder()
         opts.Durability.InboxStaleTime = 10.Minutes();
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/PersistenceTests/Samples/DocumentationSamples.cs#L281-L299' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_configuring_outbox_stale_timeout' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/PersistenceTests/Samples/DocumentationSamples.cs#L271-L288' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_configuring_outbox_stale_timeout' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Note that this will still respect the "deliver by" semantics. This is part of the polling that Wolverine normally does
@@ -219,8 +220,52 @@ using var host = await Host.CreateDefaultBuilder()
         opts.Policies.UseDurableInboxOnAllListeners();
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/PersistenceTests/Samples/DocumentationSamples.cs#L85-L101' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_configuring_durable_inbox' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/PersistenceTests/Samples/DocumentationSamples.cs#L82-L97' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_configuring_durable_inbox' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
+
+### Who Recovers the Inbox <Badge type="tip" text="6.22" />
+
+An incoming envelope in durable storage is either owned by a specific node (its `owner_id` is that node's
+assigned number) or it is *unowned* — `owner_id = 0`, meaning "any node may claim this". Messages become
+unowned when the node that owned them dies ungracefully and another node releases its ownership, and when
+replayed dead letter messages are moved back into the inbox. Getting those unowned messages back into a
+running listener is what "inbox recovery" means.
+
+Which node does that recovery depends on the endpoint's `ListenerScope`:
+
+| Listener | Recovered by | Why |
+| --- | --- | --- |
+| `CompetingConsumers` (the default) | The **durability agent** for that message database | Every node is listening, so whichever node holds the database's durability agent can safely claim the messages and process them locally |
+| `Exclusive` (`ExclusiveNodeWithParallelism()`, `ListenWithStrictOrdering()`) | The **node currently hosting the listener** | Only one node is listening. A different node claiming the messages would strand them again |
+| `PinnedToLeader` (`ListenOnlyAtLeader()`) | The **node currently hosting the listener** | Same reason |
+
+The distinction matters because the durability agent is **assigned per message database**, and those
+assignments are distributed across the cluster completely independently of the listener agents. So the node
+running the durability agent for a database is frequently *not* the node running that database's exclusive
+listener. If the durability agent were in charge of recovery for an exclusive endpoint, the two agents would
+deadlock: the agent would refuse to recover because its local listener isn't accepting, and the listening node
+would never look. (That was [GH-3590](https://github.com/JasperFx/wolverine/issues/3590), fixed in 6.22.)
+
+So for single node listeners, Wolverine inverts the ownership:
+
+* The per-database durability agents **never claim** inbox messages for endpoints whose `ListenerScope` is not
+  `CompetingConsumers`. They keep doing everything else for those endpoints — releasing a dead node's
+  ownership, [bumping stale inbox rows](#bumping-out-stale-inbox-outbox-messages), expiring messages.
+* The node that currently holds the listener recovers them itself, starting the moment the listener reaches
+  `Accepting` and then re-checking on the `Durability.ScheduledJobPollingTime` cadence for as long as it stays
+  `Accepting`. The repeat matters: a dead node's messages are released back to `owner_id = 0` later, by
+  whichever node holds that database's durability agent, and that is usually *after* the exclusive listener has
+  already restarted somewhere else.
+* That sweep covers **every** database that can hold inbox rows for the listener: the main store, every tenant
+  database when you use a separate database per tenant (including tenant databases provisioned at runtime), and
+  any [ancillary stores](/guide/durability/marten/ancillary-stores).
+* A listener that is latched, paused, or already at its `BufferingLimits` recovers nothing, exactly as with the
+  durability agent — circuit breaking behaves the way it always has.
+
+None of this is configurable, and it works the same in `Solo` mode as in `Balanced`. The practical consequence
+worth remembering: **if no node in the cluster is running an exclusive endpoint's listener, that endpoint's
+unowned inbox messages stay put by design.** They are recovered promptly once a listener activates. See
+[Exclusive Node Processing](/guide/messaging/exclusive-node-processing#inbox-recovery-ownership).
 
 ## Local Queues
 
@@ -253,7 +298,7 @@ using var host = await Host.CreateDefaultBuilder()
         });
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/PersistenceTests/Samples/DocumentationSamples.cs#L106-L128' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_durable_local_queues' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/PersistenceTests/Samples/DocumentationSamples.cs#L102-L123' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_durable_local_queues' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Message Identity <Badge type="tip" text="3.7" />
@@ -288,7 +333,7 @@ var host = await Host.CreateDefaultBuilder()
     })
     .StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/SqlServerTests/Persistence/SqlServerMessageStore_with_IdAndDestination_Identity.cs#L34-L46' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_configuring_message_identity_to_use_id_and_destination' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/SqlServerTests/Persistence/SqlServerMessageStore_with_IdAndDestination_Identity.cs#L34-L45' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_configuring_message_identity_to_use_id_and_destination' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 This might be an important setting for [modular monolith architectures](/tutorials/modular-monolith). 
@@ -323,9 +368,9 @@ using var host = await Host.CreateDefaultBuilder()
         opts.Durability.OutboxStaleTime = 5.Minutes();
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/InboxOutboxSettings.cs#L11-L29' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_inbox_outbox_stale_time' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/InboxOutboxSettings.cs#L11-L28' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_inbox_outbox_stale_time' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ::: info
-These settings will be defaults in Wolverine 6.0.
+These settings are opt-in; they have no default value unless you set them explicitly.
 :::

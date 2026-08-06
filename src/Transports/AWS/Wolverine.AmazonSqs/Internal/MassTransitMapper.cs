@@ -4,8 +4,7 @@ using Wolverine.Runtime.Interop.MassTransit;
 
 namespace Wolverine.AmazonSqs.Internal;
 
-#region sample_MassTransitMapper_for_SQS
-
+#region sample_masstransitmapper_for_sqs
 // This guy is the envelope mapper for interoperating
 // with MassTransit 
 internal class MassTransitMapper : ISqsEnvelopeMapper
@@ -13,11 +12,14 @@ internal class MassTransitMapper : ISqsEnvelopeMapper
     private readonly IMassTransitInteropEndpoint _endpoint;
     private MassTransitJsonSerializer _serializer;
 
-    public MassTransitMapper(IMassTransitInteropEndpoint endpoint)
+    public MassTransitMapper(IMassTransitInteropEndpoint endpoint, Action<IMassTransitInterop>? configure = null)
     {
         _endpoint = endpoint;
         _serializer = new MassTransitJsonSerializer(endpoint);
+        configure?.Invoke(_serializer);
     }
+
+    public override string ToString() => "MassTransit Interop";
 
     public MassTransitJsonSerializer Serializer => _serializer;
 

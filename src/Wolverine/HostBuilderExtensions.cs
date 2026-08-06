@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Reflection;
 using System.Threading.Tasks;
@@ -17,14 +18,16 @@ using JasperFx.CodeGeneration.Services;
 using JasperFx.CommandLine;
 using JasperFx.CommandLine.Descriptions;
 using JasperFx.Resources;
-using JasperFx.RuntimeCompiler;
+using Microsoft.Extensions.Logging;
 using Wolverine.Configuration;
+using Wolverine.ErrorHandling;
 using Wolverine.Persistence;
 using Wolverine.Persistence.Durability;
 using Wolverine.Persistence.Sagas;
 using Wolverine.Runtime;
 using Wolverine.Runtime.Agents;
 using Wolverine.Runtime.Handlers;
+using Wolverine.Runtime.Heartbeat;
 
 namespace Wolverine;
 
@@ -89,6 +92,10 @@ public static class HostBuilderExtensions
     /// <param name="configure">Apply specific Wolverine configuration for this application</param>
     /// <returns></returns>
     /// <exception cref="InvalidOperationException"></exception>
+    [UnconditionalSuppressMessage("Trimming", "IL2026",
+        Justification = "services.AddJasperFx() scans for IJasperFxCommand types via Assembly.GetExportedTypes(). AOT-publishing apps should pre-register commands via the source-generated DiscoveredCommands manifest; the underlying AddJasperFx surface is already documented as requiring trim-safe registration on those code paths.")]
+    [UnconditionalSuppressMessage("AOT", "IL3050",
+        Justification = "JasperFx command bootstrap closes generic List<T> for enumerable arguments. AOT consumers rely on the same source-generated command manifest used by the trim story.")]
     internal static IServiceCollection AddWolverine(this IServiceCollection services, WolverineOptions options,
         ExtensionDiscovery discovery = ExtensionDiscovery.Automatic,
         Action<WolverineOptions>? configure = null)
@@ -101,7 +108,15 @@ public static class HostBuilderExtensions
 
         services.AddJasperFx();
         services.AddSingleton<MessageStoreCollection>();
-        services.AddSingleton<IAssemblyGenerator, AssemblyGenerator>();
+
+        // The Roslyn runtime compiler (JasperFx.RuntimeCompiler / AssemblyGenerator) is no
+        // longer registered by, or referenced from, core WolverineFx. Apps running
+        // TypeLoadMode.Dynamic/Auto reference the WolverineFx.RuntimeCompilation package,
+        // which auto-registers IAssemblyGenerator via its [WolverineModule] (or an explicit
+        // opts.UseRuntimeCompilation() call). TypeLoadMode.Static apps pre-generate all code
+        // and ship without Roslyn — smaller binaries, faster cold start, AOT-readiness. A
+        // fail-fast guard at startup (WolverineRuntime.HostService.logCodeGenerationConfiguration)
+        // catches a Dynamic app that is missing the generator. See #2876 / #1577 / AOT pillar #2746.
 
         services.AddSingleton(typeof(AncillaryMessageStoreApplication<>));
         
@@ -170,6 +185,18 @@ public static class HostBuilderExtensions
 
         services.AddSingleton<IWolverineRuntime, WolverineRuntime>();
 
+        services.AddSingleton<IFaultPublisher>(sp =>
+        {
+            var wolverineOptions = sp.GetRequiredService<WolverineOptions>();
+            var loggerFactory = sp.GetRequiredService<ILoggerFactory>();
+            var runtime = sp.GetRequiredService<IWolverineRuntime>();
+            return new FaultPublisher(
+                wolverineOptions.FaultPublishing,
+                runtime,
+                loggerFactory.CreateLogger<FaultPublisher>(),
+                runtime.Meter);
+        });
+
         services.AddSingleton<ISystemPart, WolverineSystemPart>();
 
         services.AddSingleton(options.HandlerGraph);
@@ -177,6 +204,13 @@ public static class HostBuilderExtensions
         
         // The runtime is also a hosted service
         services.AddSingleton(s => (IHostedService)s.GetRequiredService<IWolverineRuntime>());
+
+        // Lightweight Solo liveness bookends for a storeless Solo host (#3188). Registered AFTER
+        // the runtime hosted service so NodeStarted() fires once transports are up, and (hosted
+        // services stop in reverse) NodeStopped() fires before the runtime tears them down.
+        // No-ops unless the host is Solo with a NullMessageStore.
+        services.AddSingleton<SoloHeartbeatService>();
+        services.AddSingleton(s => (IHostedService)s.GetRequiredService<SoloHeartbeatService>());
 
         services.MessagingRootService(x => x.MessageTracking);
 
@@ -187,8 +221,19 @@ public static class HostBuilderExtensions
         services.AddOptions();
         services.AddLogging();
 
-        services.AddScoped<IMessageBus, MessageContext>();
-        services.AddScoped<IMessageContext, MessageContext>();
+        // GH-3001: structural scope priming. When a handler falls back to service location, the
+        // generated code creates a child scope and primes its ScopedMessageContextHolder with the
+        // handler's MessageContext (PrimeScopedMessageContextFrame). These factories prefer that
+        // primed instance, so a service-located IMessageContext / IMessageBus is the SAME context the
+        // handler uses (enrolled with the active outbox) rather than a duplicate. Non-handler scopes
+        // (hosted services, admin tools, raw resolution) leave the holder empty and fall back to a
+        // fresh MessageContext. Replaces the AsyncLocal MessageContext.Current handoff (GH-2583).
+        services.AddScoped<ScopedMessageContextHolder>();
+        services.AddScoped<IMessageBus>(sp =>
+            sp.GetRequiredService<ScopedMessageContextHolder>().Context ?? sp.GetRequiredService<MessageContext>());
+        services.AddScoped<IMessageContext>(sp =>
+            sp.GetRequiredService<ScopedMessageContextHolder>().Context ?? sp.GetRequiredService<MessageContext>());
+        services.AddScoped<MessageContext>();
 
         services.AddSingleton<ObjectPoolProvider>(new DefaultObjectPoolProvider());
 
@@ -215,7 +260,7 @@ public static class HostBuilderExtensions
         options.Services = services;
         if (discovery == ExtensionDiscovery.Automatic)
         {
-            ExtensionLoader.ApplyExtensions(options);
+            options.DiscoverAndApplyExtensions();
         }
 
         if (options.ApplicationAssembly != null)
@@ -227,15 +272,23 @@ public static class HostBuilderExtensions
 
         if (options.Discovery.IncludeHandlerModules)
         {
-            options.HandlerGraph.Discovery.DiscoverHandlerModules();
+            options.HandlerGraph.Discovery.DiscoverHandlerModules(options.ApplicationAssembly);
         }
 
         options.ApplyLazyConfiguration();
 
+        // JasperFx's inline IEnumerable<T> codegen needs keyed "mirror" singletons registered for any
+        // service family that mixes a singleton with non-singleton registrations (e.g. one AddSingleton
+        // + one AddScoped of the same interface). The generated code injects the singleton element via
+        // [FromKeyedServices(key)]; without the mirror the singleton element resolves as null at runtime
+        // (resolves #2896). The mirror keys are ordinal-based, so this MUST run as the last registration
+        // step Wolverine controls — after the configure callback and ApplyLazyConfiguration, and before
+        // the host builds the service provider. It is idempotent and only touches mixed-lifetime families.
+        services.AddJasperFxEnumerableSingletonSupport();
+
         return services;
     }
 
-#if NET8_0_OR_GREATER
     /// <summary>
     /// Bootstrap Wolverine into a HostApplicationBuilder
     /// </summary>
@@ -249,21 +302,6 @@ public static class HostBuilderExtensions
 
         return builder;
     }
-    #else
-    /// <summary>
-    /// Bootstrap Wolverine into a HostApplicationBuilder
-    /// </summary>
-    /// <param name="builder"></param>
-    /// <param name="configure"></param>
-    /// <returns></returns>
-    public static HostApplicationBuilder UseWolverine(this HostApplicationBuilder builder,
-        Action<WolverineOptions>? configure)
-    {
-        builder.Services.AddWolverine(configure);
-
-        return builder;
-    }
-#endif
 
     internal static void MessagingRootService<T>(this IServiceCollection services,
         Func<IWolverineRuntime, T> expression)
@@ -288,6 +326,11 @@ public static class HostBuilderExtensions
     /// <param name="hostBuilder"></param>
     /// <param name="args"></param>
     /// <returns></returns>
+    [RequiresUnreferencedCode(
+        "Dispatches to JasperFx commands resolved reflectively from the entry/extension assemblies. " +
+        "AOT-publishing apps should pre-register commands via the source-generated DiscoveredCommands manifest.")]
+    [RequiresDynamicCode(
+        "Command input parsing closes generic List<T> via MakeGenericType for enumerable arguments / flags.")]
     public static Task<int> RunWolverineAsync(this IHostBuilder hostBuilder, string[] args)
     {
         return hostBuilder.RunJasperFxCommands(args);
@@ -354,7 +397,7 @@ public static class HostBuilderExtensions
     /// <param name="services"></param>
     /// <typeparam name="T"></typeparam>
     /// <returns></returns>
-    public static IServiceCollection AddWolverineExtension<T>(this IServiceCollection services) where T : class, IWolverineExtension
+    public static IServiceCollection AddWolverineExtension<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] T>(this IServiceCollection services) where T : class, IWolverineExtension
     {
         return services.AddSingleton<IWolverineExtension, T>();
     }
@@ -365,7 +408,7 @@ public static class HostBuilderExtensions
     /// <param name="services"></param>
     /// <typeparam name="T"></typeparam>
     /// <returns></returns>
-    public static IServiceCollection AddAsyncWolverineExtension<T>(this IServiceCollection services) where T : class, IAsyncWolverineExtension
+    public static IServiceCollection AddAsyncWolverineExtension<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] T>(this IServiceCollection services) where T : class, IAsyncWolverineExtension
     {
         return services.AddSingleton<IAsyncWolverineExtension, T>();
     }
@@ -386,7 +429,7 @@ public static class HostBuilderExtensions
     /// <param name="services"></param>
     /// <typeparam name="T"></typeparam>
     /// <returns></returns>
-    public static IServiceCollection AddSingularAgent<T>(this IServiceCollection services) where T : SingularAgent
+    public static IServiceCollection AddSingularAgent<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] T>(this IServiceCollection services) where T : SingularAgent
     {
         services.AddSingleton<IAgentFamily, T>();
         return services;
@@ -401,7 +444,6 @@ public static class HostBuilderExtensions
     /// <returns></returns>
 
     #region sample_extension_method_to_disable_external_transports
-
     public static IServiceCollection DisableAllExternalWolverineTransports(this IServiceCollection services)
     {
         services.AddSingleton<IWolverineExtension, DisableExternalTransports>();
@@ -425,8 +467,7 @@ public static class HostBuilderExtensions
         return services;
     }
 
-    #region sample_DisableExternalTransports
-
+    #region sample_disableexternaltransports
     internal class DisableExternalTransports : IWolverineExtension
     {
         public void Configure(WolverineOptions options)

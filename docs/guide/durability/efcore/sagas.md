@@ -86,12 +86,12 @@ public class Order : Saga
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/EFCoreSample/ItemService/Orders/Order.cs#L6-L79' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_order_saga_for_efcore' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/EFCoreSample/ItemService/Orders/Order.cs#L6-L78' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_order_saga_for_efcore' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 And a matching `OrdersDbContext` that can persist that type like so:
 
-<!-- snippet: sample_OrdersDbContext -->
+<!-- snippet: sample_ordersdbcontext -->
 <a id='snippet-sample_ordersdbcontext'></a>
 ```cs
 public class OrdersDbContext : DbContext
@@ -119,7 +119,7 @@ public class OrdersDbContext : DbContext
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/EFCoreSample/ItemService/Orders/Order.cs#L81-L108' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_ordersdbcontext' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/EFCoreSample/ItemService/Orders/Order.cs#L80-L106' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_ordersdbcontext' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 There's no other registration to do other than adding the `OrdersDbContext` to your IoC container and enabling
@@ -134,5 +134,6 @@ easily manage the changes in one single transaction. If you prefer having a flat
 to monitor through normal database tooling, use EF Core. If you just want to go fast and don't want to mess with ORM mapping,
 then use the lightweight storage with Wolverine. 
 
-Do note that using `AddSagaType<T>()` for a `Saga` type will win out over any EF Core mappings and Wolverine will try to
-use the lightweight storage in that case. 
+Do note that `AddSagaType<T>()` does **not** decide which storage a `Saga` uses — it only registers the lightweight
+table so that Wolverine can generate and migrate the schema for it. If a registered `DbContext` maps the `Saga` type,
+EF Core still claims it. To use the lightweight storage for a saga, make sure no registered `DbContext` maps it. 

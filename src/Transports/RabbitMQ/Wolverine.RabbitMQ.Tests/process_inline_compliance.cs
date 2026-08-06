@@ -17,13 +17,13 @@ public class ProcessInlineFixture : TransportComplianceFixture, IAsyncLifetime
     {
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         OutboundAddress = $"rabbitmq://queue/inline1".ToUri();
 
         await SenderIs(opts =>
         {
-            var listener = $"listener{RabbitTesting.Number}";
+            var listener = RabbitTesting.NextListenerName();
 
             opts.Durability.Mode = DurabilityMode.Solo;
 
@@ -52,10 +52,6 @@ public class ProcessInlineFixture : TransportComplianceFixture, IAsyncLifetime
         });
     }
 
-    public new async Task DisposeAsync()
-    {
-        await base.DisposeAsync();
-    }
 }
 
 public class process_inline_compliance : TransportCompliance<ProcessInlineFixture>

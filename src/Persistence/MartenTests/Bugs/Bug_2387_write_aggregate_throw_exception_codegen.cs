@@ -19,7 +19,7 @@ public class Bug_2387_write_aggregate_throw_exception_codegen : PostgresqlContex
     private IHost _host = null!;
     private IDocumentStore _store = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -36,14 +36,16 @@ public class Bug_2387_write_aggregate_throw_exception_codegen : PostgresqlContex
                     })
                     .UseLightweightSessions()
                     .IntegrateWithWolverine();
-
+                opts.Discovery.DisableConventionalDiscovery()
+                    .IncludeType(typeof(Bug2387DeleteHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Services.AddResourceSetupOnStartup();
             }).StartAsync();
 
         _store = _host.Services.GetRequiredService<IDocumentStore>();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _host.StopAsync();
         _host.Dispose();
@@ -62,7 +64,7 @@ public class Bug_2387_write_aggregate_throw_exception_codegen : PostgresqlContex
 
         await using var session = _store.LightweightSession();
         var action = session.Events.StartStream<Bug2387Aggregate>(new Bug2387Created("test"));
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         // If codegen is broken, this will throw a compilation error:
         // CS0841: Cannot use local variable 'stream_entity' before it is declared

@@ -19,26 +19,67 @@ using Wolverine.Runtime;
 using Wolverine.Tracking;
 using Wolverine.Transports;
 using Xunit;
-using Xunit.Abstractions;
-
 namespace Wolverine.RabbitMQ.Tests;
 
 public static class RabbitTesting
 {
-    public static int Number;
+    /// <summary>
+    /// Unique per process. A bare counter is not: it restarts at zero in every process, and Bobcat
+    /// partitions this project across several worker PROCESSES by class. Two tests in different
+    /// processes therefore declared and bound the SAME queue and exchange names against the one
+    /// shared broker and consumed each other's messages -- and because xUnit does not fix the order
+    /// of tests within a class, which pair collided moved from run to run. That is why
+    /// use_direct_exchange_with_binding_key and use_fan_out_exchange failed "one or the other,
+    /// every run" while each passes alone.
+    ///
+    /// It also repeated across runs on a persistent broker, so a queue could inherit a binding from
+    /// a previous run, and it could collide with the literal "exchange1"/"exchange3" used by
+    /// auto_declaration_of_rabbit_resources and when_adding_bindings. GH-3763.
+    /// </summary>
+    private static readonly string Token = Guid.NewGuid().ToString("N")[..8];
+
+    private static int _number;
 
     public static string NextQueueName()
     {
-        return $"messages{++Number}";
+        return $"messages-{Token}-{Interlocked.Increment(ref _number)}";
     }
 
     public static string NextExchangeName()
     {
-        return $"exchange{++Number}";
+        return $"exchange-{Token}-{Interlocked.Increment(ref _number)}";
+    }
+
+    /// <summary>
+    /// The three compliance fixtures used to build "listener{RabbitTesting.Number}" by READING the
+    /// counter without advancing it, so all three asked for the same queue -- "listener0" in a
+    /// fresh process -- and collided with each other and with every other worker process.
+    /// </summary>
+    public static string NextListenerName()
+    {
+        return $"listener-{Token}-{Interlocked.Increment(ref _number)}";
     }
 }
 
-[Trait("Category", "Flaky")]
+// GH-3824: UNTAGGED. The last remaining failures in this class were a Wolverine bug, not flakiness.
+//
+// The previous triage got as far as "use_fan_out_exchange and use_direct_exchange_with_binding_key each
+// pass ALONE and fail inside the class, in ~500ms on a null ColorHistory" -- all correct -- and then
+// inferred the cause: that WaitForMessageToBeReceivedAt is satisfied by MessageFailed as well as
+// MessageSucceeded, so a message that arrived and then failed ended the session early. That inference was
+// wrong. Dumping the session instead of inferring from the assertion (which is exactly what that triage
+// said to do next) showed status=Completed, ZERO exceptions, and the message marked successful -- but at
+// only ONE of the three receivers.
+//
+// The real cause was in TrackedSession.IsCompleted(): it short-circuited on the first satisfied condition
+// (Any) rather than requiring all of them, which made the All(...) check on its own last line unreachable.
+// Both of these tests chain three WaitForMessageToBeReceivedAt calls for a fan-out, so the session returned
+// as soon as the FIRST receiver handled the message and the assertions raced the other two handlers. Alone
+// on an idle machine all three finish inside the same millisecond, which is why it only failed in-class.
+//
+// Two further real causes were found and fixed earlier and were prerequisites, not red herrings: the
+// process-unique naming in RabbitTesting above, and the GH-3521 ApplicationAssembly pins on the receiver
+// hosts.
 public class end_to_end
 {
     private readonly ITestOutputHelper _output;
@@ -52,7 +93,7 @@ public class end_to_end
     public async Task rabbitmq_transport_is_exposed_as_a_resource()
     {
         var queueName = RabbitTesting.NextQueueName();
-        using var publisher = WolverineHost.For(opts =>
+        using var publisher = await WolverineHost.ForAsync(opts =>
         {
 
             opts.UseRabbitMq().AutoProvision().AutoPurgeOnStartup();
@@ -108,7 +149,7 @@ public class end_to_end
     public async Task rabbitmq_transport_is_NOT_exposed_as_a_resource_if_external_transports_are_stubbed()
     {
         var queueName = RabbitTesting.NextQueueName();
-        using var publisher = WolverineHost.For(opts =>
+        using var publisher = await WolverineHost.ForAsync(opts =>
         {
             opts.UseRabbitMq().AutoProvision().AutoPurgeOnStartup();
 
@@ -140,7 +181,7 @@ public class end_to_end
     public async Task send_message_to_and_receive_through_rabbitmq_with_durable_transport_option()
     {
         var queueName = "durable_test_queue_no_dlq";
-        using var publisher = WolverineHost.For(opts =>
+        using var publisher = await WolverineHost.ForAsync(opts =>
         {
             opts.UseRabbitMq().DisableDeadLetterQueueing().AutoProvision().AutoPurgeOnStartup();
 
@@ -159,7 +200,7 @@ public class end_to_end
         });
 
 
-        using var receiver = WolverineHost.For(opts =>
+        using var receiver = await WolverineHost.ForAsync(opts =>
         {
             opts.UseRabbitMq().AutoProvision().DisableDeadLetterQueueing();
 
@@ -176,7 +217,7 @@ public class end_to_end
             opts.Services.AddResourceSetupOnStartup(StartupAction.ResetState);
         });
 
-        await receiver.ResetResourceState();
+        await receiver.ResetResourceState(cancellation: TestContext.Current.CancellationToken);
 
         await publisher
             .TrackActivity()
@@ -195,7 +236,7 @@ public class end_to_end
     public async Task send_message_to_and_receive_through_rabbitmq_with_inline_receivers()
     {
         var queueName = RabbitTesting.NextQueueName();
-        using var publisher = WolverineHost.For(opts =>
+        using var publisher = await WolverineHost.ForAsync(opts =>
         {
             opts.UseRabbitMq().AutoProvision().AutoPurgeOnStartup();
 
@@ -207,7 +248,7 @@ public class end_to_end
         });
 
 
-        using var receiver = WolverineHost.For(opts =>
+        using var receiver = await WolverineHost.ForAsync(opts =>
         {
             opts.UseRabbitMq().AutoProvision();
 
@@ -218,14 +259,14 @@ public class end_to_end
             opts.Services.AddResourceSetupOnStartup(StartupAction.ResetState);
         });
 
-        await receiver.ResetResourceState();
+        await receiver.ResetResourceState(cancellation: TestContext.Current.CancellationToken);
 
         for (int i = 0; i < 10000; i++)
         {
             await publisher.SendAsync(new ColorChosen { Name = "blue" });
         }
 
-        var cancellation = new CancellationTokenSource(30.Seconds());
+        using var cancellation = new CancellationTokenSource(30.Seconds());
         var queue = receiver.Get<IWolverineRuntime>().Endpoints.EndpointByName(queueName).ShouldBeOfType<RabbitMqQueue>();
 
         while (!cancellation.IsCancellationRequested && await queue.QueuedCountAsync() > 0)
@@ -242,7 +283,7 @@ public class end_to_end
     public async Task send_message_to_and_receive_through_rabbitmq_with_inline_receivers_and_with_CloudEvents()
     {
         var queueName = RabbitTesting.NextQueueName();
-        using var publisher = WolverineHost.For(opts =>
+        using var publisher = await WolverineHost.ForAsync(opts =>
         {
             opts.UseRabbitMq().AutoProvision().AutoPurgeOnStartup();
 
@@ -254,7 +295,7 @@ public class end_to_end
         });
 
 
-        using var receiver = WolverineHost.For(opts =>
+        using var receiver = await WolverineHost.ForAsync(opts =>
         {
             opts.UseRabbitMq().AutoProvision();
 
@@ -265,14 +306,14 @@ public class end_to_end
             opts.Services.AddResourceSetupOnStartup(StartupAction.ResetState);
         });
 
-        await receiver.ResetResourceState();
+        await receiver.ResetResourceState(cancellation: TestContext.Current.CancellationToken);
 
         for (int i = 0; i < 10000; i++)
         {
             await publisher.SendAsync(new ColorChosen { Name = "blue" });
         }
 
-        var cancellation = new CancellationTokenSource(30.Seconds());
+        using var cancellation = new CancellationTokenSource(30.Seconds());
         var queue = receiver.Get<IWolverineRuntime>().Endpoints.EndpointByName(queueName).ShouldBeOfType<RabbitMqQueue>();
 
         while (!cancellation.IsCancellationRequested && await queue.QueuedCountAsync() > 0)
@@ -300,7 +341,7 @@ public class end_to_end
 
             opts.Services.AddResourceSetupOnStartup(StartupAction.ResetState);
             
-        }).StartAsync();
+        }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         using var receiver = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -312,16 +353,16 @@ public class end_to_end
 
 
                 opts.Services.AddResourceSetupOnStartup(StartupAction.ResetState);
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
-        await receiver.ResetResourceState();
+        await receiver.ResetResourceState(cancellation: TestContext.Current.CancellationToken);
 
         for (int i = 0; i < 10000; i++)
         {
             await publisher.SendAsync(new ColorChosen { Name = "blue" });
         }
 
-        var cancellation = new CancellationTokenSource(30.Seconds());
+        using var cancellation = new CancellationTokenSource(30.Seconds());
         var queue = receiver.Get<IWolverineRuntime>().Endpoints.EndpointByName(queueName).ShouldBeOfType<RabbitMqQueue>();
 
         while (!cancellation.IsCancellationRequested && await queue.QueuedCountAsync() > 0)
@@ -348,7 +389,7 @@ public class end_to_end
                 .SendInline();
 
             opts.Services.AddResourceSetupOnStartup(StartupAction.ResetState);
-        }).StartAsync();
+        }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
         
         using var receiver = await Host.CreateDefaultBuilder().UseWolverine(opts =>
         {
@@ -361,7 +402,7 @@ public class end_to_end
 
 
             opts.Services.AddResourceSetupOnStartup(StartupAction.ResetState);
-        }).StartAsync();
+        }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         Func<IMessageContext, Task> publishing = async c =>
         {
@@ -407,7 +448,7 @@ public class end_to_end
             }).IntegrateWithWolverine();
 
             opts.Services.AddResourceSetupOnStartup(StartupAction.ResetState);
-        }).StartAsync();
+        }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         using var receiver = await Host.CreateDefaultBuilder().UseWolverine(opts =>
         {
@@ -426,7 +467,7 @@ public class end_to_end
             }).IntegrateWithWolverine();
 
             opts.Services.AddResourceSetupOnStartup(StartupAction.ResetState);
-        }).StartAsync();
+        }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var session = await publisher
             .TrackActivity()
@@ -446,7 +487,7 @@ public class end_to_end
         var queueName = RabbitTesting.NextQueueName();
         var exchangeName = RabbitTesting.NextExchangeName();
 
-        var publisher = WolverineHost.For(opts =>
+        var publisher = await WolverineHost.ForAsync(opts =>
         {
             opts.UseRabbitMq()
                 .AutoProvision()
@@ -458,7 +499,7 @@ public class end_to_end
             opts.Services.AddResourceSetupOnStartup();
         });
 
-        var receiver = WolverineHost.For(opts =>
+        var receiver = await WolverineHost.ForAsync(opts =>
         {
             opts.UseRabbitMq()
                 .AutoProvision()
@@ -476,6 +517,7 @@ public class end_to_end
         {
             await publisher
                 .TrackActivity()
+                .Timeout(30.Seconds())
                 .AlsoTrack(receiver)
                 .SendMessageAndWaitAsync(new ColorChosen { Name = "Orange" });
 
@@ -493,7 +535,7 @@ public class end_to_end
     {
         var queueName = RabbitTesting.NextQueueName();
 
-        var publisher = WolverineHost.For(opts =>
+        var publisher = await WolverineHost.ForAsync(opts =>
         {
             opts.Durability.ScheduledJobFirstExecution = 1.Seconds();
             opts.Durability.ScheduledJobPollingTime = 1.Seconds();
@@ -511,9 +553,9 @@ public class end_to_end
             }).IntegrateWithWolverine();
         });
 
-        await publisher.ResetResourceState();
+        await publisher.ResetResourceState(cancellation: TestContext.Current.CancellationToken);
 
-        var receiver = WolverineHost.For(opts =>
+        var receiver = await WolverineHost.ForAsync(opts =>
         {
             opts.ServiceName = "Receiver";
 
@@ -530,7 +572,7 @@ public class end_to_end
             }).IntegrateWithWolverine();
         });
 
-        await receiver.ResetResourceState();
+        await receiver.ResetResourceState(cancellation: TestContext.Current.CancellationToken);
 
         try
         {
@@ -553,13 +595,13 @@ public class end_to_end
     [Fact]
     public async Task use_fan_out_exchange()
     {
-        var exchangeName = "fanout1";
+        var exchangeName = RabbitTesting.NextExchangeName();
         var queueName1 = RabbitTesting.NextQueueName() + "e23";
         var queueName2 = RabbitTesting.NextQueueName() + "e23";
         var queueName3 = RabbitTesting.NextQueueName() + "e23";
 
 
-        var publisher = WolverineHost.For(opts =>
+        var publisher = await WolverineHost.ForAsync(opts =>
         {
             opts.UseRabbitMq().AutoProvision()
                 .BindExchange(exchangeName).ToQueue(queueName1)
@@ -569,24 +611,48 @@ public class end_to_end
             opts.PublishAllMessages().ToRabbitExchange(exchangeName);
         });
 
-        var receiver1 = WolverineHost.For(opts =>
+        var receiver1 = await WolverineHost.ForAsync(opts =>
         {
+            // GH-3521: the application assembly is a process-wide value pinned by whichever host
+            // started FIRST in the process. Without this, these receivers discovered NO handlers
+            // ("Wolverine found no handlers" in the log), ColorChosen failed for want of a handler,
+            // and WaitForMessageToBeReceivedAt completed anyway -- it is satisfied by MessageFailed
+            // as well as MessageSucceeded -- so the test fell through to a null ColorHistory in
+            // ~500ms rather than timing out. GH-3763.
+            opts.ApplicationAssembly = GetType().Assembly;
+
             opts.UseRabbitMq();
 
             opts.ListenToRabbitQueue(queueName1);
             opts.Services.AddSingleton<ColorHistory>();
         });
 
-        var receiver2 = WolverineHost.For(opts =>
+        var receiver2 = await WolverineHost.ForAsync(opts =>
         {
+            // GH-3521: the application assembly is a process-wide value pinned by whichever host
+            // started FIRST in the process. Without this, these receivers discovered NO handlers
+            // ("Wolverine found no handlers" in the log), ColorChosen failed for want of a handler,
+            // and WaitForMessageToBeReceivedAt completed anyway -- it is satisfied by MessageFailed
+            // as well as MessageSucceeded -- so the test fell through to a null ColorHistory in
+            // ~500ms rather than timing out. GH-3763.
+            opts.ApplicationAssembly = GetType().Assembly;
+
             opts.UseRabbitMq();
 
             opts.ListenToRabbitQueue(queueName2);
             opts.Services.AddSingleton<ColorHistory>();
         });
 
-        var receiver3 = WolverineHost.For(opts =>
+        var receiver3 = await WolverineHost.ForAsync(opts =>
         {
+            // GH-3521: the application assembly is a process-wide value pinned by whichever host
+            // started FIRST in the process. Without this, these receivers discovered NO handlers
+            // ("Wolverine found no handlers" in the log), ColorChosen failed for want of a handler,
+            // and WaitForMessageToBeReceivedAt completed anyway -- it is satisfied by MessageFailed
+            // as well as MessageSucceeded -- so the test fell through to a null ColorHistory in
+            // ~500ms rather than timing out. GH-3763.
+            opts.ApplicationAssembly = GetType().Assembly;
+
             opts.UseRabbitMq();
 
             opts.ListenToRabbitQueue(queueName3);
@@ -597,6 +663,7 @@ public class end_to_end
         {
             var session = await publisher
                 .TrackActivity()
+                .Timeout(30.Seconds())
                 .AlsoTrack(receiver1, receiver2, receiver3)
                 .WaitForMessageToBeReceivedAt<ColorChosen>(receiver1)
                 .WaitForMessageToBeReceivedAt<ColorChosen>(receiver2)
@@ -622,7 +689,7 @@ public class end_to_end
     {
         var queueName = RabbitTesting.NextQueueName();
 
-        var publisher = WolverineHost.For(opts =>
+        var publisher = await WolverineHost.ForAsync(opts =>
         {
             opts.UseRabbitMq().AutoProvision()
                 .BindExchange("topics", ExchangeType.Topic)
@@ -633,8 +700,16 @@ public class end_to_end
             opts.DisableConventionalDiscovery();
         });
 
-        var receiver = WolverineHost.For(opts =>
+        var receiver = await WolverineHost.ForAsync(opts =>
         {
+            // GH-3521: the application assembly is a process-wide value pinned by whichever host
+            // started FIRST in the process. Without this, these receivers discovered NO handlers
+            // ("Wolverine found no handlers" in the log), ColorChosen failed for want of a handler,
+            // and WaitForMessageToBeReceivedAt completed anyway -- it is satisfied by MessageFailed
+            // as well as MessageSucceeded -- so the test fell through to a null ColorHistory in
+            // ~500ms rather than timing out. GH-3763.
+            opts.ApplicationAssembly = GetType().Assembly;
+
             opts.UseRabbitMq();
 
             opts.ListenToRabbitQueue(queueName);
@@ -647,6 +722,7 @@ public class end_to_end
             var message = new SpecialTopic();
             var session = await publisher
                 .TrackActivity()
+                .Timeout(30.Seconds())
                 .AlsoTrack(receiver)
                 .SendMessageAndWaitAsync(message);
 
@@ -687,6 +763,14 @@ public class end_to_end
 
         using var receiver1 = await WolverineHost.ForAsync(opts =>
         {
+            // GH-3521: the application assembly is a process-wide value pinned by whichever host
+            // started FIRST in the process. Without this, these receivers discovered NO handlers
+            // ("Wolverine found no handlers" in the log), ColorChosen failed for want of a handler,
+            // and WaitForMessageToBeReceivedAt completed anyway -- it is satisfied by MessageFailed
+            // as well as MessageSucceeded -- so the test fell through to a null ColorHistory in
+            // ~500ms rather than timing out. GH-3763.
+            opts.ApplicationAssembly = GetType().Assembly;
+
             opts.UseRabbitMq();
 
             opts.ListenToRabbitQueue(queueName1);
@@ -695,6 +779,14 @@ public class end_to_end
 
         using var receiver2 = await WolverineHost.ForAsync(opts =>
         {
+            // GH-3521: the application assembly is a process-wide value pinned by whichever host
+            // started FIRST in the process. Without this, these receivers discovered NO handlers
+            // ("Wolverine found no handlers" in the log), ColorChosen failed for want of a handler,
+            // and WaitForMessageToBeReceivedAt completed anyway -- it is satisfied by MessageFailed
+            // as well as MessageSucceeded -- so the test fell through to a null ColorHistory in
+            // ~500ms rather than timing out. GH-3763.
+            opts.ApplicationAssembly = GetType().Assembly;
+
             opts.UseRabbitMq();
 
             opts.ListenToRabbitQueue(queueName2);
@@ -703,6 +795,14 @@ public class end_to_end
 
         using var receiver3 = await WolverineHost.ForAsync(opts =>
         {
+            // GH-3521: the application assembly is a process-wide value pinned by whichever host
+            // started FIRST in the process. Without this, these receivers discovered NO handlers
+            // ("Wolverine found no handlers" in the log), ColorChosen failed for want of a handler,
+            // and WaitForMessageToBeReceivedAt completed anyway -- it is satisfied by MessageFailed
+            // as well as MessageSucceeded -- so the test fell through to a null ColorHistory in
+            // ~500ms rather than timing out. GH-3763.
+            opts.ApplicationAssembly = GetType().Assembly;
+
             opts.UseRabbitMq();
 
             opts.ListenToRabbitQueue(queueName3);
@@ -711,6 +811,7 @@ public class end_to_end
 
         var session = await publisher
             .TrackActivity()
+            .Timeout(30.Seconds())
             .AlsoTrack(receiver1, receiver2, receiver3)
             .WaitForMessageToBeReceivedAt<ColorChosen>(receiver1)
             .WaitForMessageToBeReceivedAt<ColorChosen>(receiver2)
@@ -739,6 +840,14 @@ public class end_to_end
 
         using var receiver = await WolverineHost.ForAsync(opts =>
         {
+            // GH-3521: the application assembly is a process-wide value pinned by whichever host
+            // started FIRST in the process. Without this, these receivers discovered NO handlers
+            // ("Wolverine found no handlers" in the log), ColorChosen failed for want of a handler,
+            // and WaitForMessageToBeReceivedAt completed anyway -- it is satisfied by MessageFailed
+            // as well as MessageSucceeded -- so the test fell through to a null ColorHistory in
+            // ~500ms rather than timing out. GH-3763.
+            opts.ApplicationAssembly = GetType().Assembly;
+
             opts.UseRabbitMq();
 
             opts.ListenToRabbitQueue(queueName);
@@ -779,6 +888,14 @@ public class end_to_end
 
         using var receiver = await WolverineHost.ForAsync(opts =>
         {
+            // GH-3521: the application assembly is a process-wide value pinned by whichever host
+            // started FIRST in the process. Without this, these receivers discovered NO handlers
+            // ("Wolverine found no handlers" in the log), ColorChosen failed for want of a handler,
+            // and WaitForMessageToBeReceivedAt completed anyway -- it is satisfied by MessageFailed
+            // as well as MessageSucceeded -- so the test fell through to a null ColorHistory in
+            // ~500ms rather than timing out. GH-3763.
+            opts.ApplicationAssembly = GetType().Assembly;
+
             opts.UseRabbitMq();
 
             opts.ListenToRabbitQueue(queueName);
@@ -817,6 +934,14 @@ public class end_to_end
 
         using var receiver = await WolverineHost.ForAsync(opts =>
         {
+            // GH-3521: the application assembly is a process-wide value pinned by whichever host
+            // started FIRST in the process. Without this, these receivers discovered NO handlers
+            // ("Wolverine found no handlers" in the log), ColorChosen failed for want of a handler,
+            // and WaitForMessageToBeReceivedAt completed anyway -- it is satisfied by MessageFailed
+            // as well as MessageSucceeded -- so the test fell through to a null ColorHistory in
+            // ~500ms rather than timing out. GH-3763.
+            opts.ApplicationAssembly = GetType().Assembly;
+
             opts.UseRabbitMq();
 
             opts.ListenToRabbitQueue(queueName);
@@ -837,7 +962,7 @@ public class end_to_end
     public async Task request_reply_from_within_handler()
     {
         var queueName = RabbitTesting.NextQueueName();
-        using var publisher = WolverineHost.For(opts =>
+        using var publisher = await WolverineHost.ForAsync(opts =>
         {
             opts.UseRabbitMq().DisableDeadLetterQueueing().AutoProvision().AutoPurgeOnStartup();
 
@@ -852,7 +977,7 @@ public class end_to_end
         });
 
 
-        using var receiver = WolverineHost.For(opts =>
+        using var receiver = await WolverineHost.ForAsync(opts =>
         {
             opts.DisableConventionalDiscovery()
                 .IncludeType(typeof(ColorRequestHandler));
@@ -862,7 +987,7 @@ public class end_to_end
             opts.ListenToRabbitQueue(queueName);
         });
 
-        await receiver.ResetResourceState();
+        await receiver.ResetResourceState(cancellation: TestContext.Current.CancellationToken);
 
         await publisher
             .TrackActivity()

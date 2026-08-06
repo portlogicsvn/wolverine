@@ -3,7 +3,9 @@ using JasperFx;
 using JasperFx.CodeGeneration;
 using JasperFx.Resources;
 using Marten;
+using JasperFx.Events;
 using Marten.Events;
+using JasperFx.Events.Projections;
 using Marten.Events.Projections;
 using Marten.Internal.Sessions;
 using Microsoft.Extensions.DependencyInjection;
@@ -14,18 +16,19 @@ using Wolverine.Attributes;
 using Wolverine.ComplianceTests;
 using Wolverine.Marten;
 using Wolverine.Tracking;
+using Wolverine;
 
 namespace MartenTests.AggregateHandlerWorkflow;
 
-public class marten_command_workflow_middleware : PostgresqlContext, IDisposable
+public class marten_command_workflow_middleware : PostgresqlContext, IAsyncLifetime
 {
-    private readonly IHost theHost;
-    private readonly IDocumentStore theStore;
+    private IHost theHost = null!;
+    private IDocumentStore theStore = null!;
     private Guid theStreamId;
 
-    public marten_command_workflow_middleware()
+    public async ValueTask InitializeAsync()
     {
-        theHost = WolverineHost.For(opts =>
+        theHost = await WolverineHost.ForAsync(opts =>
         {
             opts.Services.AddMarten(opts =>
                 {
@@ -38,14 +41,20 @@ public class marten_command_workflow_middleware : PostgresqlContext, IDisposable
             opts.Services.AddResourceSetupOnStartup();
 
             opts.CodeGeneration.TypeLoadMode = TypeLoadMode.Auto;
+
+            opts.Discovery.DisableConventionalDiscovery()
+                .IncludeType(typeof(SpecialLetterHandler))
+                .IncludeType(typeof(LetterAggregateHandler));
+            opts.Durability.Mode = DurabilityMode.Solo;
         });
 
         theStore = theHost.Services.GetRequiredService<IDocumentStore>();
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
-        theHost?.Dispose();
+        await theHost.StopAsync();
+        theHost.Dispose();
     }
 
     internal async Task GivenAggregate()
@@ -235,7 +244,7 @@ public static class SpecialLetterHandler
     // This can be done as a policy at the application level and not
     // on a handler by handler basis too
     [ScheduleRetry(typeof(ConcurrencyException), 1, 2, 5)]
-    [AggregateHandler(ConcurrencyStyle.Exclusive)]
+    [AggregateHandler(global::Wolverine.Marten.ConcurrencyStyle.Exclusive)]
     public static IEnumerable<object> Handle(IncrementAB command, LetterAggregate aggregate)
     {
         command.LetterAggregateId.ShouldBe(aggregate.Id);

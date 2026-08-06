@@ -25,6 +25,7 @@ public class Bug_971_replay_dead_letter_queue_of_event_wrapper
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery().IncludeType(typeof(ErrorCausingEventHandler));
                 opts.ApplicationAssembly = GetType().Assembly;
                 opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Durability.ScheduledJobPollingTime = 250.Milliseconds();
@@ -38,7 +39,7 @@ public class Bug_971_replay_dead_letter_queue_of_event_wrapper
                     .AddAsyncDaemon(DaemonMode.Solo)
                     .IntegrateWithWolverine()
                     .PublishEventsToWolverine("MaybeErrors", r => r.PublishEvent<ErrorCausingEvent>());
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var runtime = host.GetRuntime();
         await runtime.Storage.Admin.RebuildAsync();
@@ -48,7 +49,7 @@ public class Bug_971_replay_dead_letter_queue_of_event_wrapper
         using (var session = host.DocumentStore().LightweightSession())
         {
             session.Events.StartStream(new ErrorCausingEvent());
-            await session.SaveChangesAsync();
+            await session.SaveChangesAsync(TestContext.Current.CancellationToken);
         }
 
         await host.WaitForNonStaleProjectionDataAsync(60.Seconds());

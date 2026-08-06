@@ -23,6 +23,49 @@ To replay dead lettered messages back to the incoming table, you also have a com
 dotnet run -- storage replay
 ```
 
+## Indexing <Badge type="tip" text="6.16" />
+
+The durability agent's background replay and cleanup cycles both filter the `wolverine_dead_letters`
+table on the `replayable` column (and, when [dead letter expiration](#dead-letter-expiration) is
+enabled, on the `expires` column). On a large dead-letter table these queries would otherwise force a
+full table scan on every cycle. Wolverine automatically provisions indexes for these columns as part
+of the normal schema creation/migration — a partial index scoped to the matching rows on PostgreSQL,
+SQL Server, and SQLite, and a plain index on MySQL and Oracle (which don't support filtered indexes).
+There is nothing to configure.
+
+::: warning
+If you are upgrading with an *already very large* `wolverine_dead_letters` table, be aware that the
+schema migration that adds these indexes runs a normal `CREATE INDEX`, which takes a write-blocking
+lock for the duration (potentially minutes on a multi-GB table). If that matters for your deployment,
+create the indexes ahead of time with `CREATE INDEX CONCURRENTLY` (PostgreSQL) / `WITH (ONLINE = ON)`
+(SQL Server) before rolling out the upgrade.
+:::
+
+## Introspecting an Endpoint's Dead Letter Destination <Badge type="tip" text="6.9" />
+
+Where an endpoint's dead letters actually go varies by transport and configuration: some endpoints
+move failures to Wolverine's durable `wolverine_dead_letters` storage, while others use a **native
+broker dead letter queue** (RabbitMQ DLX, an SQS dead letter queue, the Azure Service Bus
+`$DeadLetterQueue`, etc.) that a tool managing the durable store can't see.
+
+Every endpoint declares its effective destination through a single transport-agnostic enum,
+`DeadLetterStorageMode`, so monitoring tools can introspect it without transport-specific knowledge:
+
+| Value | Meaning |
+|-------|---------|
+| `Durable` | Dead letters go to Wolverine's durable store (`wolverine_dead_letters`) — queryable and replayable through `IDeadLetters`. |
+| `Native` | Dead letters go to a native broker dead letter queue and are **not** bridged into durable storage. |
+| `NativeWithRecovery` | Dead letters go to a native broker dead letter queue **and** are bridged back into durable storage via [`EnableDeadLetterQueueRecovery()`](/guide/messaging/transports/rabbitmq/deadletterqueues.html#recovering-native-dead-letters-to-durable-storage). |
+
+It is exposed two ways:
+
+- `Endpoint.DeadLetterStorage` on the endpoint model.
+- `EndpointDescriptor.DeadLetterStorage` on the diagnostic descriptor surface that monitoring tools
+  (for example [CritterWatch](https://github.com/JasperFx/CritterWatch)) read.
+
+This lets a monitor detect endpoints that dead-letter **natively without recovery** (`Native`) and
+recommend enabling recovery so those dead letters become visible and replayable in the durable store.
+
 ## Dead Letter Expiration <Badge type="tip" text="3.9" />
 
 ::: tip
@@ -48,7 +91,7 @@ using var host = await Host.CreateDefaultBuilder()
 
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/CoreTests/BootstrappingSamples.cs#L42-L56' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_enabling_dead_letter_queue_expiration' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/CoreTests/BootstrappingSamples.cs#L40-L53' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_enabling_dead_letter_queue_expiration' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Note that Wolverine will use the message's `DeliverBy` value as the expiration if that exists, otherwise, Wolverine will
@@ -81,7 +124,7 @@ app.MapDeadLettersEndpoints()
     //.RequireAuthorization("Admin")
     ;
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Program.cs#L208-L219' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_register_dead_letter_endpoints' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Program.cs#L288-L298' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_register_dead_letter_endpoints' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ### Using the Dead Letters REST API
@@ -91,78 +134,113 @@ app.MapDeadLettersEndpoints()
 - **Path**: `/dead-letters/`
 - **Method**: `POST`
 - **Request Body**: `DeadLetterEnvelopeGetRequest`
-  - `Limit` (uint): Number of records to return per page.
-  - `StartId` (Guid?): Start fetching records after the specified ID.
+  - `Limit` (uint, default `100`): Number of records to return per page.
+  - `PageNumber` (int): Page number for offset-based pagination — pass `0` (or omit) for the first page.
   - `MessageType` (string?): Filter by message type.
   - `ExceptionType` (string?): Filter by exception type.
   - `ExceptionMessage` (string?): Filter by exception message.
+  - `Replayable` (bool?): Filter by the replayable flag. Omit (or `null`) for no filtering; `false` returns only envelopes not yet marked replayable; `true` returns only those already queued for replay. Filtering happens in the database so `TotalCount` and paging stay coherent for the subset.
   - `From` (DateTimeOffset?): Start date for fetching records.
   - `Until` (DateTimeOffset?): End date for fetching records.
   - `TenantId` (string?): Tenant identifier for multi-tenancy support.
-- **Response**: `DeadLetterEnvelopesFoundResponse` containing a list of `DeadLetterEnvelopeResponse` objects and an optional `NextId` for pagination.
+  - `DatabaseUri` (Uri?): Scope the query to a single message store when the application has multiple (ancillary) stores configured. Omit to query every store.
+- **Response**: `IReadOnlyList<DeadLetterEnvelopeResults>` — one entry per matching message store. Each `DeadLetterEnvelopeResults` contains:
+  - `TotalCount` (int): Total matching records for the filter in that store.
+  - `Envelopes` (`List<DeadLetterEnvelope>`): The page of dead-letter envelopes.
+  - `PageNumber` (int): Echo of the requested page number.
+  - `DatabaseUri` (Uri?): The URI identifying which message store this result is from.
+
+::: tip Pagination
+The pagination model changed from cursor-based (`StartId` / `NextId`) to offset-based (`PageNumber`) in Wolverine 5. Pass `PageNumber` incrementing from `0` to walk through pages; `TotalCount` lets you compute how many pages exist as `ceil(TotalCount / Limit)`.
+:::
+
+::: tip Filtering by replayable state <Badge type="tip" text="6.22" />
+After deploying a fix, operators commonly want to separate the messages that are still stuck (`"Replayable": false`) from the ones already queued for replay (`"Replayable": true`). Because the predicate is applied in the database rather than in memory after paging, `TotalCount` reflects the filtered subset — so a `false`-only view drives a paginated UI or batch redrive correctly.
+
+```json
+{
+  "Limit": 50,
+  "PageNumber": 0,
+  "Replayable": false
+}
+```
+:::
 
 **Request Example**:
 
 ```json
 {
   "Limit": 50,
+  "PageNumber": 0,
   "MessageType": "OrderPlacedEvent",
   "ExceptionType": "InvalidOrderException"
 }
 ```
 
-**Reponse Example**:
+**Response Example** (one store; multi-store apps return additional array entries with their own `DatabaseUri`):
 
 ```json
-{
-  "Messages": [
-    {
-      "Id": "4e3d5e88-e01f-4bcb-af25-6e4c14b0a867",
-      "ExecutionTime": "2024-04-06T12:00:00Z",
-      "Body": {
-        "OrderId": 123456,
-        "OrderStatus": "Failed",
-        "Reason": "Invalid Payment Method"
+[
+  {
+    "TotalCount": 247,
+    "PageNumber": 0,
+    "DatabaseUri": "postgresql://localhost:5432/orders",
+    "Envelopes": [
+      {
+        "Id": "4e3d5e88-e01f-4bcb-af25-6e4c14b0a867",
+        "ExecutionTime": "2026-04-06T12:00:00Z",
+        "MessageType": "OrderFailedEvent",
+        "ReceivedAt": "rabbitmq://exchange/orders",
+        "Source": "OrderService",
+        "ExceptionType": "PaymentException",
+        "ExceptionMessage": "The payment method provided is invalid.",
+        "SentAt": "2026-04-06T12:00:00Z",
+        "Replayable": true,
+        "Envelope": { /* the raw wire Envelope (headers, body, destination, etc.) */ },
+        "Message": {
+          "OrderId": 123456,
+          "OrderStatus": "Failed",
+          "Reason": "Invalid Payment Method"
+        }
       },
-      "MessageType": "OrderFailedEvent",
-      "ReceivedAt": "2024-04-06T12:05:00Z",
-      "Source": "OrderService",
-      "ExceptionType": "PaymentException",
-      "ExceptionMessage": "The payment method provided is invalid.",
-      "SentAt": "2024-04-06T12:00:00Z",
-      "Replayable": true
-    },
-    {
-      "Id": "5f2c3d1e-3f3d-46f9-ba29-dac8e0f9b078",
-      "ExecutionTime": null,
-      "Body": {
-        "CustomerId": 78910,
-        "AccountBalance": -150.75
-      },
-      "MessageType": "AccountOverdrawnEvent",
-      "ReceivedAt": "2024-04-06T15:20:00Z",
-      "Source": "AccountService",
-      "ExceptionType": "OverdrawnException",
-      "ExceptionMessage": "Account balance cannot be negative.",
-      "SentAt": "2024-04-06T15:15:00Z",
-      "Replayable": false
-    }
-  ],
-  "NextId": "8a1d77f2-f91b-4edb-8b51-466b5a8a3a6f"
-}
+      {
+        "Id": "5f2c3d1e-3f3d-46f9-ba29-dac8e0f9b078",
+        "ExecutionTime": null,
+        "MessageType": "AccountOverdrawnEvent",
+        "ReceivedAt": "rabbitmq://exchange/accounts",
+        "Source": "AccountService",
+        "ExceptionType": "OverdrawnException",
+        "ExceptionMessage": "Account balance cannot be negative.",
+        "SentAt": "2026-04-06T15:15:00Z",
+        "Replayable": false,
+        "Envelope": { /* … */ },
+        "Message": {
+          "CustomerId": 78910,
+          "AccountBalance": -150.75
+        }
+      }
+    ]
+  }
+]
 ```
+
+The `Message` property is the deserialized message body — populated when Wolverine's handler graph knows the message type and a matching serializer is registered. The full wire `Envelope` (headers, content type, destination, etc.) is also returned for inspection.
 
 #### Replay Dead Letters Endpoint
 
 - **Path**: `/dead-letters/replay`
 - **Method**: `POST`
 - **Description**: Marks specified dead letter messages as replayable. This operation signals the system to attempt reprocessing the messages, ideally after the cause of the initial failure has been resolved.
+- **Request Body**: `DeadLetterEnvelopeIdsRequest`
+  - `Ids` (Guid[]): Identifiers of the dead-letter envelopes to replay.
+  - `TenantId` (string?): If set, the replay is scoped to the tenant's message store.
 
 **Request Example**:
 
 ```json
 {
-  "Ids": ["d3b07384-d113-4ec8-98c4-b3bf34e2c572", "d3b07384-d113-4ec8-98c4-b3bf34e2c573"]
+  "Ids": ["d3b07384-d113-4ec8-98c4-b3bf34e2c572", "d3b07384-d113-4ec8-98c4-b3bf34e2c573"],
+  "TenantId": "tenant-a"
 }
 ```
 
@@ -171,12 +249,14 @@ app.MapDeadLettersEndpoints()
 - **Path**: `/dead-letters/`
 - **Method**: `DELETE`
 - **Description**: Permanently removes specified dead letter messages from the system. Use this operation to clear messages that are no longer needed or cannot be successfully reprocessed.
+- **Request Body**: `DeadLetterEnvelopeIdsRequest` (same shape as the replay endpoint above).
 
 **Request Example**:
 
 ```json
 {
-  "Ids": ["d3b07384-d113-4ec8-98c4-b3bf34e2c574", "d3b07384-d113-4ec8-98c4-b3bf34e2c575"]
+  "Ids": ["d3b07384-d113-4ec8-98c4-b3bf34e2c574", "d3b07384-d113-4ec8-98c4-b3bf34e2c575"],
+  "TenantId": "tenant-a"
 }
 ```
 

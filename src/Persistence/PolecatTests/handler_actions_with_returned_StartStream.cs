@@ -15,10 +15,10 @@ namespace PolecatTests;
 
 public class handler_actions_with_returned_StartStream : IAsyncLifetime
 {
-    private IHost _host;
-    private IDocumentStore _store;
+    private IHost _host = null!;
+    private IDocumentStore _store = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -39,7 +39,7 @@ public class handler_actions_with_returned_StartStream : IAsyncLifetime
         await ((DocumentStore)_store).Database.ApplyAllConfiguredChangesToDatabaseAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _host.StopAsync();
         _host.Dispose();
@@ -53,7 +53,7 @@ public class handler_actions_with_returned_StartStream : IAsyncLifetime
         await _host.InvokeMessageAndWaitAsync(new PcStartStreamMessage(id));
 
         await using var session = _store.LightweightSession();
-        var events = await session.Events.FetchStreamAsync(id);
+        var events = await session.Events.FetchStreamAsync(id, token: TestContext.Current.CancellationToken);
         events.Count.ShouldBe(2);
         events[0].Data.ShouldBeOfType<AEvent>();
         events[1].Data.ShouldBeOfType<BEvent>();

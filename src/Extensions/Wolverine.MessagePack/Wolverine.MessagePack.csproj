@@ -2,7 +2,8 @@
 
     <PropertyGroup>
         <Description>MessagePack serialization for Wolverine Applications</Description>
-        <PackageId>Portlogics.WolverineFx.MessagePack</PackageId>
+        <PackageId>WolverineFx.MessagePack</PackageId>
+        <IsAotCompatible>true</IsAotCompatible>
     </PropertyGroup>
 
     <ItemGroup>

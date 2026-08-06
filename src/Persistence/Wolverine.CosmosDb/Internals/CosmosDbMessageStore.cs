@@ -4,6 +4,7 @@ using JasperFx.Descriptors;
 using Microsoft.Azure.Cosmos;
 using Wolverine.CosmosDb.Internals.Durability;
 using Wolverine.CosmosDb.Internals.Transport;
+using Wolverine.Persistence;
 using Wolverine.Persistence.Durability;
 using Wolverine.Runtime;
 using Wolverine.Runtime.Agents;
@@ -52,7 +53,7 @@ public partial class CosmosDbMessageStore : IMessageStoreWithAgentSupport
 
     public string Name => _databaseName;
 
-    public Uri Uri => new("cosmosdb://durability");
+    public Uri Uri => new($"{PersistenceConstants.AgentScheme}://cosmosdb/durability");
 
     public string IdentityFor(Envelope envelope) => _identity(envelope);
 
@@ -66,6 +67,12 @@ public partial class CosmosDbMessageStore : IMessageStoreWithAgentSupport
     public IMessageInbox Inbox => this;
     public IMessageOutbox Outbox => this;
     public INodeAgentPersistence Nodes => this;
+
+    // Default no-op listener store. CosmosDB-backed listener registry is a
+    // follow-up implementation; stays a no-op while EnableDynamicListeners
+    // is false (default).
+    public IListenerStore Listeners { get; protected set; } = NullListenerStore.Instance;
+
     public IMessageStoreAdmin Admin => this;
     public IDeadLetters DeadLetters => this;
 
@@ -100,9 +107,15 @@ public partial class CosmosDbMessageStore : IMessageStoreWithAgentSupport
         _leaderLockId = $"lock|leader|{runtime.Options.ServiceName.ToLowerInvariant()}";
         _scheduledLockId = $"lock|scheduled|{runtime.Options.ServiceName.ToLowerInvariant()}";
         _runtime = runtime;
-        var agent = BuildAgent(runtime);
-        agent.As<CosmosDbDurabilityAgent>().StartTimers();
-        return agent;
+
+        // NodeAgentController owns the durability agent lifecycle via the
+        // wolverinedb://cosmosdb/durability URI (built through
+        // MessageStoreCollection.BuildAgentAsync and started with StartAsync); do not
+        // start a second instance here. The agent built here is held by
+        // WolverineRuntime.DurableScheduledJobs purely for its disposal-time StopAsync,
+        // which is null-safe on the unstarted task fields. Eagerly calling StartTimers()
+        // would produce two concurrent pollers sharing this store — the #2623 bug.
+        return BuildAgent(runtime);
     }
 
     public IAgent BuildAgent(IWolverineRuntime runtime)

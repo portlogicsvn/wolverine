@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 using System.Net.Sockets;
 using JasperFx.Blocks;
 using Microsoft.Extensions.Logging;
@@ -18,6 +18,7 @@ public class SocketListener : IListener, IDisposable
     private CancellationTokenSource? _listenerCancellation;
     private Task? _receivingLoop;
     private Block<Socket>? _socketHandling;
+    private bool _disposed;
 
     public SocketListener(TcpEndpoint endpoint, IReceiver receiver, ILogger logger, IPAddress ipaddr, int port,
         CancellationToken cancellationToken)
@@ -36,10 +37,16 @@ public class SocketListener : IListener, IDisposable
 
     public void Dispose()
     {
+        if (_disposed)
+            return;
+        _disposed = true;
+
         _socketHandling?.Complete();
         _listener?.Stop();
         _listener?.Server.Dispose();
         _receivingLoop?.Dispose();
+        _listenerCancellation?.Cancel();
+        _listenerCancellation?.Dispose();
         _receiver.Dispose();
     }
 
@@ -52,7 +59,17 @@ public class SocketListener : IListener, IDisposable
 
     public async ValueTask DisposeAsync()
     {
-        _listenerCancellation?.Cancel();
+        if (_disposed)
+            return;
+        _disposed = true;
+
+        if (_listenerCancellation is not null)
+        {
+            await _listenerCancellation.CancelAsync();
+            _listenerCancellation.Dispose();
+            _listenerCancellation = null;
+        }
+
         _listener?.Stop();
         _listener = null;
 
@@ -64,7 +81,7 @@ public class SocketListener : IListener, IDisposable
             }
             catch (OperationCanceledException)
             {
-                // Expected during disposal — the receiving loop was cancelled
+                // Expected during disposal - the receiving loop was cancelled
             }
 
             _receivingLoop.Dispose();

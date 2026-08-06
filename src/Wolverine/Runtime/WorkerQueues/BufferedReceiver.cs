@@ -7,6 +7,7 @@ using Wolverine.Logging;
 using Wolverine.Runtime.Partitioning;
 using Wolverine.Runtime.Scheduled;
 using Wolverine.Transports;
+using Wolverine.Transports.Local;
 using Wolverine.Transports.Sending;
 
 namespace Wolverine.Runtime.WorkerQueues;
@@ -27,6 +28,17 @@ internal class BufferedReceiver : ILocalQueue, IChannelCallback, ISupportNativeS
     private bool _latched;
 
     public BufferedReceiver(Endpoint endpoint, IWolverineRuntime runtime, IHandlerPipeline pipeline)
+        : this(endpoint, runtime, pipeline, Block<Envelope>.DefaultBoundedCapacity)
+    {
+    }
+
+    /// <param name="boundedCapacity">
+    /// The in-memory buffer size before writers are back-pressured. Broker-backed buffered receivers keep
+    /// the bounded default so a fast broker can't flood memory. Local queues that may cascade onto
+    /// themselves pass <see cref="Block{T}.Unbounded"/> — a bounded buffer would deadlock a handler that
+    /// enqueues to its own queue faster than it drains (GH-3287).
+    /// </param>
+    protected BufferedReceiver(Endpoint endpoint, IWolverineRuntime runtime, IHandlerPipeline pipeline, int boundedCapacity)
     {
         _endpoint = endpoint;
         _runtime = runtime;
@@ -37,22 +49,58 @@ internal class BufferedReceiver : ILocalQueue, IChannelCallback, ISupportNativeS
 
         _scheduler = new InMemoryScheduledJobProcessor(this, _logger);
 
-        _deferBlock = new RetryBlock<Envelope>((env, _) => env.Listener!.DeferAsync(env).AsTask(), runtime.Logger,
+        // Guard against a listener-less envelope (e.g. the empty all-zero system/agent-handshake
+        // envelope produced during startup) reaching either retry block — env.Listener is null in
+        // that case, and an unguarded deref NREs into the retry loop. GH-3013.
+        _deferBlock = new RetryBlock<Envelope>(
+            (env, _) => env.Listener is { } l ? l.DeferAsync(env).AsTask() : Task.CompletedTask, runtime.Logger,
             runtime.Cancellation);
-        _completeBlock = new RetryBlock<Envelope>((env, _) => env.Listener!.CompleteAsync(env).AsTask(), runtime.Logger,
+        _completeBlock = new RetryBlock<Envelope>(
+            (env, _) => env.Listener is { } l ? l.CompleteAsync(env).AsTask() : Task.CompletedTask, runtime.Logger,
             runtime.Cancellation);
 
-        _receivingBlock = endpoint.GroupShardingSlotNumber == null  
-            ? new Block<Envelope>(endpoint.MaxDegreeOfParallelism, executeAsync)
-            : new ShardedExecutionBlock((int)endpoint.GroupShardingSlotNumber, runtime.Options.MessagePartitioning, executeAsync).DeserializeFirst(pipeline, runtime, this);
+        if (endpoint.GroupShardingSlotNumber == null)
+        {
+            _receivingBlock = new Block<Envelope>(endpoint.MaxDegreeOfParallelism, boundedCapacity, executeAsync);
+        }
+        else
+        {
+            var sharded = new ShardedExecutionBlock((int)endpoint.GroupShardingSlotNumber,
+                runtime.Options.MessagePartitioning, boundedCapacity, executeAsync);
+            sharded.OnError = onBlockError;
+            _receivingBlock = sharded.DeserializeFirst(pipeline, runtime, this);
+        }
+
+        // Route block-level failures (an exception escaping the execution machinery itself, or the
+        // block faulting terminally per jasperfx#506) through real logging. The JasperFx default sink
+        // is stderr, which reads as a silent stall in any structured-logging deployment — and a
+        // faulted block freezes QueueCount, which permanently latches a back-pressured listener
+        // (GH CritterWatch#922).
+        _receivingBlock.OnError = onBlockError;
 
         if (endpoint.TryBuildDeadLetterSender(runtime, out var dlq))
         {
             _deadLetterSender = dlq;
 
             _moveToErrors = new RetryBlock<Envelope>(
-                async (envelope, _) => { await _deadLetterSender!.SendAsync(envelope); }, _logger,
+                async (envelope, _) => { await _deadLetterSender!.SendAsync(envelope).ConfigureAwait(false); }, _logger,
                 _settings.Cancellation);
+        }
+    }
+
+    private void onBlockError(Envelope? envelope, Exception ex)
+    {
+        // A terminal block fault (jasperfx#506) reports with a null item
+        if (envelope == null)
+        {
+            _logger.LogCritical(ex,
+                "The local worker queue for {Uri} has faulted and stopped processing. Messages buffered locally will not be executed",
+                Uri);
+        }
+        else
+        {
+            _logger.LogError(ex, "Error processing envelope {EnvelopeId} ({MessageType}) in the local worker queue for {Uri}",
+                envelope.Id, envelope.MessageType, Uri);
         }
     }
 
@@ -60,7 +108,7 @@ internal class BufferedReceiver : ILocalQueue, IChannelCallback, ISupportNativeS
     {
         if (_latched && envelope.Listener != null)
         {
-            await _deferBlock.PostAsync(envelope);
+            await _deferBlock.PostAsync(envelope).ConfigureAwait(false);
             return;
         }
 
@@ -71,7 +119,7 @@ internal class BufferedReceiver : ILocalQueue, IChannelCallback, ISupportNativeS
                 envelope.ContentType = EnvelopeConstants.JsonContentType;
             }
 
-            await Pipeline!.InvokeAsync(envelope, this);
+            await Pipeline!.InvokeAsync(envelope, this).ConfigureAwait(false);
         }
         catch (Exception? e)
         {
@@ -82,6 +130,16 @@ internal class BufferedReceiver : ILocalQueue, IChannelCallback, ISupportNativeS
 
     ValueTask IChannelCallback.CompleteAsync(Envelope envelope)
     {
+        // When the durability agent recovers a persisted envelope and dispatches it to a
+        // non-durable local queue (DLQ replay per GH-1942, or scheduled-message firing),
+        // BufferedLocalQueue.EnqueueDirectlyAsync attaches a LocalQueueRecoveryListener so
+        // that successful pipeline completion marks the inbox row Handled. Without this,
+        // the row sits in wolverine_incoming forever.
+        if (envelope.Listener is LocalQueueRecoveryListener recovery)
+        {
+            return recovery.CompleteAsync(envelope);
+        }
+
         return ValueTask.CompletedTask;
     }
 
@@ -89,22 +147,22 @@ internal class BufferedReceiver : ILocalQueue, IChannelCallback, ISupportNativeS
     {
         if (envelope.Listener == null)
         {
-            await EnqueueAsync(envelope);
+            await EnqueueAsync(envelope).ConfigureAwait(false);
             return;
         }
 
         try
         {
-            var nativelyRequeued = await envelope.Listener.TryRequeueAsync(envelope);
+            var nativelyRequeued = await envelope.Listener.TryRequeueAsync(envelope).ConfigureAwait(false);
             if (!nativelyRequeued)
             {
-                await EnqueueAsync(envelope);
+                await EnqueueAsync(envelope).ConfigureAwait(false);
             }
         }
         catch (Exception e)
         {
             _logger.LogError(e, "Error trying to use native dead letter queue for {Uri}", Uri);
-            await EnqueueAsync(envelope);
+            await EnqueueAsync(envelope).ConfigureAwait(false);
         }
     }
 
@@ -139,7 +197,7 @@ internal class BufferedReceiver : ILocalQueue, IChannelCallback, ISupportNativeS
             try
             {
                 var completion = _receivingBlock.WaitForCompletionAsync();
-                await Task.WhenAny(completion, Task.Delay(_settings.DrainTimeout));
+                await Task.WhenAny(completion, Task.Delay(_settings.DrainTimeout)).ConfigureAwait(false);
             }
             catch (Exception e)
             {
@@ -147,12 +205,12 @@ internal class BufferedReceiver : ILocalQueue, IChannelCallback, ISupportNativeS
             }
         }
 
-        await _completeBlock.DrainAsync();
-        await _deferBlock.DrainAsync();
+        await _completeBlock.DrainAsync().ConfigureAwait(false);
+        await _deferBlock.DrainAsync().ConfigureAwait(false);
 
         if (_moveToErrors != null)
         {
-            await _moveToErrors.DrainAsync();
+            await _moveToErrors.DrainAsync().ConfigureAwait(false);
         }
     }
 
@@ -176,7 +234,7 @@ internal class BufferedReceiver : ILocalQueue, IChannelCallback, ISupportNativeS
         }
 
         var activity = _endpoint.TelemetryEnabled ? WolverineTracing.StartReceiving(envelope) : null;
-        await _receivingBlock.PostAsync(envelope);
+        await _receivingBlock.PostAsync(envelope).ConfigureAwait(false);
         activity?.Stop();
     }
 
@@ -194,10 +252,10 @@ internal class BufferedReceiver : ILocalQueue, IChannelCallback, ISupportNativeS
             envelope.MarkReceived(listener, now, _settings, _endpoint.WireTap);
             if (!envelope.IsExpired())
             {
-                await EnqueueAsync(envelope);
+                await EnqueueAsync(envelope).ConfigureAwait(false);
             }
 
-            await _completeBlock.PostAsync(envelope);
+            await _completeBlock.PostAsync(envelope).ConfigureAwait(false);
         }
 
         _logger.IncomingBatchReceived(Uri, messages);
@@ -210,7 +268,7 @@ internal class BufferedReceiver : ILocalQueue, IChannelCallback, ISupportNativeS
 
         if (envelope.IsExpired())
         {
-            await _completeBlock.PostAsync(envelope);
+            await _completeBlock.PostAsync(envelope).ConfigureAwait(false);
             return;
         }
 
@@ -220,10 +278,10 @@ internal class BufferedReceiver : ILocalQueue, IChannelCallback, ISupportNativeS
         }
         else
         {
-            await EnqueueAsync(envelope);
+            await EnqueueAsync(envelope).ConfigureAwait(false);
         }
 
-        await _completeBlock.PostAsync(envelope);
+        await _completeBlock.PostAsync(envelope).ConfigureAwait(false);
 
         _logger.IncomingReceived(envelope, Uri);
     }

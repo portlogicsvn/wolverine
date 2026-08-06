@@ -21,7 +21,7 @@ public static string SimpleStringRouteArgument(string name)
     return $"Name is {name}";
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/TestEndpoints.cs#L28-L36' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_string_route_parameter' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/TestEndpoints.cs#L28-L35' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_string_route_parameter' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 In the sample above, the `name` argument will be the value of the route argument
@@ -36,7 +36,7 @@ public static string IntRouteArgument(int age)
     return $"Age is {age}";
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/TestEndpoints.cs#L38-L46' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_numeric_route_parameter' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/TestEndpoints.cs#L37-L44' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_numeric_route_parameter' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 The following code snippet from `WolverineFx.Http` itself shows the *native .NET* valid route
@@ -66,7 +66,7 @@ public static readonly Dictionary<Type, string> TypeOutputs = new()
     { typeof(DateOnly), typeof(DateOnly).FullName! }
 };
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/Wolverine.Http/CodeGen/RouteHandling.cs#L15-L38' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_supported_route_parameter_types' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/Wolverine.Http/CodeGen/RouteHandling.cs#L15-L37' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_supported_route_parameter_types' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ::: warning
@@ -90,7 +90,7 @@ uses StronglyTypedId:
 [StronglyTypedId(Template.Guid)]
 public readonly partial struct LetterId;
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/StrongTypedIdentifiers.cs#L85-L90' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_letter_id' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/StrongTypedIdentifiers.cs#L85-L89' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_letter_id' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 You can use the `LetterId` type as a route argument as this example shows:
@@ -99,15 +99,15 @@ You can use the `LetterId` type as a route argument as this example shows:
 <a id='snippet-sample_using_strong_typed_id_as_route_argument'></a>
 ```cs
 [WolverineGet("/sti/aggregate/longhand/{id}")]
-public static ValueTask<StrongLetterAggregate> Handle2(LetterId id, IDocumentSession session) =>
-    session.Events.FetchLatest<StrongLetterAggregate>(id.Value);
+public static async ValueTask<StrongLetterAggregate> Handle2(LetterId id, IDocumentSession session) =>
+    (await session.Events.FetchLatest<StrongLetterAggregate>(id.Value))!;
 
 // This is an equivalent to the endpoint above 
 [WolverineGet("/sti/aggregate/{id}")]
 public static StrongLetterAggregate Handle(
     [ReadAggregate] StrongLetterAggregate aggregate) => aggregate;
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/StrongTypedIdentifiers.cs#L11-L22' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_strong_typed_id_as_route_argument' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Marten/StrongTypedIdentifiers.cs#L12-L22' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_strong_typed_id_as_route_argument' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Route Prefixes <Badge type="tip" text="5.14" />
@@ -173,38 +173,6 @@ When multiple prefix sources are configured, the following precedence applies (m
 3. Global prefix
 
 Only one prefix is applied per endpoint -- they do not stack.
-## Route Prefixes
-
-You can apply a common URL prefix to all endpoints in a handler class using the `[RoutePrefix]` attribute:
-
-```csharp
-[RoutePrefix("/api/v1")]
-public static class V1Endpoints
-{
-    // Resolves to /api/v1/orders
-    [WolverineGet("/orders")]
-    public static string GetOrders() => "V1 Orders";
-
-    // Resolves to /api/v1/orders/{id}
-    [WolverineGet("/orders/{id}")]
-    public static string GetOrder(int id) => $"V1 Order {id}";
-}
-```
-
-You can also configure route prefixes globally or by namespace in your application setup:
-
-```csharp
-app.MapWolverineEndpoints(opts =>
-{
-    // Apply a global prefix to all Wolverine endpoints
-    opts.RoutePrefix("api");
-
-    // Apply a prefix to all endpoints in a specific namespace
-    opts.RoutePrefix("api/v2", forEndpointsInNamespace: "MyApp.Endpoints.V2");
-});
-```
-
-When multiple prefix sources apply, the precedence is: `[RoutePrefix]` attribute > namespace prefix > global prefix. Only one prefix is applied per endpoint — they do not stack.
 
 ## API Versioning
 
@@ -252,8 +220,38 @@ public string Post()
     return "Hello";
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/NamedRouteEndpoint.cs#L7-L15' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_route_name' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/NamedRouteEndpoint.cs#L7-L14' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_route_name' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
+
+## Special Characters in Routes <Badge type="tip" text="6.17" />
+
+Wolverine generates a C# type for each HTTP endpoint, and it derives that type's name from the route
+template. A route can legally contain characters that are valid in a URL path but not in a C# identifier
+— for example a `$` used to mark an RPC-style action:
+
+```csharp
+[WolverinePut("/assets/$action")]
+public static string TriggerAction() => "triggered";
+```
+
+Wolverine handles this for you: any character in the route that isn't a valid C# identifier character is
+replaced with `_` when building the generated type name, so routes like `/assets/$action` "just work"
+(earlier versions failed to compile with `CS1056: Unexpected character '$'`). Two routes that would
+otherwise sanitize to the *same* type name (for example `/a$b` and `/a-b`) are automatically given a
+short deterministic suffix so they stay unique.
+
+### Overriding the generated type name
+
+If you'd rather control the generated type name explicitly — for a nicer name, or to disambiguate an
+edge case yourself — every route attribute exposes a `TypeName` property as an escape hatch:
+
+```csharp
+[WolverinePut("/assets/$action", TypeName = "TriggerAssetAction")]
+public static string TriggerAction() => "triggered";
+```
+
+The value you supply is still sanitized to a valid identifier, so it can never produce code that fails to
+compile.
 
 
 

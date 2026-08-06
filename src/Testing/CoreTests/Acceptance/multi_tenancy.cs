@@ -14,7 +14,7 @@ public class multi_tenancy : IAsyncLifetime
     private TenantedMessageTracker theTracker = new TenantedMessageTracker();
     private IHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -26,7 +26,7 @@ public class multi_tenancy : IAsyncLifetime
             .StartAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _host.StopAsync();
         _host.Dispose();
@@ -119,7 +119,6 @@ public static class TenantedHandler
 public record SomeCommand;
 
 #region sample_injecting_tenant_id
-
 public static class SomeCommandHandler
 {
     // Wolverine is keying off the type, the parameter name

@@ -1,7 +1,9 @@
 using System.Linq.Expressions;
 using JasperFx.Core.Reflection;
+using Wolverine.ErrorHandling;
 using Wolverine.Logging;
 using Wolverine.RateLimiting;
+using Wolverine.Runtime.Serialization.Encryption;
 
 namespace Wolverine;
 
@@ -71,6 +73,104 @@ public class MessageTypePolicies<T>
         configure?.Invoke(schedule);
         _parent.ConfigureRateLimit(typeof(T), schedule, key);
 
+        return this;
+    }
+
+    /// <summary>
+    /// Mark messages assignable to <typeparamref name="T"/> as requiring AES-256-GCM
+    /// encryption on send and on receive. Resolves the encrypting serializer at the
+    /// time this method is invoked, so <see cref="WolverineOptions.UseEncryption"/> or
+    /// <see cref="WolverineOptions.RegisterEncryptionSerializer"/> must be called
+    /// <b>before</b> this method is invoked. Inbound envelopes of this type whose
+    /// content-type is not the encrypted content-type are routed to the dead-letter
+    /// queue with <see cref="EncryptionPolicyViolationException"/>.
+    /// </summary>
+    public MessageTypePolicies<T> Encrypt()
+    {
+        var encrypting = _parent.TryFindSerializer(EncryptionHeaders.EncryptedContentType)
+            ?? throw new InvalidOperationException(
+                "No encrypting serializer is registered. Call " +
+                "WolverineOptions.UseEncryption(provider) or " +
+                "WolverineOptions.RegisterEncryptionSerializer(provider) " +
+                $"before .ForMessagesOfType<{typeof(T).Name}>().Encrypt().");
+
+        _parent.MetadataRules.Add(new EncryptMessageTypeRule<T>(encrypting));
+        _parent.RequiredEncryptedTypes.Add(typeof(T));
+
+        // Pair the rule for Fault<T> so auto-published fault events for this
+        // message type are also routed through the encrypting serializer. The
+        // EncryptMessageTypeRule<T>.Modify gate is invariant in T, so a separate
+        // rule is required (the one for T does not match Fault<T>).
+        //
+        // Skipped when T is a value type because Fault<T> is constrained to
+        // T : class. The FaultPublisher already silently no-ops on value-type
+        // messages, so no Fault<T> is ever produced for those types.
+        //
+        // Reflective construction keeps Encrypt<T>() callable for any T (no
+        // new generic constraint at the entry point). If a user calls Encrypt<T>()
+        // for the same T more than once, the rules accumulate in MetadataRules
+        // (a list, not a set, mirroring the existing behavior for the T rule);
+        // the duplicate rules are behaviorally idempotent — the second swap of
+        // Serializer/ContentType writes the same values — but the list grows.
+        if (!typeof(T).IsValueType)
+        {
+            var faultType = typeof(Fault<>).MakeGenericType(typeof(T));
+            var faultRuleType = typeof(EncryptMessageTypeRule<>).MakeGenericType(faultType);
+            var faultRule = (IEnvelopeRule)Activator.CreateInstance(faultRuleType, encrypting)!;
+            _parent.MetadataRules.Add(faultRule);
+            _parent.RequiredEncryptedTypes.Add(faultType);
+        }
+
+        return this;
+    }
+
+    /// <summary>
+    /// Opt this message type into auto-published <see cref="Fault{T}"/> events on
+    /// terminal handler failure. Overrides any global setting.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <see cref="Fault{T}"/> requires <typeparamref name="T"/> to be a reference type.
+    /// Calling this for value-type messages compiles but will not produce a fault at runtime.
+    /// </para>
+    /// <para>
+    /// <b>Delivery semantics.</b> See <see cref="WolverineOptions.PublishFaultEvents(bool, bool, bool)"/>
+    /// — auto-published fault events are best-effort and not transactionally co-committed with
+    /// the dead-letter-queue move.
+    /// </para>
+    /// <para>
+    /// <b>Scope.</b> See <see cref="WolverineOptions.PublishFaultEvents(bool, bool, bool)"/> —
+    /// fault events are not emitted for send-side DLQ movements or unknown-message-type envelopes.
+    /// </para>
+    /// <para>
+    /// <b>Fully-specified override.</b> The values passed here — including the defaults for
+    /// <paramref name="includeExceptionMessage"/> and <paramref name="includeStackTrace"/> — are
+    /// stored as the override for <typeparamref name="T"/>. They do <i>not</i> inherit subsequent
+    /// changes to globals on <see cref="WolverineOptions.PublishFaultEvents(bool, bool, bool)"/>.
+    /// If you want this type to redact exception messages, pass
+    /// <c>includeExceptionMessage: false</c> here explicitly.
+    /// </para>
+    /// </remarks>
+    public MessageTypePolicies<T> PublishFault(
+        bool includeDiscarded = false,
+        bool includeExceptionMessage = true,
+        bool includeStackTrace = true)
+    {
+        var mode = includeDiscarded
+            ? FaultPublishingMode.DlqAndDiscard
+            : FaultPublishingMode.DlqOnly;
+        _parent.FaultPublishing.SetOverride(
+            typeof(T), mode, includeExceptionMessage, includeStackTrace);
+        return this;
+    }
+
+    /// <summary>
+    /// Opt this message type out of auto-published <see cref="Fault{T}"/> events,
+    /// even when the global default is on.
+    /// </summary>
+    public MessageTypePolicies<T> DoNotPublishFault()
+    {
+        _parent.FaultPublishing.SetOverride(typeof(T), FaultPublishingMode.None);
         return this;
     }
 }

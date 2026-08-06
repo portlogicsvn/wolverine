@@ -43,6 +43,38 @@ var app = builder.Build();
 return await app.RunJasperFxCommands(args);
 ```
 
+## Aspire Integration
+
+The recommended way to integrate Wolverine with .NET Aspire for Oracle is to read the connection string injected by Aspire via `IConfiguration.GetConnectionString()`.
+
+**AppHost** (`Aspire.Hosting.Oracle` NuGet):
+```csharp
+var oracle = builder.AddOracle("oracle")
+    .AddDatabase("wolverine");
+
+builder.AddProject<Projects.MyWorker>("worker")
+    .WithReference(oracle)
+    .WaitFor(oracle);
+```
+
+**Service project:**
+```csharp
+var builder = Host.CreateApplicationBuilder(args);
+
+// Aspire injects ConnectionStrings__wolverine automatically via WithReference()
+var connectionString = builder.Configuration.GetConnectionString("wolverine")!;
+
+builder.UseWolverine(opts =>
+{
+    opts.PersistMessagesWithOracle(connectionString);
+    opts.Policies.UseDurableLocalQueues();
+});
+
+await builder.Build().RunAsync();
+```
+
+`WaitFor(oracle)` in the AppHost ensures Oracle is healthy before your service starts. If you are using Entity Framework Core with Oracle, install `Aspire.Oracle.EntityFrameworkCore` and call `builder.AddOracleDatabaseDbContext<MyDbContext>("wolverine")` to register the `DbContext`.
+
 ## Oracle Messaging Transport
 
 ::: info
@@ -147,6 +179,13 @@ This queue is hardcoded to poll every second and should not be changed to ensure
 :::
 
 
+### Resetting in Tests
+
+`RebuildAsync()` / `ClearAllAsync()` on the message store clear envelope storage only — they leave
+this transport's queue and scheduled-message tables alone. To wipe both in an integration test
+harness, call [`IHost.ClearAllWolverineStorageAsync()`](/guide/testing.html#resetting-all-wolverine-storage-in-tests),
+which leaves the queue tables built but empty across every tenant database.
+
 ## Multi-Tenancy
 
 As of Wolverine 5.x, you can use multi-tenancy through separate databases per tenant with Oracle.
@@ -235,8 +274,8 @@ and the default schema name for transport queues is `WOLVERINE_QUEUES`.
 
 ### Advisory Locks
 
-Wolverine uses Oracle's `DBMS_LOCK` package for distributed locking to coordinate scheduled message processing across
-nodes. Lock names are derived from a deterministic hash of the schema name.
+Wolverine uses row-level locks (`SELECT ... FOR UPDATE NOWAIT`) against a `wolverine_locks` table for distributed locking
+to coordinate scheduled message processing across nodes. Each lock is keyed by an integer lock id.
 
 ### Data Types
 

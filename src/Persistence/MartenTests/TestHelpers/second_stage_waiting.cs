@@ -20,12 +20,17 @@ public class second_stage_waiting : IAsyncLifetime
 {
     private IHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
 
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery()
+                    .IncludeType(typeof(AppendLettersHandler))
+                    .IncludeType(typeof(AppendLetters2Handler))
+                    .IncludeType(typeof(GotFiveHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Services.AddMarten(m =>
                 {
                     m.Connection(Servers.PostgresConnectionString);
@@ -40,7 +45,9 @@ public class second_stage_waiting : IAsyncLifetime
                     m.DatabaseSchemaName = "letters3";
 
                     m.Projections.Add<LetterCountsProjectionWithSideEffects>(ProjectionLifecycle.Async);
-                }).AddAsyncDaemon(DaemonMode.Solo).IntegrateWithWolverine();
+                }).IntegrateWithWolverine(); // GH-3388: no AddAsyncDaemon here — this is the SAME main store
+                              // that enabled UseWolverineManagedEventSubscriptionDistribution above,
+                              // and Wolverine runs its daemon.
                 
                 opts.Services.AddMartenStore<ILetterStore>(m =>
                 {
@@ -56,9 +63,10 @@ public class second_stage_waiting : IAsyncLifetime
             }).StartAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _host.StopAsync();
+        _host.Dispose();
     }
     
     [Fact]
@@ -73,10 +81,10 @@ public class second_stage_waiting : IAsyncLifetime
         session.Events.StartStream<LetterCounts>("AABBCCDDEE".ToLetterEvents());
         session.Events.StartStream<LetterCounts>("AABBCCDDEE".ToLetterEvents());
         session.Events.StartStream<LetterCounts>("AABBCCDDEE".ToLetterEvents());
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
         await _host.WaitForNonStaleProjectionDataAsync(5.Seconds());
         
-        (await session.Query<LetterCounts>().CountAsync()).ShouldBe(3);
+        (await session.Query<LetterCounts>().CountAsync(token: TestContext.Current.CancellationToken)).ShouldBe(3);
 
 
         var tracked = await _host.TrackActivity()
@@ -86,7 +94,7 @@ public class second_stage_waiting : IAsyncLifetime
 
         // Proving that previous data was wiped out
 
-        var all = await session.Query<LetterCounts>().ToListAsync();
+        var all = await session.Query<LetterCounts>().ToListAsync(token: TestContext.Current.CancellationToken);
         var counts = all.Single();
         counts.Id.ShouldBe(id);
         
@@ -110,10 +118,10 @@ public class second_stage_waiting : IAsyncLifetime
         session.Events.StartStream<LetterCounts>("AABBCCDDEE".ToLetterEvents());
         session.Events.StartStream<LetterCounts>("AABBCCDDEE".ToLetterEvents());
         session.Events.StartStream<LetterCounts>("AABBCCDDEE".ToLetterEvents());
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
         await _host.WaitForNonStaleProjectionDataAsync<ILetterStore>(5.Seconds());
         
-        (await session.Query<LetterCounts>().CountAsync()).ShouldBe(3);
+        (await session.Query<LetterCounts>().CountAsync(token: TestContext.Current.CancellationToken)).ShouldBe(3);
 
 
         var tracked = await _host.TrackActivity()
@@ -124,7 +132,7 @@ public class second_stage_waiting : IAsyncLifetime
         
         // Proving that previous data was wiped out
 
-        var all = await session.Query<LetterCounts>().ToListAsync();
+        var all = await session.Query<LetterCounts>().ToListAsync(token: TestContext.Current.CancellationToken);
         var counts = all.Single();
         counts.Id.ShouldBe(id);
         
@@ -149,7 +157,7 @@ public static class GotFiveHandler
     public static void Handle(GotFiveResponse m) => Debug.WriteLine("Got five response for " + m.Id);
 }
 
-public class LetterCountsProjectionWithSideEffects: SingleStreamProjection<LetterCounts, Guid>
+public partial class LetterCountsProjectionWithSideEffects: SingleStreamProjection<LetterCounts, Guid>
 {
     public override LetterCounts Evolve(LetterCounts? snapshot, Guid id, IEvent e)
     {

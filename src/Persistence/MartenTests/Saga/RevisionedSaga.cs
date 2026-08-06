@@ -20,11 +20,13 @@ public class using_revisioned_sagas : IAsyncLifetime
 {
     private IHost theHost = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         theHost = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery().IncludeType(typeof(RevisionedSaga));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Services.AddMarten(m =>
                 {
                     m.DisableNpgsqlLogging = true;
@@ -59,10 +61,10 @@ public class using_revisioned_sagas : IAsyncLifetime
         var execution = Task.Run(async () =>
         {
             await theHost.MessageBus().InvokeAsync(slow);
-        });
+        }, TestContext.Current.CancellationToken);
 
         await RevisionedSaga.InSlowMessage.Task;
-        await theHost.MessageBus().InvokeAsync(new Command1(id));
+        await theHost.MessageBus().InvokeAsync(new Command1(id), TestContext.Current.CancellationToken);
         
         slow.Source.SetResult();
 
@@ -70,7 +72,7 @@ public class using_revisioned_sagas : IAsyncLifetime
         await execution;
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await theHost.StopAsync();
         theHost.Dispose();
@@ -78,7 +80,6 @@ public class using_revisioned_sagas : IAsyncLifetime
 }
 
 #region sample_overriding_logging_on_saga
-
 public class RevisionedSaga : Wolverine.Saga
 {
     // This works just the same as on any other message handler
@@ -96,9 +97,12 @@ public class RevisionedSaga : Wolverine.Saga
     public static RevisionedSaga Start(StartNewRevisionedSaga command) => new RevisionedSaga { Id = command.Id };
     
     public Guid Id { get; set; }
-    
-    public new int Version { get; set; }
-    
+
+    // No `new Version` shadow needed in 6.0 — Wolverine.Saga.Version (an int)
+    // matches JasperFx 2.0 rc's IRevisioned.Version (also an int), so the base
+    // property is the saga's revision tracker by default.
+    // See docs/guide/migration.md.
+
     public bool One { get; set; }
     public bool Two { get; set; }
     public bool Three { get; set; }

@@ -2,15 +2,37 @@
 
     <PropertyGroup>
         <Description>Compliance test harnesses for adding persistence and transport options to Wolverine</Description>
-        <PackageId>Portlogics.WolverineFx.ComplianceTests</PackageId>
+        <PackageId>WolverineFx.ComplianceTests</PackageId>
+        <!--
+          This is a LIBRARY of xUnit base classes, not a test project, so it references
+          xunit.v3.extensibility.core rather than xunit.v3. xunit.v3 would force
+          <OutputType>Exe</OutputType> (its targets hard-error otherwise), which a package
+          consumed by ~40 downstream test projects must not be.
+        -->
     </PropertyGroup>
 
     <ItemGroup>
         <ProjectReference Include="..\..\Wolverine\Wolverine.csproj"/>
-        <PackageReference Include="Microsoft.NET.Test.Sdk" />
+        <ProjectReference Include="..\..\Persistence\Wolverine.RDBMS\Wolverine.RDBMS.csproj"/>
+        <!--
+          Core WolverineFx no longer ships the Roslyn runtime compiler (#2876). Compliance
+          suites bootstrap Wolverine hosts in the default TypeLoadMode.Dynamic, so they need
+          the runtime compiler. Referencing WolverineFx.RuntimeCompilation here flows
+          transitively to the ~39 downstream test/sample projects and auto-registers
+          IAssemblyGenerator via its [WolverineModule] — no per-project change needed.
+        -->
+        <ProjectReference Include="..\..\Wolverine.RuntimeCompilation\Wolverine.RuntimeCompilation.csproj"/>
+        <!--
+          TransportCompliance.cs exercises options.UseNewtonsoftForSerialization()
+          against every transport. Newtonsoft moved to its own package in 6.0;
+          the compliance harness carries the explicit dependency so transport
+          authors who run the compliance suite don't have to install the extra
+          package by hand.
+        -->
+        <ProjectReference Include="..\..\Extensions\Wolverine.Newtonsoft\Wolverine.Newtonsoft.csproj"/>
         <PackageReference Include="NSubstitute" />
         <PackageReference Include="Shouldly" />
-        <PackageReference Include="xunit" />
+        <PackageReference Include="xunit.v3.extensibility.core" />
     </ItemGroup>
 
 </Project>

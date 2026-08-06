@@ -2,6 +2,7 @@ using System.Linq.Expressions;
 using Marten;
 using Marten.Linq;
 using Marten.Metadata;
+using JasperFx.Metadata;
 using Microsoft.AspNetCore.Mvc;
 using Wolverine.Http;
 using Wolverine.Http.Marten;
@@ -12,7 +13,6 @@ namespace WolverineWebApi.Marten;
 public class InvoicesEndpoint
 
     #region sample_get_invoice_longhand
-
 {
     [WolverineGet("/invoices/longhand/{id}")]
     [ProducesResponseType(404)]
@@ -31,7 +31,6 @@ public class InvoicesEndpoint
     #endregion
 
     #region sample_using_document_attribute
-
     [WolverineGet("/invoices/{id}")]
     public static Invoice Get([Document] Invoice invoice)
     {
@@ -41,7 +40,6 @@ public class InvoicesEndpoint
     #endregion
 
     #region sample_using_marten_op_from_http_endpoint
-
     [WolverinePost("/invoices/{invoiceId}/pay")]
     public static IMartenOp Pay([Document] Invoice invoice)
     {
@@ -52,7 +50,6 @@ public class InvoicesEndpoint
     #endregion
 
     #region sample_overriding_route_argument_with_document_attribute
-
     [WolverinePost("/invoices/{number}/approve")]
     public static IMartenOp Approve([Document("number")] Invoice invoice)
     {
@@ -62,7 +59,7 @@ public class InvoicesEndpoint
 
     #endregion
 
-    #region sample_using_Document_with_MaybeSoftDeleted
+    #region sample_using_document_with_maybesoftdeleted
     [WolverineGet("/invoices/soft-delete/{id}")]
     public static Invoice GetSoftDeleted([Document(Required = true, MaybeSoftDeleted = false)] Invoice invoice)
     {
@@ -97,6 +94,17 @@ public class InvoicesEndpoint
     }
 }
 
+// GH-3625 guard: here the compiled query is a Load-returned data dependency, NOT
+// the endpoint's resource, so QuerySpecificationPolicy must still inject the
+// FetchSpecificationFrame that materializes it for the endpoint method.
+public static class ApprovedInvoiceCountEndpoint
+{
+    public static ApprovedInvoicedCompiledQuery Load() => new();
+
+    [WolverineGet("/invoices/approved/count")]
+    public static string Get(IEnumerable<Invoice> invoices) => invoices.Count().ToString();
+}
+
 public class Invoice : ISoftDeleted
 {
     public Guid Id { get; set; }
@@ -107,7 +115,6 @@ public class Invoice : ISoftDeleted
 }
 
 #region sample_compiled_query_return_query
-
 public class ApprovedInvoicedCompiledQuery : ICompiledListQuery<Invoice>
 {
     public Expression<Func<IMartenQueryable<Invoice>, IEnumerable<Invoice>>> QueryIs()

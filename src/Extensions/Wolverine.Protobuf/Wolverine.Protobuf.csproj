@@ -2,7 +2,8 @@
 
 	<PropertyGroup>
 		<Description>Protobuf serialization for Wolverine Applications</Description>
-		<PackageId>Portlogics.WolverineFx.Protobuf</PackageId>
+		<PackageId>WolverineFx.Protobuf</PackageId>
+		<IsAotCompatible>true</IsAotCompatible>
 	</PropertyGroup>
 
 	<ItemGroup>

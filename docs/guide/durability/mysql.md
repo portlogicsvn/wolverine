@@ -43,6 +43,38 @@ var app = builder.Build();
 return await app.RunJasperFxCommands(args);
 ```
 
+## Aspire Integration
+
+The recommended way to integrate Wolverine with .NET Aspire for MySQL is to read the connection string injected by Aspire via `IConfiguration.GetConnectionString()`.
+
+**AppHost** (`Aspire.Hosting.MySql` NuGet):
+```csharp
+var mysql = builder.AddMySql("mysql")
+    .AddDatabase("wolverine");
+
+builder.AddProject<Projects.MyWorker>("worker")
+    .WithReference(mysql)
+    .WaitFor(mysql);
+```
+
+**Service project:**
+```csharp
+var builder = Host.CreateApplicationBuilder(args);
+
+// Aspire injects ConnectionStrings__wolverine automatically via WithReference()
+var connectionString = builder.Configuration.GetConnectionString("wolverine")!;
+
+builder.UseWolverine(opts =>
+{
+    opts.PersistMessagesWithMySql(connectionString);
+    opts.Policies.UseDurableLocalQueues();
+});
+
+await builder.Build().RunAsync();
+```
+
+`WaitFor(mysql)` in the AppHost ensures MySQL is healthy before your service starts, so Wolverine's schema setup runs against an available database.
+
 ## MySQL Messaging Transport
 
 ::: info
@@ -144,6 +176,13 @@ Wolverine has an internal control queue (`dbcontrol`) used for internal operatio
 This queue is hardcoded to poll every second and should not be changed to ensure the stability of the application.
 :::
 
+
+### Resetting in Tests
+
+`RebuildAsync()` / `ClearAllAsync()` on the message store clear envelope storage only — they leave
+this transport's queue and scheduled-message tables alone. To wipe both in an integration test
+harness, call [`IHost.ClearAllWolverineStorageAsync()`](/guide/testing.html#resetting-all-wolverine-storage-in-tests),
+which leaves the queue tables built but empty across every tenant database.
 
 ## Multi-Tenancy
 
@@ -262,7 +301,7 @@ Here's some more important background on the multi-tenancy support:
 * The lightweight saga support for MySQL absolutely works with this model of multi-tenancy
 * Wolverine is able to manage all of its database tables including the tenant table itself (`wolverine_tenants`) across both the
   main database and all the tenant databases including schema migrations
-* Wolverine's transactional middleware is aware of the multi-tenancy and can connect to the correct database based on the `IMesageContext.TenantId`
+* Wolverine's transactional middleware is aware of the multi-tenancy and can connect to the correct database based on the `IMessageContext.TenantId`
   or utilize the tenant id detection in Wolverine.HTTP as well
 * You can "plug in" a custom implementation of `ITenantSource<string>` to manage tenant id to connection string assignments in whatever way works for your deployed system
 

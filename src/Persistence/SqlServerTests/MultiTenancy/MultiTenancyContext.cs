@@ -15,14 +15,14 @@ public abstract class MultiTenancyContext : SqlServerContext, IAsyncLifetime
     protected string tenant2ConnectionString = null!;
     protected string tenant3ConnectionString = null!;
 
-    public new async Task InitializeAsync()
+    public new async ValueTask InitializeAsync()
     {
         await using var conn = new SqlConnection(Servers.SqlServerConnectionString);
         await conn.OpenAsync();
 
-        tenant1ConnectionString = await CreateDatabaseIfNotExists(conn, "db1");
-        tenant2ConnectionString = await CreateDatabaseIfNotExists(conn, "db2");
-        tenant3ConnectionString = await CreateDatabaseIfNotExists(conn, "db3");
+        tenant1ConnectionString = await CreateDatabaseIfNotExists(conn, LaneDatabases.Name("db1"));
+        tenant2ConnectionString = await CreateDatabaseIfNotExists(conn, LaneDatabases.Name("db2"));
+        tenant3ConnectionString = await CreateDatabaseIfNotExists(conn, LaneDatabases.Name("db3"));
 
         await cleanItems(tenant1ConnectionString);
         await cleanItems(tenant2ConnectionString);
@@ -38,9 +38,10 @@ public abstract class MultiTenancyContext : SqlServerContext, IAsyncLifetime
 
     protected virtual Task onStartup() => Task.CompletedTask;
 
-    public new async Task DisposeAsync()
+    public new async ValueTask DisposeAsync()
     {
         await theHost.StopAsync();
+        theHost.Dispose();
     }
 
     private async Task<string> CreateDatabaseIfNotExists(SqlConnection conn, string databaseName)
@@ -60,7 +61,7 @@ public abstract class MultiTenancyContext : SqlServerContext, IAsyncLifetime
 
     private static async Task<bool> DatabaseExistsAsync(SqlConnection conn, string databaseName)
     {
-        var cmd = conn.CreateCommand($"SELECT DB_ID(@databaseName)");
+        await using var cmd = conn.CreateCommand($"SELECT DB_ID(@databaseName)");
         cmd.Parameters.AddWithValue("@databaseName", databaseName);
         var result = await cmd.ExecuteScalarAsync();
         return result != null && result != DBNull.Value;

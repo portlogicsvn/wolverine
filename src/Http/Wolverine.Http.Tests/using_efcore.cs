@@ -16,7 +16,7 @@ public class using_efcore : IntegrationContext
     public using_efcore(AppFixture fixture) : base(fixture)
     {
     }
-    
+
     
 
     [Fact]
@@ -35,7 +35,7 @@ public class using_efcore : IntegrationContext
         using var nested = Host.Services.CreateScope();
         var context = nested.ServiceProvider.GetRequiredService<ItemsDbContext>();
 
-        var item = await context.Items.Where(x => x.Name == command.Name).FirstOrDefaultAsync();
+        var item = await context.Items.Where(x => x.Name == command.Name).FirstOrDefaultAsync(cancellationToken: TestContext.Current.CancellationToken);
         item.ShouldNotBeNull();
     }
 
@@ -55,7 +55,7 @@ public class using_efcore : IntegrationContext
         using var nested = Host.Services.CreateScope();
         var context = nested.ServiceProvider.GetRequiredService<ItemsDbContext>();
 
-        var item = await context.Items.Where(x => x.Name == command.Name).FirstOrDefaultAsync();
+        var item = await context.Items.Where(x => x.Name == command.Name).FirstOrDefaultAsync(cancellationToken: TestContext.Current.CancellationToken);
         item.ShouldNotBeNull();
 
         tracked.Sent.SingleMessage<ItemCreated>()
@@ -65,7 +65,9 @@ public class using_efcore : IntegrationContext
     private async Task cleanItems()
     {
         await Host.ResetResourceState();
-        
+        EfCoreEndpoints.DbContext = null;
+        EfCoreEndpoints.NestedDbContext = null;
+
         var table = new Table("items");
         table.AddColumn<Guid>("Id").AsPrimaryKey();
         table.AddColumn<string>("Name");
@@ -98,7 +100,7 @@ public class using_efcore : IntegrationContext
         using var nested = Host.Services.CreateScope();
         var context = nested.ServiceProvider.GetRequiredService<ItemsDbContext>();
 
-        var item = await context.Items.Where(x => x.Name == command.Name).FirstOrDefaultAsync();
+        var item = await context.Items.Where(x => x.Name == command.Name).FirstOrDefaultAsync(cancellationToken: TestContext.Current.CancellationToken);
         item.ShouldBeNull();
 
         var records = tracked.AllRecordsInOrder().ToArray();
@@ -124,7 +126,7 @@ public class using_efcore : IntegrationContext
         using var nested = Host.Services.CreateScope();
         var context = nested.ServiceProvider.GetRequiredService<ItemsDbContext>();
 
-        var item = await context.Items.Where(x => x.Name == command.Name).FirstOrDefaultAsync();
+        var item = await context.Items.Where(x => x.Name == command.Name).FirstOrDefaultAsync(cancellationToken: TestContext.Current.CancellationToken);
         item.ShouldBeNull();
 
         var scheduledMessage = tracked.Scheduled.SingleEnvelope<ItemCreated>();
@@ -148,5 +150,21 @@ public class using_efcore : IntegrationContext
         var scheduledMessage = tracked.Scheduled.SingleEnvelope<ItemCreated>();
         scheduledMessage.ScheduleDelay.ShouldNotBeNull();
         scheduledMessage.Message.ShouldBeOfType<ItemCreated>();
+    }
+
+    [Fact]
+    public async Task http_handler_with_http_context_sourced_gets_the_same_service()
+    {
+        await cleanItems();
+
+        var _ = await TrackedHttpCall(x =>
+        {
+            x.Post.Json(new CreateItemCommand()).ToUrl("/ef/servicelocation");
+            x.StatusCodeShouldBe(204);
+        });
+
+        EfCoreEndpoints.DbContext.ShouldNotBeNull();
+        EfCoreEndpoints.NestedDbContext.ShouldNotBeNull();
+        EfCoreEndpoints.DbContext.ShouldBe(EfCoreEndpoints.NestedDbContext);
     }
 }

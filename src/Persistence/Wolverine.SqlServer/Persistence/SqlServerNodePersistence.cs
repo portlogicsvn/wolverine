@@ -38,7 +38,8 @@ internal class SqlServerNodePersistence : DatabaseConstants, INodeAgentPersisten
         await using var conn = new SqlConnection(_settings.ConnectionString);
         await conn.OpenAsync(cancellationToken);
 
-        await conn.CreateCommand($"delete from {_nodeTable}").ExecuteNonQueryAsync(cancellationToken);
+        await using var cmd = conn.CreateCommand($"delete from {_nodeTable}");
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
 
         await conn.CloseAsync();
     }
@@ -57,9 +58,16 @@ internal class SqlServerNodePersistence : DatabaseConstants, INodeAgentPersisten
 
     private async Task<object> persistNode(SqlConnection conn, WolverineNode node, CancellationToken cancellationToken)
     {
-        var strings = node.Capabilities.Select(x => x.ToString()).Join(",");
+        // GH-3165: join capabilities with a newline, NOT a comma. SQL Server has no array column type
+        // (unlike Postgres, which stores capabilities as text[]), so we serialize to a single delimited
+        // string. A comma is unsafe because an agent capability URI can legitimately contain a comma —
+        // an event-subscription agent URI embeds the DatabaseId, and a SQL Server DatabaseId's server name
+        // is "host,port" (e.g. "localhost,1434"). Comma-splitting then shredded one URI into invalid
+        // fragments and threw on read. A newline can never appear in a Uri.ToString() (it would be
+        // percent-encoded), so it is a safe delimiter.
+        var strings = node.Capabilities.Select(x => x.ToString()).Join("\n");
 
-        var cmd = conn.CreateCommand($"insert into {_nodeTable} (id, uri, capabilities, description, version) OUTPUT Inserted.node_number values (@id, @uri, @capabilities, @description, @version) ")
+        await using var cmd = conn.CreateCommand($"insert into {_nodeTable} (id, uri, capabilities, description, version) OUTPUT Inserted.node_number values (@id, @uri, @capabilities, @description, @version) ")
             .With("id", node.NodeId)
             .With("uri", (node.ControlUri ?? TransportConstants.LocalUri).ToString()).With("description", node.Description)
             .With("capabilities", strings)
@@ -89,7 +97,7 @@ internal class SqlServerNodePersistence : DatabaseConstants, INodeAgentPersisten
         await using var conn = new SqlConnection(_settings.ConnectionString);
         await conn.OpenAsync(cancellationToken);
 
-        var cmd = conn.CreateCommand($"select {NodeColumns} from {_nodeTable};select {Id}, {NodeId}, {Started} from {_assignmentTable}");
+        await using var cmd = conn.CreateCommand($"select {NodeColumns} from {_nodeTable};select {Id}, {NodeId}, {Started} from {_assignmentTable}");
 
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -118,6 +126,11 @@ internal class SqlServerNodePersistence : DatabaseConstants, INodeAgentPersisten
     public async Task PersistAgentRestrictionsAsync(IReadOnlyList<AgentRestriction> restrictions,
         CancellationToken cancellationToken)
     {
+        // No changes to persist. Compiling/executing an empty BatchBuilder yields a single command with
+        // an empty CommandText, which throws "CommandText property has not been initialized" — so no-op
+        // instead. The empty case happens on an idempotent restriction apply (no delta). See wolverine#3252.
+        if (restrictions.Count == 0) return;
+
         var builder = new BatchBuilder();
         foreach (var restriction in restrictions)
         {
@@ -140,7 +153,7 @@ internal class SqlServerNodePersistence : DatabaseConstants, INodeAgentPersisten
             }
         }
 
-        var batch = builder.Compile();
+        await using var batch = builder.Compile();
         await using var conn = new SqlConnection(_settings.ConnectionString);
         await conn.OpenAsync(cancellationToken);
         batch.Connection = conn;
@@ -216,7 +229,7 @@ internal class SqlServerNodePersistence : DatabaseConstants, INodeAgentPersisten
         await using var conn = new SqlConnection(_settings.ConnectionString);
         await conn.OpenAsync(cancellationToken);
 
-        var cmd = CommandExtensions.CreateCommand(conn,
+        await using var cmd = CommandExtensions.CreateCommand(conn,
                 $"select {NodeColumns} from {_nodeTable} where id = @id;select id, node_id, started from {_assignmentTable} where node_id = @id;")
             .With("id", nodeId);
 
@@ -240,7 +253,7 @@ internal class SqlServerNodePersistence : DatabaseConstants, INodeAgentPersisten
         return returnValue;
     }
 
-    public async Task MarkHealthCheckAsync(WolverineNode node, CancellationToken cancellationToken)
+    public async Task<bool> MarkHealthCheckAsync(WolverineNode node, CancellationToken cancellationToken)
     {
         await using var conn = new SqlConnection(_settings.ConnectionString);
         await conn.OpenAsync(cancellationToken);
@@ -248,10 +261,32 @@ internal class SqlServerNodePersistence : DatabaseConstants, INodeAgentPersisten
         var count = await conn.CreateCommand($"update {_nodeTable} set health_check = GETUTCDATE() where id = @id")
             .With("id", node.NodeId).ExecuteNonQueryAsync(cancellationToken);
 
-        if (count == 0)
-        {
-            await persistNode(conn, node, cancellationToken);
-        }
+        await conn.CloseAsync();
+
+        // GH-3604 / D2: a miss means a peer deleted this still-live node's row; report it to the caller
+        // instead of blindly re-inserting a skeleton (fresh node_number, empty capabilities) here.
+        return count != 0;
+    }
+
+    public async Task ReregisterNodeAsync(WolverineNode node, CancellationToken cancellationToken)
+    {
+        await using var conn = new SqlConnection(_settings.ConnectionString);
+        await conn.OpenAsync(cancellationToken);
+
+        // node_number is an IDENTITY column, so an explicit value requires IDENTITY_INSERT. Preserve the
+        // existing number + capabilities so the resurrected row matches the identity the process still uses
+        // in memory. The delete cascades any surviving assignment rows; the caller restores them.
+        var strings = node.Capabilities.Select(x => x.ToString()).Join("\n");
+
+        await conn.CreateCommand(
+                $"SET IDENTITY_INSERT {_nodeTable} ON; delete from {_nodeTable} where id = @id; insert into {_nodeTable} (id, node_number, uri, capabilities, description, version, health_check) values (@id, @number, @uri, @capabilities, @description, @version, GETUTCDATE()); SET IDENTITY_INSERT {_nodeTable} OFF;")
+            .With("id", node.NodeId)
+            .With("number", node.AssignedNodeNumber)
+            .With("uri", (node.ControlUri ?? TransportConstants.LocalUri).ToString())
+            .With("capabilities", strings)
+            .With("description", node.Description)
+            .With("version", node.Version.ToString())
+            .ExecuteNonQueryAsync(cancellationToken);
 
         await conn.CloseAsync();
     }
@@ -277,7 +312,12 @@ internal class SqlServerNodePersistence : DatabaseConstants, INodeAgentPersisten
         var capabilities = await reader.GetFieldValueAsync<string>(7);
         if (capabilities.IsNotEmpty())
         {
-            node.Capabilities.AddRange(capabilities.Split(',').Select(x => new Uri(x)));
+            // GH-3165: split on newline (see persistNode) — a comma can appear inside an agent URI, so it
+            // is not a safe delimiter. Tolerate legacy comma-joined rows that carried no comma-bearing URI
+            // by also treating a lone comma-free string as a single entry (newline-split yields one element).
+            node.Capabilities.AddRange(capabilities
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                .Select(x => new Uri(x)));
         }
 
         return node;
@@ -301,7 +341,7 @@ internal class SqlServerNodePersistence : DatabaseConstants, INodeAgentPersisten
             builder.Append(")");
         }
 
-        var batch = builder.Compile();
+        await using var batch = builder.Compile();
         batch.Connection = conn;
         await batch.ExecuteNonQueryAsync(cancellationToken);
 

@@ -40,10 +40,9 @@ public class service_location_assertions
 
     public interface IServiceGatewayUsingRefit;
 
-    public static void configure_with_always_use_service_locator()
+    private static void configure_with_always_use_service_locator()
     {
         #region sample_always_use_service_location
-
         var builder = Host.CreateApplicationBuilder();
         builder.UseWolverine(opts =>
         {
@@ -130,11 +129,12 @@ public class service_location_assertions
             new ServiceLocationReport(descriptor1, "Because I said so!"),
             new ServiceLocationReport(descripter2, "I didn't like this one")
         };
-        
+
         theChain.AssertServiceLocationsAreAllowed(reports, services);
-        
-        // Don't even bother to log anything if we're AlwaysAllowed
+
         theLogger.Messages.Count.ShouldBe(2);
+        theLogger.Messages.ShouldAllBe(m => m.Contains("Wolverine 6.0"));
+        theLogger.Levels.ShouldAllBe(l => l == LogLevel.Warning);
     }
 
     [Fact]
@@ -148,10 +148,12 @@ public class service_location_assertions
             new ServiceLocationReport(descripter2, "I didn't like this one")
         };
 
-        Should.Throw<InvalidServiceLocationException>(() =>
+        var ex = Should.Throw<InvalidServiceLocationException>(() =>
         {
             theChain.AssertServiceLocationsAreAllowed(reports, services);
         });
+
+        ex.Message.ShouldContain("Wolverine 6.0");
     }
     
     [Theory]
@@ -233,6 +235,28 @@ public class service_location_assertions
 
     }
 
+    // Regression for https://github.com/JasperFx/wolverine/issues/2831 — when
+    // SourceServiceFromHttpContext<IThing>() is configured, a non-HTTP handler whose
+    // parameter is IThing must still generate compilable code: it has no httpContext
+    // in scope, so the HTTP-shaped variable source must not leak in. The override of
+    // IThing to a typed registration keeps the handler chain on the constructor-injection
+    // path so the test asserts purely against codegen — independent of whatever the
+    // current ServiceLocationPolicy default is.
+    [Fact]
+    public async Task non_http_handler_with_http_context_sourced_type_is_resolved_through_normal_di()
+    {
+        await using var host = await buildHost(ServiceProviderSource.IsolatedAndScoped, opts =>
+        {
+            opts.Services.AddScoped<IThing, BigThing>();
+        });
+
+        UseThingHandler.LastSeen = null;
+
+        await host.InvokeAsync(new UseThing());
+
+        UseThingHandler.LastSeen.ShouldBeOfType<BigThing>();
+    }
+
     [Theory]
     [InlineData(ServiceLocationPolicy.AllowedButWarn, ServiceProviderSource.IsolatedAndScoped)]
     [InlineData(ServiceLocationPolicy.AlwaysAllowed, ServiceProviderSource.IsolatedAndScoped)]
@@ -305,13 +329,23 @@ public static class UseWidgetHandler
     public static void Handle(UseWidget command, IWidget service) => Debug.WriteLine("Got me a widget to use");
 }
 
+public record UseThing;
+
+public static class UseThingHandler
+{
+    public static IThing? LastSeen { get; set; }
+
+    public static void Handle(UseThing command, IThing thing) => LastSeen = thing;
+}
+
 public class RecordingLogger : ILoggerFactory, ILogger
 {
     public List<string> Messages { get; } = new();
-    
+    public List<LogLevel> Levels { get; } = new();
+
     public void Dispose()
     {
-        
+
     }
 
     public void AddProvider(ILoggerProvider provider)
@@ -337,6 +371,7 @@ public class RecordingLogger : ILoggerFactory, ILogger
     public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
     {
         Messages.Add(formatter(state, exception));
+        Levels.Add(logLevel);
     }
 }
 
@@ -395,7 +430,6 @@ public static class SampleServiceLocation
     public static async Task<int> bootstrap(string[] args)
     {
         #region sample_bootstrapping_with_httpcontext_request_services
-
         var builder = WebApplication.CreateBuilder();
 
         builder.UseWolverine(opts =>

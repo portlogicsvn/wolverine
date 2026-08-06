@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using Amazon;
 using Amazon.Runtime;
 using Amazon.SQS;
 using Amazon.SQS.Model;
@@ -7,16 +8,15 @@ using CoreTests.Configuration;
 using JasperFx.Core;
 using Microsoft.Extensions.Hosting;
 using Wolverine.ComplianceTests.Compliance;
+using Wolverine.Transports.Sending;
 
 namespace Wolverine.AmazonSqs.Tests.Samples;
 
-[Trait("Category", "Flaky")]
 public class Bootstrapping
 {
-    public static async Task use_named_brokers()
+    private async Task use_named_brokers()
     {
         #region sample_using_multiple_sqs_brokers
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -46,11 +46,53 @@ public class Bootstrapping
 
         #endregion
     }
-    
-    public async Task for_local_development()
+
+    private async Task broker_per_tenant()
+    {
+        #region sample_sqs_broker_per_tenant
+        using var host = await Host.CreateDefaultBuilder()
+            .UseWolverine(opts =>
+            {
+                // The "default" / shared SQS connection
+                opts.UseAmazonSqsTransport(config =>
+                {
+                    config.RegionEndpoint = RegionEndpoint.USEast1;
+                })
+                    .AutoProvision()
+
+                    // How should Wolverine route a message whose TenantId is null or
+                    // unknown? FallbackToDefault (the default) uses the shared connection;
+                    // TenantIdRequired throws; IgnoreUnknownTenants silently drops it.
+                    .TenantIdBehavior(TenantedIdBehavior.FallbackToDefault)
+
+                    // Each tenant gets its OWN dedicated SQS connection, but shares the
+                    // queue topology declared below. This tenant inherits the parent's
+                    // AWS credentials, and just re-points at its own region.
+                    .AddTenant("tenant-west", config =>
+                    {
+                        config.RegionEndpoint = RegionEndpoint.USWest2;
+                    })
+
+                    // Or give the tenant its own dedicated AWS account by supplying
+                    // its own credentials (optionally with its own region/endpoint too):
+                    .AddTenant("tenant-eu", new BasicAWSCredentials("tenant-eu-key", "tenant-eu-secret"),
+                        config =>
+                        {
+                            config.RegionEndpoint = RegionEndpoint.EUWest1;
+                        });
+
+                // One shared topology; messages are routed to the right connection at
+                // runtime by Envelope.TenantId (e.g. new DeliveryOptions { TenantId = "tenant-west" }).
+                opts.PublishMessage<SenderConfigurationTests.ColorMessage>().ToSqsQueue("colors");
+                opts.ListenToSqsQueue("colors");
+            }).StartAsync();
+
+        #endregion
+    }
+
+    private async Task for_local_development()
     {
         #region sample_connect_to_sqs_and_localstack
-
         var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -62,10 +104,9 @@ public class Bootstrapping
         #endregion
     }
 
-    public async Task connect_to_broker()
+    private async Task connect_to_broker()
     {
         #region sample_simplistic_aws_sqs_setup
-
         var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -84,10 +125,9 @@ public class Bootstrapping
         #endregion
     }
 
-    public async Task connect_with_customization()
+    private async Task connect_with_customization()
     {
         #region sample_config_aws_sqs_connection
-
         var builder = Host.CreateApplicationBuilder();
         builder.UseWolverine(opts =>
         {
@@ -114,10 +154,9 @@ public class Bootstrapping
         #endregion
     }
 
-    public async Task setting_credentials()
+    private async Task setting_credentials()
     {
         #region sample_setting_aws_credentials
-
         var builder = Host.CreateApplicationBuilder();
         builder.UseWolverine(opts =>
         {
@@ -147,10 +186,9 @@ public class Bootstrapping
         #endregion
     }
 
-    public async Task configuring_queues()
+    private async Task configuring_queues()
     {
         #region sample_listen_to_sqs_queue
-
         var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -179,10 +217,9 @@ public class Bootstrapping
         #endregion
     }
 
-    public async Task publishing()
+    private async Task publishing()
     {
         #region sample_subscriber_rules_for_sqs
-
         var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -206,10 +243,9 @@ public class Bootstrapping
         #endregion
     }
 
-    public async Task using_conventional_routing()
+    private async Task using_conventional_routing()
     {
         #region sample_using_conventional_sqs_routing
-
         var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -220,10 +256,9 @@ public class Bootstrapping
         #endregion
     }
 
-    public async Task overriding_dead_letter_queueing()
+    private async Task overriding_dead_letter_queueing()
     {
         #region sample_configuring_dead_letter_queue_for_sqs
-
         var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -246,10 +281,9 @@ public class Bootstrapping
         #endregion
     }
 
-    public async Task receive_raw_json()
+    private async Task receive_raw_json()
     {
         #region sample_receive_raw_json_in_sqs
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -267,10 +301,9 @@ public class Bootstrapping
     }
     
     
-    public async Task receive_sns_topic_metadata()
+    private async Task receive_sns_topic_metadata()
     {
         #region sample_receive_sns_topic_metadata_in_sqs
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -284,10 +317,9 @@ public class Bootstrapping
         #endregion
     }
     
-    public async Task receive_sns_topic_metadata_with_custom_mapper()
+    private async Task receive_sns_topic_metadata_with_custom_mapper()
     {
         #region sample_receive_sns_topic_metadata_with_custom_mapper_in_sqs
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -303,10 +335,9 @@ public class Bootstrapping
         #endregion
     }
 
-    public async Task publish_raw_json()
+    private async Task publish_raw_json()
     {
         #region sample_publish_raw_json_in_sqs
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -323,11 +354,12 @@ public class Bootstrapping
         #endregion
     }
 
-    [Fact]
-    public async Task customize_mappers()
+    // Compile-checked only, like every other sample in this file. The snippet is documentation, so
+    // it shows the real `UseAmazonSqsTransport()` a reader would write — which means running it
+    // would talk to a real AWS account, and CI has no credentials.
+    private async Task customize_mappers()
     {
         #region sample_apply_custom_sqs_mapping
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -336,15 +368,14 @@ public class Bootstrapping
                     .DisableAllNativeDeadLetterQueues()
                     .ConfigureListeners(l => l.InteropWith(new CustomSqsMapper()))
                     .ConfigureSenders(s => s.InteropWith(new CustomSqsMapper()));
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         #endregion
     }
 
-    public async Task customize_mappers_with_all_message_attributes()
+    private async Task customize_mappers_with_all_message_attributes()
     {
         #region sample_receive_all_message_attributes
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -361,10 +392,9 @@ public class Bootstrapping
         #endregion
     }
 
-    public async Task customize_mappers_with_specific_message_attributes()
+    private async Task customize_mappers_with_specific_message_attributes()
     {
         #region sample_receive_specific_message_attributes
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -383,13 +413,12 @@ public class Bootstrapping
 }
 
 #region sample_custom_sqs_mapper
-
 public class CustomSqsMapper : ISqsEnvelopeMapper
 {
     public string BuildMessageBody(Envelope envelope)
     {
         // Serialized data from the Wolverine message
-        return Encoding.Default.GetString(envelope.Data!);
+        return Encoding.UTF8.GetString(envelope.Data!);
     }
 
     // Specify header values for the SQS message from the Wolverine envelope
@@ -405,7 +434,7 @@ public class CustomSqsMapper : ISqsEnvelopeMapper
     public void ReadEnvelopeData(Envelope envelope, string messageBody,
         IDictionary<string, MessageAttributeValue> attributes)
     {
-        envelope.Data = Encoding.Default.GetBytes(messageBody);
+        envelope.Data = Encoding.UTF8.GetBytes(messageBody);
 
         if (attributes.TryGetValue("tenant-id", out var att))
         {

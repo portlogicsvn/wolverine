@@ -16,7 +16,7 @@ public class disposing_disposable_or_async_disposable
                 opts.Services.AddScoped<IDisposedService, DisposedService>();
                 opts.Services.AddScoped<IAsyncDisposedService, AsyncDisposedService>();
                 opts.Services.AddScoped<INotDisposed, NotDisposed>();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
         
         await host.InvokeAsync(new DisposingMessage());
         
@@ -53,10 +53,10 @@ public class DisposedService : IDisposedService, IDisposable
 
 public class AsyncDisposedService : IAsyncDisposedService, IAsyncDisposable
 {
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         WasDisposed = true;
-        return new ValueTask();
+        await new ValueTask();
     }
 
     public static bool WasDisposed { get; set; }

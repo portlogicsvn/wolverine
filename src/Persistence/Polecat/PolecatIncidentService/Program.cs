@@ -1,3 +1,5 @@
+using JasperFx;
+using JasperFx.Events.Projections;
 using Polecat;
 using Polecat.Projections;
 using PolecatIncidentService;

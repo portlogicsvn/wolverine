@@ -1,7 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
     <PropertyGroup>
-        <TargetFramework>net9.0</TargetFramework>
+        <OutputType>Exe</OutputType>
+        <TargetFrameworks>net9.0</TargetFrameworks>
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
         <IsPackable>false</IsPackable>
@@ -10,8 +11,15 @@
     <ItemGroup>
         <PackageReference Include="coverlet.collector"/>
         <PackageReference Include="Microsoft.NET.Test.Sdk"/>
+        <!--
+          end_to_end_publishing_to_critter_watch.cs serializes the captured
+          metric with JsonConvert.SerializeObject for diagnostic dumps;
+          Newtonsoft.Json moved out of Wolverine core in 6.0 so this
+          project takes the direct dependency now.
+        -->
+        <PackageReference Include="Newtonsoft.Json" />
         <PackageReference Include="Shouldly" />
-        <PackageReference Include="xunit" />
+        <PackageReference Include="xunit.v3" />
         <PackageReference Include="xunit.runner.visualstudio"/>
     </ItemGroup>
 
@@ -23,4 +31,9 @@
       <ProjectReference Include="..\..\Wolverine\Wolverine.csproj" />
     </ItemGroup>
 
+  <ItemGroup>
+    <!-- Core WolverineFx no longer ships the Roslyn runtime compiler (#2876); this
+         Dynamic-mode test project needs it. The package auto-registers via its [WolverineModule]. -->
+    <ProjectReference Include="../../Wolverine.RuntimeCompilation/Wolverine.RuntimeCompilation.csproj" />
+  </ItemGroup>
 </Project>

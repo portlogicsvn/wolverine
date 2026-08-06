@@ -26,12 +26,16 @@ opts.Services.AddMarten(m =>
         m.UseWolverineManagedEventSubscriptionDistribution = true;
     });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/MartenTests/Distribution/Support/SingleTenantContext.cs#L71-L91' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_opt_into_wolverine_managed_subscription_distribution' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/MartenTests/Distribution/Support/SingleTenantContext.cs#L60-L79' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_opt_into_wolverine_managed_subscription_distribution' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
-::: tip
-This option replaces the Marten `AddAsyncDaemon(HotCold)` option and should not be used in combination
-with Marten's own load distribution.
+::: warning
+This option **replaces** Marten's own daemon coordination — remove any `AddAsyncDaemon(DaemonMode.HotCold)`,
+`AddAsyncDaemon(DaemonMode.Solo)`, or `MartenDaemonModeIsSolo()` call. Wolverine sets Marten's async mode to
+`ExternallyManaged` itself, so no daemon registration is needed at all.
+
+Combining the two would leave competing coordinators running against the same daemon, so Wolverine **throws at
+startup** rather than let the projections silently stall. See [GH-3388](https://github.com/JasperFx/wolverine/issues/3388).
 :::
 
 With this option, Wolverine is going to ensure that every single known asynchronous [event projection](https://martendb.io/events/projections/) and every [event
@@ -58,6 +62,29 @@ Some other facts about this integration:
   where a capability is present. This just means that you can add all new projections or subscriptions, or even just
   new versions of a projection or subscription on some application nodes in order to do try ["blue/green deployment."](https://en.wikipedia.org/wiki/Blue%E2%80%93green_deployment)
 * This capability does depend on Wolverine's built-in [leadership election](https://en.wikipedia.org/wiki/Leader_election) -- which fortunately got a _lot_ better in Wolverine 3.0
+
+## Database-Affine Distribution for Multi-Database Stores <Badge type="tip" text="6.x" />
+
+By default Wolverine spreads subscription and projection agents *evenly* across the cluster (with blue/green
+capability matching). That is the right choice for a single-database event store.
+
+It is *not* the right choice for a store backed by many databases. The clearest case is a Marten store that combines
+[sharded multi-tenancy](https://martendb.io/configuration/multitenancy.html#sharded-multi-tenancy-with-database-pooling)
+with [per-tenant event partitioning](https://martendb.io/events/multitenancy.html#per-tenant-event-partitioning). There,
+many tenants are co-located in one shard database and each draws its own event sequence, so Wolverine fans agents out
+one-per-`(shard, tenant)` rather than one-per-database. With hundreds of tenants scattered across many shard databases,
+an even per-agent spread makes *every* node open a connection pool to *nearly every* shard database — so the pool count
+grows as `nodes × databases` and quickly exhausts a shared server's `max_connections`.
+
+So Wolverine keys the distribution off the store itself, with no configuration needed: when a store reports that it is
+backed by multiple databases (its `IEventStore.DatabaseCardinality` is static- or dynamic-multiple — sharded tenancy or
+database-per-tenant), that store's agents are assigned with **database affinity** — every agent for a given database is
+kept together on a single node, so a node only opens pools to the databases it actually owns and the pool count scales
+with the number of databases, not `nodes × databases`. The grouping key is the
+`[event store type]/[event store name]/[database]` prefix of the agent `Uri` (see below), so all of a database's
+agents share one group. Whole groups are still spread across the cluster largest-first, so total agent counts stay
+balanced. A single-database store in the same application keeps the default even distribution — each store is
+distributed in its own pass.
 
 ## Uri Structure
 
@@ -90,8 +117,12 @@ control queue mechanism.
 
 Other requirements:
 
-* You cannot disable external transports with the `StubAllExternalTransports()`
-* `WolverineOptions.Durability.Mode` must be `Balanced`
+* `WolverineOptions.Durability.Mode` must be `Balanced` **to spread the work across multiple nodes**, since that is
+  what enables leader election and the control queue. In `Solo` mode every projection and subscription agent still
+  runs — just all of them on the single node, which is why `Solo` is a reasonable development-time setting (see
+  below). `Serverless` and `MediatorOnly` start no agents at all.
+* In `Balanced` mode you cannot disable external transports with `StubAllExternalTransports()`, because the nodes
+  need the control queue to communicate
 
 If you are seeing any issues with timeouts due to the Wolverine load distribution, you can try:
 
@@ -113,11 +144,11 @@ var host = await Host.CreateDefaultBuilder()
     {
         opts.Durability.HealthCheckPollingTime = 1.Seconds();
         opts.Durability.CheckAssignmentPeriod = 1.Seconds();
-        
+
         opts.UseMessagePackSerialization();
-        
+
         opts.UseSharedMemoryQueueing();
-        
+
         opts.Services.AddMarten(m =>
             {
                 m.DisableNpgsqlLogging = true;
@@ -135,8 +166,8 @@ var host = await Host.CreateDefaultBuilder()
                 // cluster
                 m.UseWolverineManagedEventSubscriptionDistribution = true;
             });
-        
-        opts.Services.AddSingleton<ILoggerProvider>(new OutputLoggerProvider(_output));
+
+        opts.Services.AddSingleton<ILoggerProvider>(new OutputLoggerProvider(output));
 
         opts.Services.AddMartenStore<ITripStore>(m =>
         {
@@ -149,9 +180,58 @@ var host = await Host.CreateDefaultBuilder()
             m.Projections.Add<DistanceProjection>(ProjectionLifecycle.Async);
         }).IntegrateWithWolverine();
 
-        opts.CodeGeneration.TypeLoadMode = TypeLoadMode.Auto;
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/MartenTests/Distribution/with_ancillary_stores.cs#L76-L122' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_distributed_projections_with_ancillary_stores' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/MartenTests/Distribution/with_ancillary_stores.cs#L59-L103' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_distributed_projections_with_ancillary_stores' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
+
+## When a Projection Fails <Badge type="tip" text="6.x" />
+
+A projection or subscription shard that throws while applying an event is *paused* by the Marten/Polecat
+daemon rather than skipped, unless you have opted into skipping through `ErrorHandlingOptions`
+(`SkipApplyErrors` and friends). A paused shard makes no further progress, and Wolverine deliberately does
+not restart it — restarting would fail on the exact same event, so the shard would thrash instead of
+advance.
+
+Wolverine surfaces the paused shard so it does not simply go quiet:
+
+* The agent's health check reports the failure **category**, the sequence number and type of the event it
+  died on, and the root exception type — enough to act on without going to dig through logs.
+* `IWolverineObserver.AgentPaused(Uri agentUri, ShardFailure? failure)` fires once per transition into the
+  failed state (and again if the shard recovers and later fails anew). Implement it on a custom observer to
+  raise your own alert; [CritterWatch](https://critterwatch.io) uses this hook.
+* A `NodeRecordType.AgentPaused` record is written to the node-record log with the classified reason, so
+  the failure is readable after the fact and from another process.
+* `IEventSubscriptionAgent.Failure` exposes the same `ShardFailure` value directly. It is a plain,
+  serializable record — category, the failing event, the exception message and full detail — not an
+  `Exception`, so it survives being shipped to a monitoring UI.
+
+The category tells you what to do about it:
+
+| Category | What it means |
+|----------|---------------|
+| `ApplyEvent` | Your projection code threw on an event — the classic "poison pill". Needs a code fix, or `SkipApplyErrors`. |
+| `EventSerialization` | The store could not deserialize or upcast a stored event body. Needs a serializer or data fix. |
+| `UnknownEventType` | A stored event alias resolves to no known .NET type in *this* deployment — usually a missing registration or a rollback. |
+| `ProgressionOutOfOrder` | The shard's progression row moved underneath it, which almost always means two processes are running the same shard. |
+| `Other` | A database outage, a timeout, or a bug. No single event can be blamed. |
+
+Only `Other` is treated as potentially self-healing, so it is the only category Wolverine's stall detector
+will auto-restart. The rest are left alone until you resolve the underlying problem, at which point
+restarting or rewinding the agent picks it back up.
+
+## Agent Start Retries <Badge type="tip" text="6.x" />
+
+An agent's very first assignment can race the subsystems it depends on coming up — an event-subscription
+shard evaluated before its store's high-water detection is running, for instance, which on a multi-store
+host could leave a different shard idle on every boot. Wolverine retries a failed agent start locally a
+couple of times before leaving it to the next assignment reevaluation:
+
+```csharp
+opts.Durability.AgentStartRetryAttempts = 2;                       // default
+opts.Durability.AgentStartRetryDelay = TimeSpan.FromMilliseconds(250);  // default, multiplied by attempt number
+```
+
+Set `AgentStartRetryAttempts` to `0` to disable the local retry entirely. A failure that outlives the
+retries is logged and picked up again on the next `CheckAssignmentPeriod` tick, exactly as before.

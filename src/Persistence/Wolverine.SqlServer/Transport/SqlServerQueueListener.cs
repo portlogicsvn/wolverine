@@ -11,7 +11,7 @@ using Wolverine.Transports;
 
 namespace Wolverine.SqlServer.Transport;
 
-internal class SqlServerQueueListener : IListener
+internal class SqlServerQueueListener : IListener, IReportReceiveLoopHealth
 {
     private readonly CancellationTokenSource _cancellation = new();
     private readonly SqlServerQueue _queue;
@@ -19,7 +19,8 @@ internal class SqlServerQueueListener : IListener
     private readonly string _connectionString;
     private readonly string? _databaseName;
     private readonly ILogger<SqlServerQueueListener> _logger;
-    private Task? _task;
+    // GH-3236: the main poll loop runs on the shared BackgroundReceiveLoop (heartbeat + fault/hung detection).
+    private BackgroundReceiveLoop? _loop;
     private readonly DurabilitySettings _settings;
     private Task? _scheduledTask;
     private readonly SqlServerQueueSender _sender;
@@ -51,6 +52,10 @@ internal class SqlServerQueueListener : IListener
         var queueTableIdentifier = queue.QueueTable.Identifier;
         var scheduledTableIdentifier = queue.ScheduledTable.Identifier;
 
+        // When the high-throughput layout is enabled the tables are clustered on the monotonic
+        // "seq" identity, so dequeue ordering must use it; otherwise fall back to "timestamp".
+        var orderBy = queue.OptimizeThroughput ? "seq" : "timestamp";
+
         _tryPopMessagesDirectlySql = $@"
 DECLARE @NOCOUNT VARCHAR(3) = 'OFF';
 IF ( (512 & @@OPTIONS) = 512 ) SET @NOCOUNT = 'ON';
@@ -59,7 +64,7 @@ SET NOCOUNT ON;
 WITH message AS (
     SELECT TOP(@count) {DatabaseConstants.Body}, {DatabaseConstants.KeepUntil}
     FROM {queueTableIdentifier} WITH (UPDLOCK, READPAST, ROWLOCK)
-    ORDER BY {queueTableIdentifier}.timestamp)
+    ORDER BY {queueTableIdentifier}.{orderBy})
 DELETE FROM message
 OUTPUT
     deleted.{DatabaseConstants.Body};
@@ -75,7 +80,7 @@ SET NOCOUNT ON;
 delete FROM {queueTableIdentifier} WITH (UPDLOCK, READPAST, ROWLOCK) where id in (select id from {queue.Parent.MessageStorageSchemaName}.{DatabaseConstants.IncomingTable});
 select top(@count) id, body, message_type, keep_until into #temp_pop_{queue.Name}
 FROM {queueTableIdentifier} WITH (UPDLOCK, READPAST, ROWLOCK)
-ORDER BY {queueTableIdentifier}.timestamp;
+ORDER BY {queueTableIdentifier}.{orderBy};
 delete from {queueTableIdentifier} where id in (select id from #temp_pop_{queue.Name});
 INSERT INTO {queue.Parent.MessageStorageSchemaName}.{DatabaseConstants.IncomingTable}
 (id, status, owner_id, body, message_type, received_at, keep_until)
@@ -89,7 +94,7 @@ IF (@NOCOUNT = 'OFF') SET NOCOUNT OFF;";
 select id, body, message_type, keep_until into #temp_move_{queue.Name}
 FROM {scheduledTableIdentifier} WITH (UPDLOCK, READPAST, ROWLOCK)
 WHERE {DatabaseConstants.ExecutionTime} <= SYSDATETIMEOFFSET() AND ID NOT IN (select id from {queueTableIdentifier})
-ORDER BY {scheduledTableIdentifier}.timestamp;
+ORDER BY {scheduledTableIdentifier}.{orderBy};
 delete from {scheduledTableIdentifier} where id in (select id from #temp_move_{queue.Name});
 INSERT INTO {queueTableIdentifier}
 (id, body, message_type, keep_until)
@@ -103,6 +108,10 @@ select count(*) from #temp_move_{queue.Name}
 
     public IHandlerPipeline? Pipeline => _receiver.Pipeline;
 
+    // GH-3236: surface the poll loop's liveness (heartbeat + faulted/hung detection) for EndpointHealthSnapshot.
+    public ReceiveLoopStatus ReceiveLoopStatus => _loop?.ReceiveLoopStatus ?? ReceiveLoopStatus.NotStarted;
+    public DateTimeOffset? LastReceiveLoopActivityAt => _loop?.LastReceiveLoopActivityAt;
+
     public ValueTask CompleteAsync(Envelope envelope)
     {
         return ValueTask.CompletedTask;
@@ -113,22 +122,26 @@ select count(*) from #temp_move_{queue.Name}
         await _sender.SendAsync(envelope, _cancellation.Token);
     }
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
-        _cancellation.Cancel();
-        _task?.SafeDispose();
+        await _cancellation.CancelAsync();
+        if (_loop != null)
+        {
+            await _loop.DisposeAsync();
+        }
         _scheduledTask?.SafeDispose();
-        return ValueTask.CompletedTask;
     }
 
     public Uri Address { get; }
 
-    public ValueTask StopAsync()
+    public async ValueTask StopAsync()
     {
-        _cancellation.Cancel();
-        _task?.SafeDispose();
+        await _cancellation.CancelAsync();
+        if (_loop != null)
+        {
+            await _loop.StopAsync(_settings.DrainTimeout);
+        }
         _scheduledTask?.SafeDispose();
-        return ValueTask.CompletedTask;
     }
 
     public async Task StartAsync()
@@ -138,7 +151,8 @@ select count(*) from #temp_move_{queue.Name}
             await _queue.EnsureSchemaExists(_databaseName ?? string.Empty, _connectionString);
         }
 
-        _task = Task.Run(listenForMessagesAsync, _cancellation.Token);
+        _loop = new BackgroundReceiveLoop(Address, _logger, pollOnceAsync, _cancellation.Token, _pollingInterval);
+        _loop.Start();
         _scheduledTask = Task.Run(lookForScheduledMessagesAsync, _cancellation.Token);
     }
 
@@ -203,51 +217,28 @@ select count(*) from #temp_move_{queue.Name}
     {
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        await conn.CreateCommand(_deleteExpiredSql).ExecuteNonQueryAsync(cancellationToken);
+        await using var cmd = conn.CreateCommand(_deleteExpiredSql);
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
         await conn.CloseAsync();
     }
 
-    private async Task listenForMessagesAsync()
+    // One poll-and-process iteration, driven by BackgroundReceiveLoop (which owns the loop task, the
+    // log -> backoff -> continue policy on error, the idle delay = _pollingInterval, the heartbeat, and teardown).
+    // Returns true when messages were processed (loop continues immediately), false when idle (loop applies its
+    // idle delay) — exactly the previous "process, else wait the polling interval" pacing.
+    private async Task<bool> pollOnceAsync(CancellationToken token)
     {
-        var failedCount = 0;
+        var messages = _queue.Mode == EndpointMode.Durable
+            ? await TryPopDurablyAsync(_queue.MaximumMessagesToReceive, _settings, _logger, token)
+            : await TryPopAsync(_queue.MaximumMessagesToReceive, _logger, token);
 
-        while (!_cancellation.Token.IsCancellationRequested)
+        if (!messages.Any())
         {
-            try
-            {
-                var messages = _queue.Mode == EndpointMode.Durable
-                    ? await TryPopDurablyAsync(_queue.MaximumMessagesToReceive, _settings, _logger,
-                        _cancellation.Token)
-                    : await TryPopAsync(_queue.MaximumMessagesToReceive, _logger, _cancellation.Token);
-
-                failedCount = 0;
-
-                if (messages.Any())
-                {
-                    await _receiver.ReceivedAsync(this, messages.ToArray());
-                }
-                else
-                {
-                    // Slow down if this is a periodically used queue
-                    await Task.Delay(_pollingInterval);
-                }
-            }
-            catch (Exception e)
-            {
-                if (e is TaskCanceledException && _cancellation.IsCancellationRequested)
-                {
-                    break;
-                }
-
-                failedCount++;
-                var pauseTime = failedCount > 5 ? 1.Seconds() : (failedCount * 100).Milliseconds();
-
-                _logger.LogError(e, "Error while trying to retrieve messages from Sql Server Queue {Name}",
-                    _queue.Name);
-
-                await Task.Delay(pauseTime);
-            }
+            return false;
         }
+
+        await _receiver.ReceivedAsync(this, messages.ToArray());
+        return true;
     }
 
     public async Task<IReadOnlyList<Envelope>> TryPopAsync(int count, ILogger logger,

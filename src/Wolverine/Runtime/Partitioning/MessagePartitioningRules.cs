@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using ImTools;
 using JasperFx.Core;
@@ -133,7 +134,7 @@ public class MessagePartitioningRules
         if (grouping == null)
         {
             grouping = new ExplicitGrouping();
-            _rules.Insert(0, grouping);
+            _rules.Add(grouping);
         }
         
         grouping.AddMessageType(messageType, messageProperty);
@@ -220,6 +221,14 @@ internal class ExplicitGrouping : IGroupingRule
         return false;
     }
 
+    // CloseAndBuildAs closes Grouper<,> over (messageType, property.PropertyType).
+    // Same reflective pattern as PropertyNameGroupingRule.TryBuildGrouper; both
+    // sit on the user-opt-in MessagePartitioningRules surface. AOT-clean apps
+    // using partitioning preserve Grouper<,> closures via TrimmerRootDescriptor.
+    [UnconditionalSuppressMessage("Trimming", "IL2026",
+        Justification = "Closed Grouper<,> resolved from runtime types; AOT consumers preserve via TrimmerRootDescriptor. See AOT guide.")]
+    [UnconditionalSuppressMessage("AOT", "IL3050",
+        Justification = "Closed Grouper<,> resolved from runtime types; AOT consumers preserve via TrimmerRootDescriptor. See AOT guide.")]
     public void AddMessageType(Type messageType, PropertyInfo property)
     {
         _groupers = _groupers.AddOrUpdate(messageType,
@@ -231,6 +240,10 @@ internal class Grouper<TConcrete, TProperty> : IGrouper
 {
     private readonly Func<TConcrete, TProperty> _source;
 
+    [UnconditionalSuppressMessage("Trimming", "IL2026",
+        Justification = "LambdaBuilder.GetProperty compiles a property-access expression via FastExpressionCompiler. The groupMember PropertyInfo originates from the application's registered partitioning rule (a strongly-typed message property), so the property survives trimming via the rule's explicit registration.")]
+    [UnconditionalSuppressMessage("AOT", "IL3050",
+        Justification = "Property-access lambda compiled via FastExpressionCompiler; AOT consumers running pre-generated handlers via TypeLoadMode.Static avoid this code path.")]
     public Grouper(PropertyInfo groupMember)
     {
         _source = LambdaBuilder.GetProperty<TConcrete, TProperty>(groupMember);

@@ -19,6 +19,8 @@ It is no longer necessary to mark a handler method with `[Transactional]` if you
 using var host = await Host.CreateDefaultBuilder()
     .UseWolverine(opts =>
     {
+        opts.Discovery.DisableConventionalDiscovery();
+        opts.Durability.Mode = DurabilityMode.Solo;
         opts.Services.AddMarten("some connection string")
             .IntegrateWithWolverine();
 
@@ -26,12 +28,18 @@ using var host = await Host.CreateDefaultBuilder()
         opts.Policies.AutoApplyTransactions();
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/MartenTests/Sample/BootstrapWithAutoTransactions.cs#L12-L24' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_auto_apply_transactions_with_marten' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/MartenTests/Sample/BootstrapWithAutoTransactions.cs#L12-L25' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_auto_apply_transactions_with_marten' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 With this enabled, Wolverine will automatically use the Marten
 transactional middleware for handlers that have a dependency on `IDocumentSession` (meaning the method takes in `IDocumentSession` or has
 some dependency that itself depends on `IDocumentSession`) as long as the `IntegrateWithWolverine()` call was used in application bootstrapping.
+
+::: danger
+If a handler takes in `IDocumentSession` and writes to it (appending events, `Store`, `Insert`, etc.) but the chain has **no** transactional middleware — i.e. `AutoApplyTransactions()` is not enabled, the method has no `[Transactional]` attribute, it does not return an [`IMartenOp`](/guide/durability/marten/operations), and it is not a saga — then Wolverine opens the managed `IDocumentSession` to satisfy the parameter but **never calls `SaveChangesAsync()`**. The session is disposed at the end of the handler and **all writes are silently discarded with no exception**.
+
+This is the most common cause of "my event/document was not persisted and I got no error" reports. If you inject `IDocumentSession` and rely on Wolverine to commit, you **must** opt into the transactional middleware via `AutoApplyTransactions()` or `[Transactional]` (or return an `IMartenOp`). Alternatively, if you intend to own the lifecycle, call `IDocumentSession.SaveChangesAsync()` yourself — but note the outbox caveat in the warning at the top of this page.
+:::
 
 ### Opting Out with [NonTransactional]
 
@@ -117,7 +125,7 @@ public static OrderCreated Handle(CreateOrder command, IDocumentSession session)
     return new OrderCreated(order.Id);
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/WebApiWithMarten/Order.cs#L51-L71' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_shorthand_order_handler' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/WebApiWithMarten/Order.cs#L50-L69' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_shorthand_order_handler' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Or if you need to take more control over how the outgoing `OrderCreated` message is sent, you can use this slightly different alternative:
@@ -146,7 +154,7 @@ public static ValueTask Handle(
         new DeliveryOptions { DeliverWithin = 5.Minutes() });
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/WebApiWithMarten/Order.cs#L76-L99' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_shorthand_order_handler_alternative' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/WebApiWithMarten/Order.cs#L74-L96' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_shorthand_order_handler_alternative' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 In both cases Wolverine's transactional middleware for Marten is taking care of registering the Marten session with Wolverine's outbox before you call into the message handler, and
@@ -161,7 +169,7 @@ If so desired, you *can* also use a policy to apply the Marten transaction seman
 name ends with "Command" to use the Marten transaction middleware. You could accomplish that
 with a handler policy like this:
 
-<!-- snippet: sample_CommandsAreTransactional -->
+<!-- snippet: sample_commandsaretransactional -->
 <a id='snippet-sample_commandsaretransactional'></a>
 ```cs
 public class CommandsAreTransactional : IHandlerPolicy
@@ -176,22 +184,24 @@ public class CommandsAreTransactional : IHandlerPolicy
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/MartenTests/transactional_frame_end_to_end.cs#L136-L150' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_commandsaretransactional' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/MartenTests/transactional_frame_end_to_end.cs#L136-L149' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_commandsaretransactional' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Then add the policy to your application like this:
 
-<!-- snippet: sample_Using_CommandsAreTransactional -->
+<!-- snippet: sample_using_commandsaretransactional -->
 <a id='snippet-sample_using_commandsaretransactional'></a>
 ```cs
 using var host = await Host.CreateDefaultBuilder()
     .UseWolverine(opts =>
     {
+        opts.Discovery.DisableConventionalDiscovery().IncludeType(typeof(CreateDocCommand2Handler));
+        opts.Durability.Mode = DurabilityMode.Solo;
         // And actually use the policy
         opts.Policies.Add<CommandsAreTransactional>();
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/MartenTests/transactional_frame_end_to_end.cs#L66-L75' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_commandsaretransactional' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/MartenTests/transactional_frame_end_to_end.cs#L66-L76' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_commandsaretransactional' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Using IDocumentOperations <Badge type="tip" text="3.14" />
@@ -204,7 +214,7 @@ the ability to commit the ongoing unit of work with a `SaveChangesAsync` API.
 
 Here's an example:
 
-<!-- snippet: sample_using_IDocumentOperations -->
+<!-- snippet: sample_using_idocumentoperations -->
 <a id='snippet-sample_using_idocumentoperations'></a>
 ```cs
 public class CreateDocCommand2Handler
@@ -223,6 +233,6 @@ public class CreateDocCommand2Handler
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/MartenTests/transactional_frame_end_to_end.cs#L91-L109' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_idocumentoperations' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/MartenTests/transactional_frame_end_to_end.cs#L92-L109' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_idocumentoperations' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 

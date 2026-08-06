@@ -38,10 +38,10 @@ public class AsParametersQuery{
     public Direction EnumNotUsed{get;set;}
 
     [FromQuery]
-    public string StringFromQuery { get; set; }
+    public string StringFromQuery { get; set; } = null!;
     [FromForm]
-    public string StringFromForm { get; set; }
-    public string StringNotUsed { get; set; }
+    public string StringFromForm { get; set; } = null!;
+    public string StringNotUsed { get; set; } = null!;
     [FromQuery]
     public int IntegerFromQuery { get; set; }
     [FromForm]
@@ -59,7 +59,7 @@ public class AsParametersQuery{
     public bool BooleanNotUsed { get; set; }
     
     [FromHeader(Name = "x-string")]
-    public string StringHeader { get; set; }
+    public string StringHeader { get; set; } = null!;
 
     [FromHeader(Name = "x-number")] public int NumberHeader { get; set; } = 5;
     
@@ -67,7 +67,7 @@ public class AsParametersQuery{
     public int? NullableHeader { get; set; }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Forms/FormEndpoints.cs#L128-L174' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_as_parameters_binding' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Forms/FormEndpoints.cs#L132-L178' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_as_parameters_binding' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 And the corresponding test case for utilizing this:
@@ -110,7 +110,7 @@ response.IntegerNotUsed.ShouldBe(default);
 response.FloatNotUsed.ShouldBe(default);
 response.BooleanNotUsed.ShouldBe(default);
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/Wolverine.Http.Tests/asparameters_binding.cs#L18-L55' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_asparameters_test' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/Wolverine.Http.Tests/asparameters_binding.cs#L18-L54' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_asparameters_test' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Wolverine.HTTP is also able to support `[FromServices]`, `[FromBody]`, and `[FromRoute]` bindings as well
@@ -121,7 +121,7 @@ as shown in this sample from the tests:
 ```cs
 public class AsParameterBody
 {
-    public string Name { get; set; }
+    public string Name { get; set; } = null!;
     public Direction Direction { get; set; }
     public int Distance { get; set; }
 }
@@ -130,13 +130,13 @@ public class AsParametersQuery2
 {
     // We do a check inside of an HTTP endpoint that this works correctly
     [FromServices, JsonIgnore]
-    public IDocumentStore Store { get; set; }
-    
+    public IDocumentStore Store { get; set; } = null!;
+
     [FromBody]
-    public AsParameterBody Body { get; set; }
-    
+    public AsParameterBody Body { get; set; } = null!;
+
     [FromRoute]
-    public string Id { get; set; }
+    public string Id { get; set; } = null!;
     
     [FromRoute]
     public int Number { get; set; }
@@ -152,8 +152,49 @@ public static class AsParametersEndpoints2{
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Forms/FormEndpoints.cs#L176-L211' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_as_parameter_for_services_and_body' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Forms/FormEndpoints.cs#L180-L214' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_as_parameter_for_services_and_body' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
+
+## Splitting a Route Value from the Request Body
+
+A common shape is an endpoint whose route carries the identity (say, an aggregate id) while the JSON
+body carries the rest of the command. If you bind the body to a single plain type that *also* has a
+property matching the route token, that property is duplicated — it shows up **both** as a route
+parameter and as a property of the request body in the generated OpenAPI:
+
+```cs
+// {journeyId} is in the route AND JourneyId is a property of the body type,
+// so journeyId appears twice in the OpenAPI document (in: path and in the body schema)
+public record AddPassengerCommand(Guid JourneyId, string PassengerName);
+
+[WolverinePost("/journey/{journeyId:guid}/passenger")]
+public static string Post(AddPassengerCommand command) => "ok";
+```
+
+This is the same behavior as ASP.NET Core's own minimal APIs — neither framework strips a
+body property just because its name happens to match a route token. The idiomatic way to avoid the
+duplication is to bind with `[AsParameters]` and explicitly source the id from the route and the rest
+from the body:
+
+```cs
+public record AddPassengerCommand(
+    [FromRoute] Guid JourneyId,
+    [FromBody] AddPassengerCommand.Payload Body)
+{
+    public record Payload(string PassengerName);
+}
+
+[WolverinePost("/journey/{journeyId:guid}/passenger")]
+public static string Post([AsParameters] AddPassengerCommand command)
+    => $"{command.JourneyId}: {command.Body.PassengerName}";
+```
+
+Now `journeyId` is described only as a route parameter (with its real type/format, e.g. `uuid`), and
+the request body schema is just the `Payload` type — the route id is not duplicated in the body. This
+works the same way when the route id also feeds a Marten/Polecat `[WriteAggregate]`/`[Aggregate]`
+parameter on the same endpoint.
+
+## Using Records
 
 And lastly, you can use C# records or really just any constructor function as well
 and decorate parameters like so:
@@ -173,14 +214,77 @@ public static class AsParameterRecordEndpoint
     public static AsParameterRecord Post([AsParameters] AsParameterRecord input) => input;
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Forms/FormEndpoints.cs#L213-L227' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_as_parameter_record' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Forms/FormEndpoints.cs#L216-L229' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_as_parameter_record' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
+
+## Strict Query String Binding <Badge type="tip" text="6.18" />
+
+By default in Wolverine 6.x, a query string value that is *present* but cannot be parsed to the
+target member type (an enum, `int`, `Guid`, etc.) is silently ignored — the member simply keeps
+its default or property initializer value. ASP.NET Core's own minimal API `[AsParameters]` binder
+returns `400 Bad Request` for the same input, and the lenient behavior makes a typo'd query value
+indistinguishable from an absent one (not even FluentValidation can catch it downstream, because
+the bound value looks legitimate).
+
+You can opt into the strict, minimal-API-compatible behavior with
+`WolverineHttpOptions.RejectUnparseableQueryValues`:
+
+```cs
+app.MapWolverineEndpoints(opts =>
+{
+    // Return 400 with a ProblemDetails body naming the offending parameter
+    // when a query string value is present but unparseable
+    opts.RejectUnparseableQueryValues = true;
+});
+```
+
+The behavior matrix for a bound query string member (for example
+`[FromQuery] public SortField SortBy { get; set; } = SortField.Date;` on `GET /search`):
+
+| Request | Flag off (default) | Flag on |
+| --- | --- | --- |
+| `GET /search?SortBy=Name` | `200` — binds `Name` | `200` — binds `Name` |
+| `GET /search` (missing) | `200` — keeps the initializer (`Date`) | `200` — keeps the initializer (`Date`) |
+| `GET /search?SortBy=bogus` (malformed) | `200` — keeps the initializer (`Date`) | `400` — ProblemDetails naming `SortBy` |
+
+Only a *present but unparseable* value triggers the `400`; a *missing* query string value keeps the
+member's default / initializer in both modes. The flag applies to query string binding for
+`[AsParameters]` members and for endpoint method arguments bound from the query string alike.
+Route argument binding is unaffected (an unparseable route value already returns `404`).
+
+### Collections <Badge type="tip" text="6.18" />
+
+The flag covers **collection** query string parameters (`T[]`, `List<T>`, `IList<T>`,
+`IReadOnlyList<T>`, `IEnumerable<T>`) too. With the flag off, an element that fails to parse is
+silently dropped, which is especially dangerous for an optional filter: the endpoint sees `null`
+(or a partial collection) and quietly returns an *unfiltered* `200` while the caller believes the
+results were filtered.
+
+With the flag on, binding a collection is **all or nothing** — a single unparseable element
+rejects the whole request with a `400` naming the parameter, rather than silently dropping the bad
+element and keeping the good ones. For
+`[FromQuery] public Colour[]? Colours { get; set; }` on `GET /widgets`:
+
+| Request | Flag off (default) | Flag on |
+| --- | --- | --- |
+| `GET /widgets?Colours=Red&Colours=Blue` | `200` — binds `[Red, Blue]` | `200` — binds `[Red, Blue]` |
+| `GET /widgets` (missing) | `200` — keeps the initializer (`null`) | `200` — keeps the initializer (`null`) |
+| `GET /widgets?Colours=Purple` | `200` — `Colours` is `null` | `400` — ProblemDetails naming `Colours` |
+| `GET /widgets?Colours=Red&Colours=Purple` | `200` — binds only `[Red]` | `400` — ProblemDetails naming `Colours` |
+
+String collections are unaffected in both modes, as there is nothing to parse.
+
+::: warning
+`RejectUnparseableQueryValues` is opt-in (defaults to `false`) throughout Wolverine 6.x to preserve
+the previous lenient behavior, but the default flips to `true` (strict) in Wolverine 7.0. If you
+depend on the lenient behavior, set the flag explicitly to be ready for 7.0.
+:::
 
 The [Fluent Validation middleware](./fluentvalidation) for Wolverine.HTTP is able to validate against request types
 bound with `[AsParameters]`:
 
-<!-- snippet: sample_using_fluent_validation_with_AsParameters -->
+<!-- snippet: sample_using_fluent_validation_with_asparameters -->
 <a id='snippet-sample_using_fluent_validation_with_asparameters'></a>
 ```cs
 public static class ValidatedAsParametersEndpoint
@@ -208,5 +312,5 @@ public class ValidatedQuery
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Forms/FormEndpoints.cs#L230-L257' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_fluent_validation_with_asparameters' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/WolverineWebApi/Forms/FormEndpoints.cs#L232-L258' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_fluent_validation_with_asparameters' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->

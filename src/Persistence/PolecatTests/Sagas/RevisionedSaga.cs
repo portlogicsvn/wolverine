@@ -15,9 +15,9 @@ namespace PolecatTests.Sagas;
 
 public class using_revisioned_sagas : IAsyncLifetime
 {
-    private IHost theHost;
+    private IHost theHost = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         theHost = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -48,17 +48,17 @@ public class using_revisioned_sagas : IAsyncLifetime
         var execution = Task.Run(async () =>
         {
             await theHost.MessageBus().InvokeAsync(slow);
-        });
+        }, TestContext.Current.CancellationToken);
 
         await PcRevisionedSaga.InSlowMessage.Task;
-        await theHost.MessageBus().InvokeAsync(new PcCommand1(id));
+        await theHost.MessageBus().InvokeAsync(new PcCommand1(id), TestContext.Current.CancellationToken);
 
         slow.Source.SetResult();
 
         await execution;
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await theHost.StopAsync();
         theHost.Dispose();
@@ -79,8 +79,6 @@ public class PcRevisionedSaga : Wolverine.Saga
         new PcRevisionedSaga { Id = command.Id };
 
     public Guid Id { get; set; }
-
-    public int Version { get; set; }
 
     public bool One { get; set; }
     public bool Two { get; set; }

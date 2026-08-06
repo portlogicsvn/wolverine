@@ -81,7 +81,10 @@ public interface IMessageStore : IAsyncDisposable
 
     /// <summary>
     ///     Unique identifier for a message store in case of systems that use multiple message
-    ///     store databases. Must use the "messagedb" scheme, and reflect the database connection
+    ///     store databases. This value doubles as the store's durability agent Uri, so it MUST
+    ///     use the registered agent scheme (<see cref="Wolverine.Persistence.PersistenceConstants.AgentScheme"/>,
+    ///     "wolverinedb") and reflect the database connection — otherwise the NodeAgentController
+    ///     cannot resolve an agent family and the durability agent fails to start (see GH-3589).
     /// </summary>
     Uri Uri { get; }
 
@@ -97,6 +100,17 @@ public interface IMessageStore : IAsyncDisposable
     IMessageOutbox Outbox { get; }
 
     INodeAgentPersistence Nodes { get; }
+
+    /// <summary>
+    /// Registry of dynamic, runtime-registered listener URIs. Backed by a
+    /// transport-agnostic store (one URI per entry); each URI is turned into
+    /// an actual listener at runtime by <c>DynamicListenerAgentFamily</c> via
+    /// the appropriate transport. Opt-in via
+    /// <see cref="DurabilitySettings.EnableDynamicListeners"/>; providers must
+    /// return <see cref="NullListenerStore.Instance"/> (and skip schema
+    /// migrations for the listener table) when the flag is <c>false</c>.
+    /// </summary>
+    IListenerStore Listeners { get; }
 
     IMessageStoreAdmin Admin { get; }
 

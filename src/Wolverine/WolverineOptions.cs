@@ -126,12 +126,90 @@ public class MetricsOptions
     /// How should Wolverine collect and publish metrics about message handling and publications?
     /// </summary>
     public WolverineMetricsMode Mode { get; set; } = WolverineMetricsMode.SystemDiagnosticsMeter;
-    
+
     /// <summary>
     /// If using either CritterWatch or Hybrid metrics publishing, this is the period in which
     /// Wolverine will sample and publish metric data collection. Default is 5 seconds
     /// </summary>
     public TimeSpan SamplingPeriod { get; set; } = 5.Seconds();
+
+    /// <summary>
+    /// Default explicit histogram bucket boundaries (in milliseconds) applied to the
+    /// <c>wolverine-execution-time</c> and <c>wolverine-effective-time</c> histograms. The
+    /// OpenTelemetry SDK's default buckets are poor for millisecond-scale latencies; these are tuned for
+    /// message handling. See GH-3224.
+    /// </summary>
+    public static readonly IReadOnlyList<double> DefaultHistogramBucketBoundaries =
+        new double[] { 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000 };
+
+    /// <summary>
+    /// Explicit histogram bucket boundaries (in milliseconds) used as the instrument <em>advice</em> for
+    /// the <c>wolverine-execution-time</c> and <c>wolverine-effective-time</c> histograms, so quantile
+    /// baselines computed from a time-series database (Prometheus / VictoriaMetrics) are meaningful for
+    /// millisecond latencies. Defaults to <see cref="DefaultHistogramBucketBoundaries"/>. Set to
+    /// <c>null</c> to fall back to the OpenTelemetry SDK / exporter defaults, or supply your own ascending
+    /// boundaries. An OpenTelemetry <c>View</c> still overrides this advice when configured. See GH-3224.
+    /// </summary>
+    public IReadOnlyList<double>? HistogramBucketBoundaries { get; set; } = DefaultHistogramBucketBoundaries;
+}
+
+/// <summary>
+/// Opt-in tracking and tracing diagnostics. Each of the boolean flags controls a
+/// separate slice of structured tracing surface — handler-execution events / tags,
+/// the deserialization span, and outbox-flush events around
+/// <c>FlushOutgoingMessages</c>. All default to <c>false</c>; users opt into the
+/// extra emission only when they want to pay for it.
+/// </summary>
+public class TrackingOptions
+{
+    /// <summary>
+    /// When enabled, Wolverine tracks which message types are produced as a result
+    /// of handling other message types (cause and effect). New causation pairs are
+    /// reported to <c>IWolverineObserver.MessageCausedBy</c> for CritterWatch topology
+    /// visualization. Default is <c>false</c>; <c>Wolverine.CritterWatch</c> enables this
+    /// automatically.
+    /// </summary>
+    public bool EnableMessageCausationTracking { get; set; }
+
+    /// <summary>
+    /// When enabled, the Wolverine event-store integrations (Wolverine.Marten / Wolverine.Polecat)
+    /// report events appended during an outbox-enrolled message/endpoint execution to
+    /// <c>IWolverineObserver.EventsAppended</c>, so the executing-handler→appended-event-type
+    /// relationship (invisible to message causation, since appended events never hit the outbox)
+    /// can be reconstructed. Default is <c>false</c>; <c>Wolverine.CritterWatch</c> enables this
+    /// automatically.
+    /// </summary>
+    public bool EnableEventAppendTracking { get; set; }
+
+    /// <summary>
+    /// When enabled, Wolverine emits structured diagnostics around each handler
+    /// invocation: <c>wolverine.handler.started</c> / <c>wolverine.handler.finished</c>
+    /// <see cref="System.Diagnostics.ActivityEvent"/>s wrapping the actual user
+    /// handler body, plus <c>wolverine.envelope.transport_lag_ms</c> and
+    /// <c>wolverine.envelope.receive_dwell_ms</c> tags on envelope activities.
+    /// Default is <c>false</c>.
+    /// </summary>
+    public bool HandlerExecutionDiagnosticsEnabled { get; set; }
+
+    /// <summary>
+    /// When enabled, Wolverine starts a <c>wolverine.deserialize</c> span around
+    /// inbound envelope deserialization, tagging it with the payload size in bytes.
+    /// Default is <c>false</c>.
+    /// </summary>
+    public bool DeserializationSpanEnabled { get; set; }
+
+    /// <summary>
+    /// When enabled, Wolverine emits <c>wolverine.outbox.flushing</c> /
+    /// <c>wolverine.outbox.published</c> <see cref="System.Diagnostics.ActivityEvent"/>s
+    /// around the call to <c>FlushOutgoingMessages</c> in the generated handler
+    /// chain code. When the chain pulls in Wolverine.Marten transactional middleware
+    /// this flag also brackets the Marten <c>IDocumentSession.SaveChangesAsync</c>
+    /// postprocessor with <c>marten.savechanges.start</c> /
+    /// <c>marten.savechanges.finished</c> ActivityEvents. Useful for performance
+    /// optimization — separating slow database commits from slow broker publishes
+    /// when profiling a transactional handler. Default is <c>false</c>.
+    /// </summary>
+    public bool OutboxDiagnosticsEnabled { get; set; }
 }
 
 /// <summary>
@@ -160,6 +238,7 @@ public sealed partial class WolverineOptions
         CodeGeneration = new GenerationRules("Internal.Generated");
         CodeGeneration.Sources.Add(new NowTimeVariableSource());
         CodeGeneration.Sources.Add(new TenantIdSource());
+        CodeGeneration.Sources.Add(new Runtime.Batching.BatchContextVariableSource());
 
         // MassTransit shim variable sources
         CodeGeneration.Sources.Add(new Shims.MassTransit.ConsumeContextVariableSource());
@@ -171,7 +250,15 @@ public sealed partial class WolverineOptions
         {
             establishApplicationAssembly(assemblyName);
         }
-        
+        else
+        {
+            // GH-3521: capture the caller's assembly now, while its frame is still on the stack. The
+            // application assembly is finalized later in ReadJasperFxOptions from a lazy DI factory where
+            // the caller's frame is long gone, so this is the only reliable point to learn where THIS host
+            // was actually registered — needed to detect the first-host-wins pin.
+            CaptureRegistrationCallingAssembly();
+        }
+
         if (ApplicationAssembly != null)
         {
             CodeGeneration.Assemblies.Add(ApplicationAssembly);
@@ -184,7 +271,16 @@ public sealed partial class WolverineOptions
         Policies.Add<ResponsePolicy>();
         Policies.Add<OutgoingMessagesPolicy>();
 
+        // Phase-A pre-population of IChain.AncillaryStoreType for [Storage]-attributed handlers so the
+        // ancillary-store inbox routing map sees them eagerly at startup. Mirrors the per-provider
+        // eager policies (e.g. Marten's MartenStoreEagerPolicy). See StorageAttributeEagerPolicy.
+        Policies.Add<StorageAttributeEagerPolicy>();
+
         this.OnException<DuplicateIncomingEnvelopeException>().Discard();
+
+        // GH-3289: a batch handler can throw ApplyItemException to isolate poison items from a batch.
+        // Throwing the exception is the opt-in; this built-in rule resolves it on every attempt.
+        this.OnException<ApplyItemException>().ContinueWith(new Runtime.Batching.ApplyItemContinuationSource());
 
         MessagePartitioning = new MessagePartitioningRules(this);
         
@@ -193,6 +289,14 @@ public sealed partial class WolverineOptions
 
     [ChildDescription]
     public MetricsOptions Metrics { get; } = new();
+
+    /// <summary>
+    /// Opt-in tracking and tracing diagnostics. See <see cref="TrackingOptions"/> for the
+    /// individual flags. Default is "off everything" — users opt into the extra surface only
+    /// when they want the structured emission.
+    /// </summary>
+    [ChildDescription]
+    public TrackingOptions Tracking { get; } = new();
 
     /// <summary>
     /// Global default settings for entity loading behavior with [Entity], [Document],
@@ -234,12 +338,16 @@ public sealed partial class WolverineOptions
 
     /// <summary>
     /// What is the policy within this application for whether or not it is valid to allow Service Location within
-    /// the generated code for message handlers or HTTP endpoints. Default is AllowedByWarn. Just keep in mind that
-    /// Wolverine really does not want you to use service location if you don't have to!
+    /// the generated code for message handlers or HTTP endpoints. Default is <see cref="ServiceLocationPolicy.NotAllowed"/>
+    /// as of Wolverine 6.0 (was <see cref="ServiceLocationPolicy.AllowedButWarn"/> in 5.x). Wolverine really does
+    /// not want you to use service location if you don't have to — register services so the codegen can inline-
+    /// construct them via constructor injection, and opt specific types in with
+    /// <see cref="JasperFx.CodeGeneration.GenerationRules.AlwaysUseServiceLocationFor{T}()"/> only when the
+    /// underlying registration (opaque lambda factory, etc.) genuinely requires it.
     ///
-    /// Please see https://wolverinefx.net/guide/codegen.html for more information
+    /// Please see https://wolverinefx.net/guide/codegen.html for more information.
     /// </summary>
-    public ServiceLocationPolicy ServiceLocationPolicy { get; set; } = ServiceLocationPolicy.AllowedButWarn;
+    public ServiceLocationPolicy ServiceLocationPolicy { get; set; } = ServiceLocationPolicy.NotAllowed;
 
     public Uri SubjectUri => new Uri("wolverine://" + ServiceName.Sanitize());
 
@@ -267,10 +375,20 @@ public sealed partial class WolverineOptions
     public MessagePartitioningRules MessagePartitioning { get; }
 
     /// <summary>
-    /// Internal list of IEnvelopeRule instances that are applied via ApplyCorrelation
-    /// to outgoing envelopes in PersistOrSendAsync
+    /// List of <see cref="IEnvelopeRule"/> instances applied to every outgoing envelope.
     /// </summary>
-    internal List<IEnvelopeRule> MetadataRules { get; } = new();
+    public List<IEnvelopeRule> MetadataRules { get; } = new();
+
+    /// <summary>
+    /// GH-3001 extension point. Factories for codegen frames that prime a handler's service-location
+    /// child scope with an already-resolved "singleton-per-message" instance (e.g. Marten's
+    /// outbox-enrolled IDocumentSession), so service-located dependencies resolve to that instance
+    /// rather than a duplicate. Each produced frame is emitted right after the scope is created and
+    /// must self-guard (no-op when its target variable is absent from the chain). Integrations
+    /// (Wolverine.Marten / Wolverine.Polecat) register a factory here; the MessageContext priming
+    /// frame is always added by the runtime in addition to these.
+    /// </summary>
+    public List<Func<JasperFx.CodeGeneration.Frames.SyncFrame>> ScopingFrameSources { get; } = new();
 
     
     /// For advanced usages, this gives you the ability to register pre-canned message handling
@@ -312,6 +430,27 @@ public sealed partial class WolverineOptions
     public GenerationRules CodeGeneration { get; }
 
     /// <summary>
+    ///     When true, Wolverine consumes the pre-generated handler registry (emitted by
+    ///     <c>dotnet run -- codegen write</c>) to skip runtime assembly scanning during handler
+    ///     discovery. Implicitly enabled in <see cref="JasperFx.CodeGeneration.TypeLoadMode.Static" />;
+    ///     set explicitly via <see cref="UseStaticRegistries" /> for dynamic-mode users who still want
+    ///     to bypass scanning. Falls back to a runtime scan (with a warning) when no registry is present.
+    /// </summary>
+    internal bool UseStaticHandlerRegistry { get; set; }
+
+    /// <summary>
+    ///     Opt into consuming the pre-generated static handler registry emitted by
+    ///     <c>dotnet run -- codegen write</c> so that startup skips conventional handler discovery's
+    ///     assembly scan, even when not running in <see cref="JasperFx.CodeGeneration.TypeLoadMode.Static" />.
+    ///     If no generated registry is found, Wolverine logs a warning and falls back to scanning.
+    /// </summary>
+    public WolverineOptions UseStaticRegistries()
+    {
+        UseStaticHandlerRegistry = true;
+        return this;
+    }
+
+    /// <summary>
     ///     Configure how & where Wolverine discovers message handler classes and message types to override or expand
     ///     the built in conventions. Register additional Wolverine module assemblies
     /// </summary>
@@ -351,6 +490,15 @@ public sealed partial class WolverineOptions
     public DurabilitySettings Durability { get; }
 
     /// <summary>
+    ///     Configuration for the periodic <see cref="Wolverine.Runtime.Heartbeat.WolverineHeartbeat"/>
+    ///     emission used by external monitoring tools to detect node liveness. The hosted service
+    ///     that emits heartbeats is registered through
+    ///     <see cref="WolverineOptionsExtensions.EnableHeartbeats"/>.
+    /// </summary>
+    [ChildDescription]
+    public HeartbeatPolicy Heartbeat { get; } = new();
+
+    /// <summary>
     ///     The default message execution timeout for local queues. This uses a CancellationTokenSource
     ///     behind the scenes, and the timeout enforcement is dependent on the usage within handlers
     /// </summary>
@@ -382,10 +530,36 @@ public sealed partial class WolverineOptions
         set => _autoBuildMessageStorageOnStartup = value;
     }
 
+    private ResourceMigrationFailureMode? _resourceMigrationFailureMode;
+
+    /// <summary>
+    ///     Controls what happens when Wolverine's own startup work — message store migration and
+    ///     messaging transport initialization / auto-provisioning — fails. Defaults (when not set here)
+    ///     to the active JasperFx profile's value, i.e. <see cref="ResourceMigrationFailureMode.FailFast"/>
+    ///     (abort startup). Set to <see cref="ResourceMigrationFailureMode.ContinueOnFailures"/> — typically
+    ///     only on the <c>Production</c> profile via <c>JasperFxOptions.Production.ResourceMigrationFailureMode</c> —
+    ///     so that, e.g., a replica that loses the migration lock during a rolling deploy logs the failure
+    ///     and continues starting up instead of crash-looping. Mirrors JasperFx's resource-setup hosted
+    ///     service for resources outside that service's reach (GH-3130). An explicit value set here wins
+    ///     over the profile.
+    /// </summary>
+    public ResourceMigrationFailureMode ResourceMigrationFailureMode
+    {
+        get => _resourceMigrationFailureMode ?? ResourceMigrationFailureMode.FailFast;
+        set => _resourceMigrationFailureMode = value;
+    }
+
     /// <summary>
     ///     Descriptive name of the running service. Used in Wolverine diagnostics and testing support
     /// </summary>
     public string ServiceName { get; set; } = null!;
+
+    /// <summary>
+    ///     Free-form, user-defined service-level tags. These are surfaced on <c>ServiceCapabilities.Tags</c> and flow
+    ///     to monitoring tools (e.g. CritterWatch) so operators can label and filter related services by their own
+    ///     conventions. The operator owns any <c>key:value</c> convention — Wolverine treats these as opaque strings.
+    /// </summary>
+    public IList<string> Tags { get; } = new List<string>();
 
     /// <summary>
     ///     This should probably *only* be used in development or testing
@@ -419,12 +593,17 @@ public sealed partial class WolverineOptions
     public bool EnableAutomaticFailureAcks { get; set; } = false;
 
     /// <summary>
-    /// When enabled, Wolverine tracks which message types are produced as a result
-    /// of handling other message types (cause and effect). New causation pairs are
-    /// reported to IWolverineObserver.MessageCausedBy for CritterWatch topology
-    /// visualization. Default is false; Wolverine.CritterWatch enables this automatically.
+    /// Legacy flag for message-causation tracking. Reads and writes flow through
+    /// <see cref="TrackingOptions.EnableMessageCausationTracking"/> on the
+    /// <see cref="Tracking"/> sub-config. Use the new property directly going
+    /// forward.
     /// </summary>
-    public bool EnableMessageCausationTracking { get; set; }
+    [Obsolete("Use Tracking.EnableMessageCausationTracking instead")]
+    public bool EnableMessageCausationTracking
+    {
+        get => Tracking.EnableMessageCausationTracking;
+        set => Tracking.EnableMessageCausationTracking = value;
+    }
 
     private void deriveServiceName()
     {
@@ -521,11 +700,29 @@ public sealed partial class WolverineOptions
         
         if (_applicationAssembly == null)
         {
-            ApplicationAssembly = jasperfx.ApplicationAssembly;
+            // GH-3776: JasperFx resolves its own application assembly with the same kind of stack walk and has
+            // no test-runner exclusion, so in a test process it can hand us the RUNNER assembly. Adopting that
+            // silently points handler discovery at an assembly with no handlers in it. Drop it and resolve
+            // locally instead, where determineCallingAssembly's IsTestRunnerAssembly check keeps the walk
+            // honest and ultimately falls back to the entry assembly.
+            var fromJasperFx = jasperfx.ApplicationAssembly;
+            if (fromJasperFx?.GetName().Name is { } pinned && IsTestRunnerAssembly(pinned))
+            {
+                fromJasperFx = null;
+            }
+
+            ApplicationAssembly = fromJasperFx;
 
             if (ApplicationAssembly == null)
             {
                 establishApplicationAssembly(null);
+            }
+            else
+            {
+                // GH-3521: jasperfx.ApplicationAssembly is a process-wide value pinned by whichever host
+                // started first. If it differs from where this host was actually registered, handler
+                // discovery will silently scan the wrong assembly — warn loudly.
+                CheckForDivergentApplicationAssembly(ApplicationAssembly);
             }
         }
         
@@ -547,6 +744,11 @@ public sealed partial class WolverineOptions
         if (_autoBuildMessageStorageOnStartup == null)
         {
             _autoBuildMessageStorageOnStartup = jasperfx.ActiveProfile.ResourceAutoCreate;
+        }
+
+        if (_resourceMigrationFailureMode == null)
+        {
+            _resourceMigrationFailureMode = jasperfx.ActiveProfile.ResourceMigrationFailureMode;
         }
 
         // Propagate GeneratedCodeOutputPath from JasperFxOptions if not explicitly set

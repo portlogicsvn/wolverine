@@ -1,5 +1,6 @@
 ﻿using System.Diagnostics;
 using JasperFx.Core;
+using JasperFx.Descriptors;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -100,9 +101,37 @@ public partial class RabbitMqTransport : BrokerTransport<RabbitMqEndpoint>, IAsy
     /// Allows users to modify properties and behaviors of channels used in RabbitMQ communication
     /// by providing a delegate to apply specific settings.
     /// </summary>
+    [ChildDescription]
     public Action<WolverineRabbitMqChannelOptions>? ChannelCreationOptions { get; set; }
 
+    [IgnoreDescription]
     public ConnectionFactory? ConnectionFactory { get; private set; }
+
+    /// <summary>
+    /// Secret-safe summary of <see cref="ConnectionFactory"/> for diagnostic
+    /// rendering. Exposes host / port / vhost / user / SSL / heartbeat and
+    /// omits the password.
+    /// </summary>
+    [ChildDescription]
+    public RabbitMqConnectionDescription? ConnectionDescription =>
+        ConnectionFactory == null
+            ? null
+            : new RabbitMqConnectionDescription(ConnectionFactory, AmqpTcpEndpoints.ToList());
+
+    public override string? DescribeEndpoint()
+    {
+        var factory = ConnectionFactory;
+        if (factory == null)
+        {
+            // Explicit endpoint list configured without a single resolved factory host.
+            return AmqpTcpEndpoints.Count > 0
+                ? string.Join(", ", AmqpTcpEndpoints.Select(e => $"{e.HostName}:{e.Port}"))
+                : null;
+        }
+
+        var vhost = string.IsNullOrEmpty(factory.VirtualHost) ? "/" : factory.VirtualHost;
+        return $"{factory.HostName}:{factory.Port} (vhost: {vhost})";
+    }
 
     internal void ConfigureFactory(Action<ConnectionFactory> configure)
     {
@@ -118,11 +147,15 @@ public partial class RabbitMqTransport : BrokerTransport<RabbitMqEndpoint>, IAsy
         ConnectionFactory = factory;
     }
 
+    [IgnoreDescription]
     public IList<AmqpTcpEndpoint> AmqpTcpEndpoints { get; } = new List<AmqpTcpEndpoint>();
 
+    [IgnoreDescription]
     public LightweightCache<Uri, RabbitMqTopicEndpoint> Topics { get; }
+    [IgnoreDescription]
     public LightweightCache<string, RabbitMqExchange> Exchanges { get; }
 
+    [IgnoreDescription]
     public LightweightCache<string, RabbitMqQueue> Queues { get; }
 
     internal bool DeclareRequestReplySystemQueue { get; set; } = true;
@@ -336,6 +369,7 @@ public partial class RabbitMqTransport : BrokerTransport<RabbitMqEndpoint>, IAsy
         return new ConnectionMonitor(this, role);
     }
 
+    [IgnoreDescription]
     public ILogger<RabbitMqTransport> Logger { get; private set; } = NullLogger<RabbitMqTransport>.Instance;
     
     /// <summary>

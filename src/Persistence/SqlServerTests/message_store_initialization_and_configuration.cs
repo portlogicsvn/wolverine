@@ -23,7 +23,7 @@ public class message_store_initialization_and_configuration : SqlServerContext, 
 {
     private IHost _host = null!;
 
-    public new async Task InitializeAsync()
+    public new async ValueTask InitializeAsync()
     {
         await dropSchema();
 
@@ -44,7 +44,7 @@ public class message_store_initialization_and_configuration : SqlServerContext, 
         await conn.CloseAsync();
     }
 
-    public override async Task DisposeAsync()
+    public override async ValueTask DisposeAsync()
     {
         if (_host != null)
         {
@@ -63,9 +63,9 @@ public class message_store_initialization_and_configuration : SqlServerContext, 
     public async Task builds_the_node_and_control_queue_tables()
     {
         using var conn = new SqlConnection(Servers.SqlServerConnectionString);
-        await conn.OpenAsync();
+        await conn.OpenAsync(TestContext.Current.CancellationToken);
 
-        var tables = await conn.ExistingTables("wolverine%" );
+        var tables = await conn.ExistingTables("wolverine%", ct: TestContext.Current.CancellationToken);
         await conn.CloseAsync();
 
         tables.ShouldContain(x => x.Name == DatabaseConstants.NodeTableName);
@@ -102,7 +102,7 @@ public class message_store_initialization_and_configuration : SqlServerContext, 
     [Fact]
     public async Task deletes_the_node_on_shutdown()
     {
-        await _host.StopAsync();
+        await _host.StopAsync(TestContext.Current.CancellationToken);
         _host.Dispose();
         _host = null!;
 

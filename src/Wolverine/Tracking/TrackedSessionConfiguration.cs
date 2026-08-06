@@ -14,6 +14,8 @@ public class TrackedSessionConfiguration
 
     internal TrackedSession Session { get; }
 
+    private WaitForExecutionCount? _executionCounts;
+
     /// <summary>
     ///     Override the default timeout threshold to wait for all
     ///     activity to finish
@@ -78,9 +80,22 @@ public class TrackedSessionConfiguration
     /// </summary>
     /// <param name="filter"></param>
     /// <returns></returns>
-    public TrackedSessionConfiguration IgnoreMessagesMatchingType(Func<Type, bool> filter)  
+    public TrackedSessionConfiguration IgnoreMessagesMatchingType(Func<Type, bool> filter)
     {
         Session.IgnoreMessageTypes(filter);
+        return this;
+    }
+
+    /// <summary>
+    /// Track — and allow assertions on — messages marked <see cref="ISystemCommand"/>, which a tracked
+    /// session ignores by default. Use this when the traffic under test IS the system/monitoring traffic
+    /// (e.g. asserting a monitoring host received a telemetry message). A never-ending system feed can
+    /// still hold the session open, so pair this with <see cref="IgnoreMessagesMatchingType"/> for any
+    /// continuously-published types you don't want to wait on.
+    /// </summary>
+    public TrackedSessionConfiguration IncludeSystemCommands()
+    {
+        Session.IncludeSystemCommands();
         return this;
     }
 
@@ -180,6 +195,31 @@ public class TrackedSessionConfiguration
     public TrackedSessionConfiguration WaitForCondition(ITrackedCondition condition)
     {
         Session.AddCondition(condition);
+        return this;
+    }
+
+    /// <summary>
+    ///     Continue tracking until at least <paramref name="count" /> distinct messages assignable to
+    ///     <typeparamref name="T" /> have finished execution. Multiple calls combine into a single
+    ///     condition that requires every registered count to be reached. Use this when handled
+    ///     messages are published out-of-band from the tracked execution — e.g. a Marten async
+    ///     daemon subscription or projection side effect relaying messages to Wolverine after its
+    ///     page commits — where the tracked session could otherwise observe a momentary lull in
+    ///     activity and complete before all expected messages have even been published.
+    /// </summary>
+    /// <param name="count">The minimum number of distinct messages of this type that must finish execution</param>
+    /// <typeparam name="T">The expected message type</typeparam>
+    /// <returns></returns>
+    public TrackedSessionConfiguration WaitForExecutionOf<T>(int count = 1)
+    {
+        if (_executionCounts == null)
+        {
+            _executionCounts = new WaitForExecutionCount();
+            Session.AddCondition(_executionCounts);
+        }
+
+        _executionCounts.ExpectMessage<T>(count);
+
         return this;
     }
 

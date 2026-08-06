@@ -14,7 +14,7 @@ public class when_using_handler_type_naming : IAsyncLifetime
     private IHost _host = null!;
     private IWolverineRuntime _runtime = null!;
 
-    public Task InitializeAsync()
+    public ValueTask InitializeAsync()
     {
         _host = Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -29,7 +29,7 @@ public class when_using_handler_type_naming : IAsyncLifetime
             }).Start();
 
         _runtime = _host.Services.GetRequiredService<IWolverineRuntime>();
-        return Task.CompletedTask;
+        return ValueTask.CompletedTask;
     }
 
     [Fact]
@@ -52,10 +52,14 @@ public class when_using_handler_type_naming : IAsyncLifetime
             .ShouldBeTrue($"Expected active listener containing '{expectedName}'");
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         if (_host != null) await _host.StopAsync();
         _host?.Dispose();
+
+        // Every class in this namespace has to hand the next one a clean namespace: the emulator caps
+        // it at 50 queues and reports the overflow as a broker-init timeout. GH-3786.
+        await AzureServiceBusTesting.DeleteAllEmulatorObjectsAsync();
     }
 }
 

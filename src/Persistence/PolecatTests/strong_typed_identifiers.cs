@@ -12,9 +12,9 @@ namespace PolecatTests;
 
 public class strong_typed_identifiers : IAsyncLifetime
 {
-    private IHost _host;
+    private IHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -30,9 +30,10 @@ public class strong_typed_identifiers : IAsyncLifetime
             .ApplyAllConfiguredChangesToDatabaseAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _host.StopAsync();
+        _host.Dispose();
     }
 
     [Fact]
@@ -41,7 +42,7 @@ public class strong_typed_identifiers : IAsyncLifetime
         var knob1 = new PcKnob { Name = "Single" };
         await using var session = _host.Services.GetRequiredService<IDocumentStore>().LightweightSession();
         session.Store(knob1);
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         await _host.InvokeAsync(new TwistPcKnob(knob1.Id));
     }
@@ -53,7 +54,7 @@ public class strong_typed_identifiers : IAsyncLifetime
         var knob2 = new PcKnob { Name = "Two" };
         await using var session = _host.Services.GetRequiredService<IDocumentStore>().LightweightSession();
         session.Store(knob1, knob2);
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         await _host.InvokeAsync(new TwistOneThenAnotherPcKnob(knob1.Id, knob2.Id));
     }
@@ -65,7 +66,7 @@ public readonly partial struct PcKnobId;
 public class PcKnob
 {
     public PcKnobId Id { get; set; }
-    public string Name { get; set; }
+    public required string Name { get; init; }
 }
 
 public record TwistPcKnob(PcKnobId Id);

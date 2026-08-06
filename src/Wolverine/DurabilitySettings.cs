@@ -1,6 +1,7 @@
 using JasperFx.Core;
 using JasperFx.Descriptors;
 using JasperFx.MultiTenancy;
+using Wolverine.Persistence;
 
 namespace Wolverine;
 
@@ -76,6 +77,13 @@ public class DurabilitySettings : IDescribeMyself
     internal bool TenantIdStyleHasChanged { get; set; }
 
     /// <summary>
+    ///     Set by tenancy integrations (e.g. Wolverine's conjoined EF Core multi-tenancy)
+    ///     that need the message store to provision its wolverine_tenants registry table
+    ///     even without database-per-tenant master table tenancy
+    /// </summary>
+    public bool TenantRegistryRequired { get; set; }
+
+    /// <summary>
     /// If set, this establishes a default database schema name for all registered message
     /// storage databases. Use this with a modular monolith approach where all modules target the same physical database. The default is null.
     /// </summary>
@@ -85,6 +93,19 @@ public class DurabilitySettings : IDescribeMyself
     /// Control and optimize the durability agent behavior within Wolverine applications
     /// </summary>
     public DurabilityMode Mode { get; set; } = DurabilityMode.Balanced;
+
+    /// <summary>
+    /// Opt-in reconciliation for when more than one registered message store claims the <c>Main</c> role
+    /// (GH-3226) — e.g. an event-store-backed main store (Marten / Polecat <c>IntegrateWithWolverine()</c>)
+    /// combined with a database-backed transport (the SQL Server / PostgreSQL queues) that also registers an
+    /// implicit <c>Main</c> store. The callback receives every <c>Main</c>-tagged store and returns the one to
+    /// keep as <c>Main</c>; the others are demoted to <c>Ancillary</c> instead of Wolverine throwing
+    /// "There must be exactly one message store tagged as the 'main' store". When left null (the default) the
+    /// strict single-Main validation is enforced. Return null from the callback to also fall back to the
+    /// strict validation.
+    /// </summary>
+    public Func<IReadOnlyList<Wolverine.Persistence.Durability.IMessageStore>,
+        Wolverine.Persistence.Durability.IMessageStore?>? ResolveMainStoreOnConflict { get; set; }
 
     /// <summary>
     /// Direct Wolverine on how it judges message identity. "Classic" default is IdOnly. Switch to IdAndDestination
@@ -120,9 +141,45 @@ public class DurabilitySettings : IDescribeMyself
     public bool DurabilityAgentEnabled { get; set; } = true;
 
     /// <summary>
+    /// When true, scheduled-for-later messages destined for non-durable
+    /// <see cref="Transports.Local.BufferedLocalQueue"/> instances route to
+    /// <c>IMessageStore.Inbox</c> instead of the in-process
+    /// <c>IScheduledJobProcessor</c>. Set via
+    /// <see cref="IPolicies.AlwaysMakeScheduledMessagesDurable"/>.
+    ///
+    /// Other scheduling paths already provide durability without this flag — see the
+    /// XML doc on <see cref="IPolicies.AlwaysMakeScheduledMessagesDurable"/> for the
+    /// full matrix. No-ops when no message store is configured.
+    /// </summary>
+    public bool AlwaysMakeScheduledMessagesDurable { get; set; }
+
+    /// <summary>
     ///     How long should successfully handled messages be kept to use in idempotency checking
     /// </summary>
     public TimeSpan KeepAfterMessageHandling { get; set; } = 5.Minutes();
+
+    /// <summary>
+    ///     Polling interval for the background cleanup of expired, successfully handled incoming
+    ///     envelopes (the idempotency records). This cleanup runs on its own timer in a dedicated
+    ///     transaction, separate from the main recovery loop, so a slow cleanup cannot block inbox
+    ///     recovery work. Default is 1 minute.
+    /// </summary>
+    public TimeSpan HandledMessageCleanupPollingTime { get; set; } = 1.Minutes();
+
+    /// <summary>
+    ///     The maximum number of expired, handled incoming envelopes deleted in a single bounded
+    ///     DELETE statement for providers that support batching (currently PostgreSQL and SQL Server).
+    ///     Smaller batches hold locks for less time and reduce contention with live inbox traffic
+    ///     under heavy load. Default is 5000.
+    /// </summary>
+    public int HandledMessageCleanupBatchSize { get; set; } = 5000;
+
+    /// <summary>
+    ///     Safety cap on how many delete batches the handled-envelope cleanup runs in a single
+    ///     polling cycle before yielding. Any remaining expired rows are cleaned up on the next
+    ///     cycle. Default is 20.
+    /// </summary>
+    public int HandledMessageCleanupMaxBatchesPerCycle { get; set; } = 20;
 
     /// <summary>
     ///     Governs the page size for how many persisted incoming or outgoing messages
@@ -180,6 +237,40 @@ public class DurabilitySettings : IDescribeMyself
     public TimeSpan StaleNodeTimeout { get; set; } = 1.Minutes();
 
     /// <summary>
+    ///     GH-3604 / D1: how many consecutive health-check ticks the observing node must see another node
+    ///     as stale before it destructively deletes that node's row (which also releases the node's
+    ///     in-flight envelope ownership and its agent assignments). Routing to a stale node stops
+    ///     immediately regardless — it is dropped from the assignment grid on the first observation — so
+    ///     this only adds hysteresis to the irreversible delete, preventing a single stale snapshot read or
+    ///     transient blip from ejecting a node that is really alive. Minimum (and default) 2.
+    /// </summary>
+    public int StaleNodeEjectionThreshold { get; set; } = 2;
+
+    /// <summary>
+    ///     GH-3701: a hard cap on the number of rows retained in the node record table
+    ///     (<c>wolverine_node_records</c>), the append-only diagnostic log written by
+    ///     <c>INodeAgentPersistence.LogRecordsAsync</c> and read back by <c>FetchRecentRecordsAsync</c>.
+    ///     <see cref="NodeEventRecordExpirationTime" /> bounds those rows by *age* only, which puts no ceiling on
+    ///     the table at all: a cluster churning assignments writes one <c>AssignmentChanged</c> row per agent per
+    ///     decision, so millions of rows a day fit comfortably inside the age window and turn an
+    ///     agent-assignment incident into a database capacity problem on top of it. This cap is applied on the
+    ///     same housekeeping pass as the age sweep, every <see cref="NodeRecordPruningPeriod" />, against the
+    ///     <c>Main</c> store only. Raise it on very large agent universes, where one assignment wave is already
+    ///     thousands of rows. Set to zero or a negative number to keep the age sweep as the only bound, which
+    ///     was the behavior before 6.24.1.
+    /// </summary>
+    public int NodeRecordRetention { get; set; } = 10_000;
+
+    /// <summary>
+    ///     GH-3701: how often the node record table is pruned, both by age
+    ///     (<see cref="NodeEventRecordExpirationTime" />) and down to <see cref="NodeRecordRetention" /> rows.
+    ///     Deliberately far slower than <see cref="ScheduledJobPollingTime" /> — this is a housekeeping scan
+    ///     over a table nothing on the hot path reads, and until 6.24.1 it was being appended to every
+    ///     five-second recovery batch instead.
+    /// </summary>
+    public TimeSpan NodeRecordPruningPeriod { get; set; } = 1.Hours();
+
+    /// <summary>
     ///     How often should Wolverine do a full check that all assigned agents are
     ///     really running and try to restart (or stop) any differences from the last
     ///     good set of assignments
@@ -187,21 +278,133 @@ public class DurabilitySettings : IDescribeMyself
     public TimeSpan CheckAssignmentPeriod { get; set; } = 30.Seconds();
 
     /// <summary>
+    ///     GH-3604 / D3: the maximum number of agent assignments the leader packs into a single
+    ///     <c>StartAgents</c> control message to a node. A node running a very large agent universe
+    ///     (e.g. database-per-tenant Marten with thousands of subscription shards) cannot start
+    ///     thousands of daemon agents inside one request/reply window, so assignments to a destination
+    ///     are chunked into batches of this size and sent one chunk at a time. Default 50.
+    /// </summary>
+    public int AgentStartBatchSize { get; set; } = 50;
+
+    /// <summary>
+    ///     GH-3604 / D3: the maximum number of agents a receiving node starts concurrently when it
+    ///     handles a <c>StartAgents</c> batch. Daemon-agent starts are I/O bound (database round-trips),
+    ///     so starting them with bounded parallelism instead of serially lets a batch complete well
+    ///     inside the reply window. Default 10.
+    /// </summary>
+    public int MaxAgentStartParallelism { get; set; } = 10;
+
+    /// <summary>
+    ///     GH-3604 / D3 (WO-7): the maximum number of agents this node stops concurrently when it is
+    ///     draining every locally-running agent on shutdown. The old sequential drain
+    ///     (<c>stopAllAgentsAsync</c>) could not finish thousands of daemon subscription agents inside a
+    ///     typical 30s SIGTERM grace window, so agents were SIGKILLed mid-stop with unflushed progression.
+    ///     A bounded fan-out makes the shutdown window usable at scale. Default 10.
+    /// </summary>
+    public int MaxAgentStopParallelism { get; set; } = 10;
+
+    /// <summary>
+    ///     GH-3748: once a batched agent command's initial reply window has elapsed without an answer,
+    ///     the leader stops waiting passively and starts asking the destination node which of the
+    ///     requested agents are actually running (or stopped) at this interval. Each poll is a cheap
+    ///     read of the node's in-memory agent registry, so the interval mostly decides how quickly the
+    ///     leader notices convergence. Default 10 seconds.
+    /// </summary>
+    public TimeSpan AgentProgressPollInterval { get; set; } = 10.Seconds();
+
+    /// <summary>
+    ///     GH-3748 / GH-3750: how long the leader tolerates ZERO observed progress on an in-flight
+    ///     agent batch before giving up on the unconfirmed remainder and letting the next assignment
+    ///     evaluation re-decide it. Any progress — one more agent confirmed running or stopped —
+    ///     resets this clock, so a node that is slow but converging gets unbounded time while a node
+    ///     that is wedged or gone costs a bounded wait. Sized to the slowest legitimate single agent
+    ///     start we know of: a Marten projection shard replaying behind a version bump under the
+    ///     daemon's bounded side-effect gate, which has a five-minute ceiling. Default 5 minutes.
+    /// </summary>
+    public TimeSpan AgentProgressStallTimeout { get; set; } = 5.Minutes();
+
+    /// <summary>
+    ///     GH-3519: how many extra times this node immediately re-tries an agent that failed to start,
+    ///     before giving up and leaving it to the next assignment reevaluation. A first-assignment start
+    ///     races the subsystems the agent depends on — an event-subscription shard evaluated before its
+    ///     store's high-water detection is up is the reported case, and on a multi-store host a different
+    ///     shard lost that race on every boot. Without a local retry the loser waited a full
+    ///     <see cref="CheckAssignmentPeriod" /> (30s by default) doing nothing while its high-water mark
+    ///     climbed. Set to 0 to restore the old single-attempt behavior. Default 2.
+    /// </summary>
+    public int AgentStartRetryAttempts { get; set; } = 2;
+
+    /// <summary>
+    ///     GH-3519: how long this node waits before each of the <see cref="AgentStartRetryAttempts" />
+    ///     immediate re-tries of a failed agent start, multiplied by the attempt number so the second
+    ///     retry waits twice as long as the first. Sized for a startup race that resolves in well under a
+    ///     second, not for an outage — a failure that outlives these attempts is left to the next
+    ///     assignment reevaluation rather than retried harder here. Default 250ms.
+    /// </summary>
+    public TimeSpan AgentStartRetryDelay { get; set; } = 250.Milliseconds();
+
+    /// <summary>
+    /// Opt-in switch for the dynamic listener registry: persisted listener URIs that
+    /// are activated at runtime in addition to the listeners declared statically
+    /// through <see cref="WolverineOptions"/>. When <c>true</c>, <c>IMessageStore.Listeners</c>
+    /// is backed by durable storage (and database-backed message stores create their
+    /// listener registry table on first migration); when <c>false</c> (the default),
+    /// <c>IMessageStore.Listeners</c> is a no-op store and no listener-registry
+    /// schema is provisioned. Default is <c>false</c> so users upgrading Wolverine
+    /// see no schema migration churn.
+    /// </summary>
+    public bool EnableDynamicListeners { get; set; } = false;
+
+    /// <summary>
     /// If using any kind of dynamic multi-tenancy where Wolverine should discover new
     /// tenants, this is the polling time. Default is 5 seconds
     /// </summary>
     public TimeSpan TenantCheckPeriod { get; set; } = 5.Seconds();
 
+    private TimeSpan _updateMetricsPeriod = 5.Seconds();
+
     /// <summary>
     /// If using any kind of message persistence, this is the polling time
-    /// to update the metrics on the persisted envelope counts. Default is 5 seconds
+    /// to update the metrics on the persisted envelope counts. Default is 5 seconds.
+    /// Must be greater than zero. Use <see cref="DurabilityMetricsEnabled"/> to turn
+    /// the polling off entirely.
     /// </summary>
-    public TimeSpan UpdateMetricsPeriod { get; set; } = 5.Seconds();
+    public TimeSpan UpdateMetricsPeriod
+    {
+        get => _updateMetricsPeriod;
+        set
+        {
+            // The metrics sweeper paces its pass with Task.Delay, so a non-positive period
+            // would hot-spin the sweep loop against every registered database rather than
+            // fail. Reject it at configuration time instead.
+            if (value <= TimeSpan.Zero)
+            {
+                throw new ArgumentOutOfRangeException(nameof(UpdateMetricsPeriod), value,
+                    $"{nameof(UpdateMetricsPeriod)} must be greater than zero. Set {nameof(DurabilityMetricsEnabled)} to false to disable durability metrics polling.");
+            }
+
+            _updateMetricsPeriod = value;
+        }
+    }
 
     /// <summary>
     /// Is the polling for durability metrics enabled? Default is true
     /// </summary>
     public bool DurabilityMetricsEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Declares how many connections this application may take against each database server, and
+    /// surfaces how many are actually in use. Rides the same sweep as the durability metrics, so
+    /// it is silent unless <see cref="DurabilityMetricsEnabled"/> is true. See #3397.
+    /// </summary>
+    /// <example>
+    /// <code>
+    /// opts.Durability.ConnectionBudgets
+    ///     .ForServer("pg-shard-a", 5432, maxConnections: 400)
+    ///     .ForServer("pg-shard-b", 5432, maxConnections: 200);
+    /// </code>
+    /// </example>
+    public ConnectionBudgets ConnectionBudgets { get; } = new();
 
     /// <summary>
     /// If DeadLetterQueueExpirationEnabled is true, this governs how long persisted
@@ -221,6 +424,27 @@ public class DurabilitySettings : IDescribeMyself
     /// Default is 5 days
     /// </summary>
     public TimeSpan NodeEventRecordExpirationTime { get; set; } = 5.Days();
+
+    /// <summary>
+    /// Health-check threshold for dead-letter-queue growth. When the persisted DLQ count grows
+    /// faster than this many envelopes per minute between two consecutive health-check evaluations,
+    /// the durability agent reports Degraded. Default is 100/min. See #2646.
+    /// </summary>
+    public int HealthDeadLetterGrowthPerMinuteThreshold { get; set; } = 100;
+
+    /// <summary>
+    /// Health-check threshold for stuck recovery / scheduled-job pollers. When the persisted
+    /// inbox+outbox count (or the scheduled count) is non-zero and has not decreased over this
+    /// many consecutive evaluations, the durability agent reports Degraded. Default is 3. See #2646.
+    /// </summary>
+    public int HealthStuckPollCycleThreshold { get; set; } = 3;
+
+    /// <summary>
+    /// Health-check threshold for consecutive persistence-layer failures. After this many
+    /// consecutive failed poll cycles, the durability agent reports Unhealthy (a single failure
+    /// reports Degraded). Default is 3. See #2646.
+    /// </summary>
+    public int HealthConsecutiveFailureUnhealthyThreshold { get; set; } = 3;
 
     /// <summary>
     ///     How long a sending agent can be idle before it is considered stale
@@ -283,6 +507,8 @@ public class DurabilitySettings : IDescribeMyself
         desc.AddValue(nameof(DeadLetterQueueExpirationEnabled), DeadLetterQueueExpirationEnabled);
         desc.AddValue(nameof(DeadLetterQueueExpiration), DeadLetterQueueExpiration);
         desc.AddValue(nameof(NodeEventRecordExpirationTime), NodeEventRecordExpirationTime);
+        desc.AddValue(nameof(NodeRecordRetention), NodeRecordRetention);
+        desc.AddValue(nameof(NodeRecordPruningPeriod), NodeRecordPruningPeriod);
         desc.AddValue(nameof(SendingAgentIdleTimeout), SendingAgentIdleTimeout);
         desc.AddValue(nameof(DrainTimeout), DrainTimeout);
         desc.AddValue(nameof(EnableInboxPartitioning), EnableInboxPartitioning);

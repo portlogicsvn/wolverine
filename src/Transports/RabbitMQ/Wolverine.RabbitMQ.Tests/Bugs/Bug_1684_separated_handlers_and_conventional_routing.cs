@@ -4,8 +4,6 @@ using Wolverine.Attributes;
 using Wolverine.Runtime;
 using Wolverine.Tracking;
 using Xunit;
-using Xunit.Abstractions;
-
 namespace Wolverine.RabbitMQ.Tests.Bugs;
 
 public class Bug_1684_separated_handlers_and_conventional_routing(ITestOutputHelper Output)
@@ -33,7 +31,7 @@ public class Bug_1684_separated_handlers_and_conventional_routing(ITestOutputHel
                 //services.AddHostedService<BackgroundJob>();
             })
             
-            .StartAsync();
+            .StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var message = new Msg(Guid.NewGuid());
         var tracked = await host.TrackActivity().IncludeExternalTransports().SendMessageAndWaitAsync(message);

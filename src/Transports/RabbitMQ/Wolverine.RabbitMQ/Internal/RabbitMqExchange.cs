@@ -1,4 +1,5 @@
 using JasperFx.Core;
+using JasperFx.Descriptors;
 using Microsoft.Extensions.Logging;
 using RabbitMQ.Client;
 using Wolverine.Configuration;
@@ -24,6 +25,7 @@ public class RabbitMqExchange : RabbitMqEndpoint, IRabbitMqExchange
         ExchangeName = name;
 
         EndpointName = name;
+        BrokerRole = "exchange";
 
         Topics = new(topic => new RabbitMqTopicEndpoint(topic, this, _parent));
         Routings = new LightweightCache<string, RabbitMqRouting>(key => new RabbitMqRouting(this, key, _parent));
@@ -32,11 +34,13 @@ public class RabbitMqExchange : RabbitMqEndpoint, IRabbitMqExchange
     /// <summary>
     /// All active topic endpoints by name
     /// </summary>
+    [IgnoreDescription]
     public LightweightCache<string, RabbitMqTopicEndpoint> Topics { get; }
-    
+
     /// <summary>
     /// All active routing keys
     /// </summary>
+    [IgnoreDescription]
     public LightweightCache<string, RabbitMqRouting> Routings { get; }
 
     public override bool AutoStartSendingAgent()
@@ -49,6 +53,8 @@ public class RabbitMqExchange : RabbitMqEndpoint, IRabbitMqExchange
     public bool HasDeclared { get; private set; }
 
     public string DeclaredName { get; }
+    
+    public bool DeclarePassive { get; set; }
 
     public string Name { get; }
 
@@ -57,6 +63,7 @@ public class RabbitMqExchange : RabbitMqEndpoint, IRabbitMqExchange
     public ExchangeType ExchangeType { get; set; } = ExchangeType.Fanout;
     public bool AutoDelete { get; set; } = false;
 
+    [IgnoreDescription]
     public IDictionary<string, object?> Arguments { get; } = new Dictionary<string, object?>();
     
     internal bool HasExchangeBindings => _exchangeBindings.Count > 0;
@@ -115,7 +122,7 @@ public class RabbitMqExchange : RabbitMqEndpoint, IRabbitMqExchange
             return;
         }
 
-        if (_parent.AutoProvision && !DisableAutoProvision)
+        if (_parent.AutoProvision && !DisableAutoProvision && !IsExternallyOwned)
         {
             await _parent.WithAdminChannelAsync(model => DeclareAsync(model, logger));
         }
@@ -135,16 +142,28 @@ public class RabbitMqExchange : RabbitMqEndpoint, IRabbitMqExchange
 
     internal async Task DeclareAsync(IChannel channel, ILogger logger)
     {
-        if (DeclaredName == string.Empty)
+        // Externally-owned exchanges are declared/managed by another system; don't touch the broker
+        // here at all (neither the exchange nor its source-exchange bindings below). GH-3064.
+        if (DeclaredName == string.Empty || IsExternallyOwned)
         {
             return;
         }
 
         var exchangeTypeName = ExchangeType.ToString().ToLower();
-        await channel.ExchangeDeclareAsync(DeclaredName, exchangeTypeName, IsDurable, AutoDelete, Arguments);
-        logger.LogInformation(
-            "Declared Rabbit Mq exchange '{Name}', type = {Type}, IsDurable = {IsDurable}, AutoDelete={AutoDelete}",
-            DeclaredName, exchangeTypeName, IsDurable, AutoDelete);
+        if (DeclarePassive)
+        {
+            await channel.ExchangeDeclarePassiveAsync(DeclaredName);
+            logger.LogInformation(
+                "Declared Rabbit Mq exchange '{Name}' (passive)",
+                DeclaredName);
+        }
+        else
+        {
+            await channel.ExchangeDeclareAsync(DeclaredName, exchangeTypeName, IsDurable, AutoDelete, Arguments);
+            logger.LogInformation(
+                "Declared Rabbit Mq exchange '{Name}', type = {Type}, IsDurable = {IsDurable}, AutoDelete={AutoDelete}",
+                DeclaredName, exchangeTypeName, IsDurable, AutoDelete);
+        }
 
         HasDeclared = true;
 
@@ -178,6 +197,15 @@ public class RabbitMqExchange : RabbitMqEndpoint, IRabbitMqExchange
 
     public override async ValueTask TeardownAsync(ILogger logger)
     {
+        // Don't delete an exchange we don't own. IsExternallyOwned is the explicit flag for that;
+        // DeclarePassive is honored here too — it means "only verify existence, never create" at setup,
+        // so deleting on teardown would be asymmetric and would destroy a resource the caller chose not
+        // to create. Bindings are likewise left alone. GH-3064 (DeclarePassive teardown fix included).
+        if (IsExternallyOwned || DeclarePassive)
+        {
+            return;
+        }
+
         await _parent.WithAdminChannelAsync(async channel =>
         {
             foreach (var binding in _exchangeBindings)

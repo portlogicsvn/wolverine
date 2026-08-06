@@ -10,12 +10,28 @@ using Xunit;
 
 namespace Wolverine.AzureServiceBus.Tests.Bugs;
 
-[Trait("Category", "Flaky")]
+// GH-3827: UNTAGGED. This was never a product bug -- the assertion was reading the wrong property.
+//
+// The 2026-08-02 triage was right that the listener IS created for the batch element type (so GH-2307
+// works) and right that the failure was readable rather than a broker timeout, but it concluded the
+// endpoint had been given "the raw type name rather than the sanitized queue name". Dumping the
+// endpoints shows both names are exactly what they should be:
+//
+//   EndpointName='Wolverine.AzureServiceBus.Tests.Bugs.BatchedItem'
+//   Uri='asb://queue/wolverine.azureservicebus.tests.bugs.batcheditem'   <- the real queue, sanitized
+//
+// EndpointName is a LOGICAL name and is deliberately not the entity name: MessageRoutingConvention
+// has `endpoint.EndpointName = queueName` commented out on both listener paths, and the transport's
+// own system endpoints do the same thing (AzureServiceBusResponses ->
+// asb://queue/wolverine.response.*). AzureServiceBusQueue.QueueName is the physical entity name and
+// is set once at construction; EndpointName is mutable and gets the friendly value afterwards.
+//
+// So the test asserts on QueueName now, which is the thing GH-2307 is actually about.
 public class Bug_2307_batching_with_conventional_routing : IAsyncLifetime
 {
     private IHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -34,7 +50,7 @@ public class Bug_2307_batching_with_conventional_routing : IAsyncLifetime
             }).StartAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         if (_host != null) await _host.StopAsync();
         _host?.Dispose();
@@ -50,14 +66,17 @@ public class Bug_2307_batching_with_conventional_routing : IAsyncLifetime
         // Without the fix, only the array type (BatchedItem[]) gets a listener, not the element type.
         var expectedQueueName = typeof(BatchedItem).ToMessageTypeName().ToLowerInvariant();
 
-        var endpoints = runtime.Options.Transports.AllEndpoints()
-            .Where(x => x is AzureServiceBusQueue)
+        // QueueName, not EndpointName: the former is the Azure Service Bus entity this convention is
+        // supposed to have created, the latter is a friendly label that deliberately keeps the
+        // unsanitized type name. See the note on this class.
+        var queues = runtime.Options.Transports.AllEndpoints()
+            .OfType<AzureServiceBusQueue>()
             .Where(x => x.IsListener)
             .ToArray();
 
-        endpoints.ShouldContain(
-            e => e.EndpointName == expectedQueueName,
-            $"Expected a listener endpoint for queue '{expectedQueueName}' but found only: {string.Join(", ", endpoints.Select(e => e.EndpointName))}");
+        queues.ShouldContain(
+            q => q.QueueName == expectedQueueName,
+            $"Expected a listener for Azure Service Bus queue '{expectedQueueName}' but found only: {string.Join(", ", queues.Select(q => q.QueueName))}");
     }
 }
 

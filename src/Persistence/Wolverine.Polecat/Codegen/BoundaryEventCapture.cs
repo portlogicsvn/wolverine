@@ -4,6 +4,7 @@ using JasperFx.CodeGeneration.Frames;
 using JasperFx.CodeGeneration.Model;
 using JasperFx.Core;
 using JasperFx.Core.Reflection;
+using JasperFx.Events.Tags;
 using Polecat.Events.Dcb;
 using Wolverine.Configuration;
 using Wolverine.Runtime.Handlers;
@@ -26,7 +27,7 @@ internal class RegisterBoundaryEventsFrame<T> : MethodCall where T : class
     {
         return responseType.CanBeCastTo<IEnumerable<object>>()
             ? ReflectionHelper.GetMethod<IEventBoundary<T>>(x => x.AppendMany(new List<object>()))!
-            : ReflectionHelper.GetMethod<IEventBoundary<T>>(x => x.AppendOne(null))!;
+            : ReflectionHelper.GetMethod<IEventBoundary<T>>(x => x.AppendOne(null!))!;
     }
 }
 

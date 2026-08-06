@@ -3,6 +3,7 @@ using Confluent.Kafka;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using JasperFx.Resources;
+using Wolverine.Transports.Sending;
 using Wolverine.Util;
 
 namespace Wolverine.Kafka.Tests;
@@ -12,7 +13,6 @@ public class DocumentationSamples
     public static async Task configure()
     {
         #region sample_bootstrapping_with_kafka
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -105,7 +105,25 @@ public class DocumentationSamples
 
                         // Other configuration
                     })
-                    
+                    // Extends the consumer configuration for this topic only.
+                    // Unlike ConfigureConsumer(), this preserves any existing topic-level
+                    // ConsumerConfig and only applies the changes below.
+                    .ExtendConsumerConfiguration(config =>
+                    {
+                        // This also sets Envelope.GroupId for any messages received
+                        // from this topic.
+                        config.GroupId = "foo";
+                        config.BootstrapServers = KafkaContainerFixture.ConnectionString;
+
+                        // Other additive configuration
+                    })
+                    // Configure circuit breaker behavior for
+                    // this specific Kafka listener
+                    .CircuitBreaker(cb =>
+                    {
+                        cb.MinimumThreshold = 10;
+                        cb.PauseTime = TimeSpan.FromMinutes(1);
+                    })
                     // Fine tune how the Kafka Topic is declared by Wolverine
                     .Specification(spec =>
                     {
@@ -129,7 +147,6 @@ public class DocumentationSamples
     public static async Task disable_producing()
     {
         #region sample_disable_all_kafka_sending
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -149,7 +166,6 @@ public class DocumentationSamples
     public static async Task use_named_brokers()
     {
         #region sample_using_multiple_kafka_brokers
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -173,10 +189,47 @@ public class DocumentationSamples
 
         #endregion
     }
+
+    public static async Task broker_per_tenant()
+    {
+        #region sample_kafka_broker_per_tenant
+        using var host = await Host.CreateDefaultBuilder()
+            .UseWolverine(opts =>
+            {
+                // The "default" / shared Kafka cluster
+                opts.UseKafka(KafkaContainerFixture.ConnectionString)
+                    .AutoProvision()
+
+                    // How should Wolverine route a message whose TenantId is null or
+                    // unknown? FallbackToDefault (the default) uses the shared cluster;
+                    // TenantIdRequired throws; IgnoreUnknownTenants silently drops it.
+                    .TenantIdBehavior(TenantedIdBehavior.FallbackToDefault)
+
+                    // Each tenant gets its OWN dedicated Kafka cluster, but shares the
+                    // topic topology declared below. The tenant inherits the parent's
+                    // client configuration (auth, SASL/SSL, idempotence, DLQ topic, ...)
+                    // with just the bootstrap servers re-pointed.
+                    .AddTenant("tenant-a", "tenant-a-kafka:9092")
+
+                    // Or configure the tenant cluster through the full Kafka surface,
+                    // seeded from the parent settings, when it needs its own credentials:
+                    .AddTenant("tenant-b", tenant => tenant.ConfigureClient(client =>
+                    {
+                        client.BootstrapServers = "tenant-b-kafka:9092";
+                        client.SaslUsername = "tenant-b-user";
+                        client.SaslPassword = "tenant-b-secret";
+                    }));
+
+                // One shared topology; messages are routed to the right cluster at
+                // runtime by Envelope.TenantId (e.g. new DeliveryOptions { TenantId = "tenant-a" }).
+                opts.PublishMessage<ColorMessage>().ToKafkaTopic("colors");
+                opts.ListenToKafkaTopic("colors");
+            }).StartAsync();
+        #endregion
+    }
 }
 
-#region sample_KafkaInstrumentation_middleware
-
+#region sample_kafkainstrumentation_middleware
 public static class KafkaInstrumentation
 {
     // Just showing what data elements are available to use for 
@@ -190,8 +243,7 @@ public static class KafkaInstrumentation
 
 #endregion
 
-#region sample_OurKafkaJsonMapper
-
+#region sample_ourkafkajsonmapper
 // Simplistic envelope mapper that expects every message to be of
 // type "T" and serialized as JSON that works perfectly well w/ our
 // application's default JSON serialization

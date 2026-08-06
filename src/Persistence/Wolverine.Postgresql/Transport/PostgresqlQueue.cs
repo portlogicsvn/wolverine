@@ -31,14 +31,21 @@ public class PostgresqlQueue : Endpoint, IBrokerQueue, IDatabaseBackedEndpoint
         base(ToUri(name, databaseName), role)
     {
         Parent = parent;
-        var queueTableName = $"wolverine_queue_{name}";
-        var scheduledTableName = $"wolverine_queue_{name}_scheduled";
+        // GH-2942: PostgreSQL silently truncates identifiers longer than NAMEDATALEN (63 chars
+        // by default), which made the schema-diff fail with "Missing known broker resources"
+        // because the in-memory model carried the full name and the DB had the truncated one.
+        // PostgresqlIdentifier.Shorten() is the canonical Weasel helper for this - it returns the
+        // name unchanged if it fits, otherwise truncates to 58 chars + a deterministic 4-char
+        // FNV-1a hex hash so two similar long queue names cannot collide on the same table name.
+        var queueTableName = PostgresqlIdentifier.Shorten($"wolverine_queue_{name}");
+        var scheduledTableName = PostgresqlIdentifier.Shorten($"wolverine_queue_{name}_scheduled");
 
         Mode = EndpointMode.Durable;
         Name = name;
         EndpointName = name;
+        BrokerRole = "queue";
 
-        // Gotta be lazy so the schema names get set 
+        // Gotta be lazy so the schema names get set
         _queueTable = new Lazy<QueueTable>(() => new QueueTable(Parent, queueTableName));
         _scheduledMessageTable =
             new Lazy<ScheduledMessageTable>(() => new ScheduledMessageTable(Parent, scheduledTableName));
@@ -176,6 +183,19 @@ public class PostgresqlQueue : Endpoint, IBrokerQueue, IDatabaseBackedEndpoint
         });
     }
 
+    public override IDictionary<string, object> DescribeProperties()
+    {
+        var dict = base.DescribeProperties();
+
+        // Surface the resolved transport-queue schema so `wolverine describe` / endpoint
+        // diagnostics make it visible. Two hosts sharing one Postgres database must set an
+        // identical TransportSchemaName; if they diverge the queue tables live in different
+        // schemas and messages strand silently. This is visibility only - no assertion here.
+        dict[nameof(PostgresqlTransport.TransportSchemaName)] = Parent.TransportSchemaName;
+
+        return dict;
+    }
+
     public async ValueTask<Dictionary<string, string>> GetAttributesAsync()
     {
         var count = await CountAsync();
@@ -228,16 +248,22 @@ public class PostgresqlQueue : Endpoint, IBrokerQueue, IDatabaseBackedEndpoint
 
     public async ValueTask SetupAsync(ILogger logger)
     {
-        await forEveryDatabase(async (source, identifier) => {
-        {
-            await EnsureSchemaExists(identifier, source);
-        }});
+        // Deliberately bypasses the _checkedDatabases memo. SetupAsync is the explicit
+        // "make sure these tables exist right now" call - resource setup, and
+        // IHost.ClearAllWolverineStorageAsync() - so it has to re-apply against a database
+        // whose queue tables were dropped after we last looked.
+        await forEveryDatabase(applySchemaChangesAsync);
     }
 
     internal async Task EnsureSchemaExists(string identifier, NpgsqlDataSource source)
     {
         if (_checkedDatabases.Contains(identifier)) return;
 
+        await applySchemaChangesAsync(source, identifier);
+    }
+
+    private async Task applySchemaChangesAsync(NpgsqlDataSource source, string identifier)
+    {
         await using (var conn = await source.OpenConnectionAsync())
         {
             await QueueTable.ApplyChangesAsync(conn);
@@ -258,7 +284,8 @@ public class PostgresqlQueue : Endpoint, IBrokerQueue, IDatabaseBackedEndpoint
 
             try
             {
-                count += (long)(await conn.CreateCommand($"select count(*) from {QueueTable.Identifier}").ExecuteScalarAsync())!;
+                await using var countCmd = conn.CreateCommand($"select count(*) from {QueueTable.Identifier}");
+                count += (long)(await countCmd.ExecuteScalarAsync())!;
             }
             finally
             {
@@ -277,7 +304,8 @@ public class PostgresqlQueue : Endpoint, IBrokerQueue, IDatabaseBackedEndpoint
             await using var conn = await source.OpenConnectionAsync();
             try
             {
-                count += (long)(await conn.CreateCommand($"select count(*) from {ScheduledTable.Identifier}").ExecuteScalarAsync())!;
+                await using var countCmd = conn.CreateCommand($"select count(*) from {ScheduledTable.Identifier}");
+                count += (long)(await countCmd.ExecuteScalarAsync())!;
             }
             finally
             {

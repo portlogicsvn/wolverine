@@ -31,7 +31,7 @@ builder.UseWolverine(opts =>
 {
     var rabbitMqConnectionString = builder.Configuration.GetConnectionString("rabbit");
 
-    opts.UseRabbitMq(rabbitMqConnectionString);
+    opts.UseRabbitMq(rabbitMqConnectionString!);
 
     opts.ListenToRabbitQueue("emails")
         // Tell Wolverine to assume that all messages
@@ -43,7 +43,7 @@ builder.UseWolverine(opts =>
 using var host = builder.Build();
 await host.StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Samples.cs#L489-L508' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_setting_default_message_type_with_rabbit' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Samples.cs#L494-L512' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_setting_default_message_type_with_rabbit' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 With this setting, there is **no other required headers** for Wolverine to process incoming messages. However, Wolverine will be
@@ -78,7 +78,7 @@ public class SpecialMapper : IRabbitMqEnvelopeMapper
 
         if (envelope.TenantId.IsNotEmpty())
         {
-            outgoing.Headers ??= new Dictionary<string, object>();
+            outgoing.Headers ??= new Dictionary<string, object?>();
             outgoing.Headers["tenant-id"] = envelope.TenantId;
         }
     }
@@ -100,12 +100,12 @@ public class SpecialMapper : IRabbitMqEnvelopeMapper
         {
             // Watch this in real life, some systems will send header values as
             // byte arrays
-            envelope.TenantId = (string)tenantId;
+            envelope.TenantId = (string)tenantId!;
         }
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/SpecialMapper.cs#L8-L55' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_rabbit_special_mapper' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/SpecialMapper.cs#L8-L54' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_rabbit_special_mapper' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 And register that special mapper like this:
@@ -119,7 +119,7 @@ builder.UseWolverine(opts =>
 {
     var rabbitMqConnectionString = builder.Configuration.GetConnectionString("rabbit");
 
-    opts.UseRabbitMq(rabbitMqConnectionString);
+    opts.UseRabbitMq(rabbitMqConnectionString!);
 
     opts.ListenToRabbitQueue("emails")
         // Apply your custom interoperability strategy here
@@ -134,7 +134,7 @@ builder.UseWolverine(opts =>
 using var host = builder.Build();
 await host.StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Samples.cs#L513-L536' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_registering_custom_rabbit_mq_envelope_mapper' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Samples.cs#L517-L539' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_registering_custom_rabbit_mq_envelope_mapper' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 
@@ -156,7 +156,7 @@ Wolverine is the new kid on the block, and it's quite likely that many folks wil
 Fortunately, Wolverine has some ability to exchange messages with NServiceBus applications, so both tools can live and
 work together.
 
-At this point, the interoperability is only built and tested for the [Rabbit MQ transport](./transports/rabbitmq.md).
+At this point, the interoperability is only built and tested for the [Rabbit MQ transport](./index.md).
 
 Here's a sample:
 
@@ -221,8 +221,34 @@ Wolverine = await Host.CreateDefaultBuilder().UseWolverine(opts =>
         // Tell Wolverine to make this endpoint interoperable with MassTransit
         .UseMassTransitInterop(mt =>
         {
-            // optionally customize the inner JSON serialization
+            // optionally customize the inner JSON serialization, or map the Wolverine
+            // tenant id from each incoming MassTransit message (see below)
         })
         .DefaultIncomingMessage<ResponseMessage>().UseForReplies();
 }).StartAsync();
 ```
+
+### Mapping the Tenant Id
+
+When consuming messages from MassTransit, you can derive Wolverine's tenant id for each incoming
+message from either the message body or the MassTransit envelope metadata (headers, addresses,
+correlation ids). Register one or more `MapTenantIdFrom<T>` mappers inside `UseMassTransitInterop`:
+
+```cs
+opts.ListenToRabbitQueue("orders")
+    .UseMassTransitInterop(mt =>
+    {
+        // Pull the tenant id straight off the strongly-typed message body
+        mt.MapTenantIdFrom<OrderPlaced>(env => env.Message?.TenantId);
+
+        // ...or from a MassTransit header carried on the envelope
+        mt.MapTenantIdFrom<OrderShipped>(env =>
+            env.Headers.TryGetValue("tenant-id", out var value) ? value?.ToString() : null);
+    });
+```
+
+The lambda receives the strongly-typed MassTransit envelope (`MassTransitEnvelope<T>`), which exposes
+the deserialized `Message` alongside the MassTransit metadata. Each registration applies only to its own
+message type, and returning `null` or an empty string leaves the tenant id untouched. Tenant mapping
+affects only the inbound (deserialization) path, and works on any MassTransit-interop listener
+(Rabbit MQ, Azure Service Bus, Amazon SQS).

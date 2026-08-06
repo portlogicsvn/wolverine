@@ -1,7 +1,6 @@
 namespace Wolverine;
 
-#region sample_StatefulSagaOf
-
+#region sample_statefulsagaof
 /// <summary>
 ///     Base class for implementing handlers for a stateful saga
 /// </summary>
@@ -30,7 +29,12 @@ public abstract class Saga
     /// <summary>
     /// For saga providers that support this, this is a version of the saga to help enforce optimistic concurrency
     /// protections. This value is the current version that is stored by saga storage and will
-    /// be incremented upon save
+    /// be incremented upon save.
+    /// Typed as <see cref="int"/> to align with <c>JasperFx.IRevisioned.Version</c>
+    /// (an <see cref="int"/>), so sagas can implement <c>IRevisioned</c> directly
+    /// without a shadow override. (JasperFx 2.0 rc split versioning into
+    /// <c>IRevisioned</c> = <see cref="int"/> and <c>ILongVersioned</c> = <see cref="long"/>;
+    /// sagas use the <see cref="int"/> revision.)
     /// </summary>
     public int Version { get; set; }
 }
@@ -38,11 +42,23 @@ public abstract class Saga
 #endregion
 
 /// <summary>
-/// Optimistic concurrency exception from Wolverine saga operations
+/// Optimistic concurrency exception from Wolverine saga operations. Inherits
+/// <see cref="JasperFx.ConcurrencyException"/> (GH-3444) so that a single
+/// <c>OnException&lt;ConcurrencyException&gt;()</c> policy catches saga concurrency failures across every
+/// storage provider — Marten already surfaces JasperFx's type, and the EF Core / lightweight / CosmosDb
+/// saga paths throw this one.
 /// </summary>
-public class SagaConcurrencyException : Exception
+public class SagaConcurrencyException : JasperFx.ConcurrencyException
 {
     public SagaConcurrencyException(string message) : base(message)
+    {
+    }
+
+    /// <summary>
+    /// Keeps the underlying store's own concurrency failure (say, a CosmosDB 412 Precondition Failed)
+    /// attached, so error handling policies and logs can still see what the database actually said
+    /// </summary>
+    public SagaConcurrencyException(string message, Exception innerException) : base(message, innerException)
     {
     }
 }

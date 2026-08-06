@@ -11,8 +11,6 @@ using Wolverine.Runtime.Serialization;
 using Wolverine.Transports;
 using Wolverine.Util;
 using Xunit;
-using Xunit.Abstractions;
-
 namespace Wolverine.Redis.Tests;
 
 [Collection("NativeSchedulingRetryTests")]
@@ -63,7 +61,7 @@ public class NativeSchedulingRetryTests
             {
                 opts.ServiceName = "RetryTestService";
                 opts.UseRedisTransport(RedisContainerFixture.ConnectionString).AutoProvision();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var runtime = host.Services.GetRequiredService<IWolverineRuntime>();
         var transport = runtime.Options.Transports.GetOrCreate<RedisTransport>();
@@ -94,7 +92,7 @@ public class NativeSchedulingRetryTests
         await endpoint!.ScheduleRetryAsync(envelope, CancellationToken.None);
 
         // Wait for Redis to persist
-        await Task.Delay(200);
+        await Task.Delay(200, TestContext.Current.CancellationToken);
 
         // Verify the message is in the scheduled set
         var scheduledCount = await database.SortedSetLengthAsync(scheduledKey);

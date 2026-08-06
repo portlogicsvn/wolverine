@@ -44,7 +44,7 @@ public interface IOrderCommand
 public record ApproveOrder(string OrderId) : IOrderCommand;
 public record CancelOrder(string OrderId) : IOrderCommand;
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/PartitioningSamples.cs#L178-L188' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_order_commands_for_partitioning' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/PartitioningSamples.cs#L171-L180' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_order_commands_for_partitioning' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 If we were only running our system on a single node so we only care about a single process, we can do this:
@@ -78,7 +78,7 @@ builder.UseWolverine(opts =>
         });
 });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/PartitioningSamples.cs#L45-L73' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_opting_into_local_partitioned_routing' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/PartitioningSamples.cs#L44-L71' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_opting_into_local_partitioned_routing' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 So let's talk about what we set up in the code above. First, we've taught Wolverine how to determine the group
@@ -88,7 +88,7 @@ At runtime, when you publish an `IOrderCommand` within the system, Wolverine wil
 (it does get written to `Envelope.GroupId`). Once Wolverine has that `GroupId`, it needs to determine which of the "orders#"
 queues to send the message, and the easiest way to explain this is really just to show the internal code:
 
-<!-- snippet: sample_SlotForSending -->
+<!-- snippet: sample_slotforsending -->
 <a id='snippet-sample_slotforsending'></a>
 ```cs
 /// <summary>
@@ -114,7 +114,7 @@ public static int SlotForSending(this Envelope envelope, int numberOfSlots, Mess
     return Math.Abs(groupId.GetDeterministicHashCode() % numberOfSlots);
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Wolverine/Runtime/Partitioning/PartitionedMessagingExtensions.cs#L17-L42' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_slotforsending' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Wolverine/Runtime/Partitioning/PartitionedMessagingExtensions.cs#L17-L41' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_slotforsending' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 The code above manages publishing between the "orders1", "orders2", "orders3", and "orders4" queues. Inside of each of the 
@@ -164,7 +164,7 @@ opts.MessagePartitioning
         });
     });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/MartenTests/concurrency_resilient_sharded_processing.cs#L112-L134' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_inferred_message_group_id' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/MartenTests/concurrency_resilient_sharded_processing.cs#L114-L135' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_inferred_message_group_id' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 The built in rules *at this point* include:
@@ -177,7 +177,7 @@ The built in rules *at this point* include:
 
 Internally, Wolverine is using a list of implementations of this interface:
 
-<!-- snippet: sample_IGroupingRule -->
+<!-- snippet: sample_igroupingrule -->
 <a id='snippet-sample_igroupingrule'></a>
 ```cs
 /// <summary>
@@ -188,7 +188,7 @@ public interface IGroupingRule
     bool TryFindIdentity(Envelope envelope, out string groupId);
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Wolverine/Runtime/Partitioning/IGroupingRule.cs#L3-L13' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_igroupingrule' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Wolverine/Runtime/Partitioning/IGroupingRule.cs#L3-L12' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_igroupingrule' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Definitely note that these rules are fall through, and the order you declare the rules
@@ -220,7 +220,7 @@ builder.UseWolverine(opts =>
         .ByRule(new MySpecialGroupingRule());
 });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/PartitioningSamples.cs#L86-L110' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_configuring_message_grouping_rules' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/PartitioningSamples.cs#L84-L107' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_configuring_message_grouping_rules' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Grouping by Property Name <Badge type="tip" text="5.17" />
@@ -251,7 +251,7 @@ builder.UseWolverine(opts =>
         .ByPropertyNamed("StreamId", "Id");
 });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/PartitioningSamples.cs#L115-L129' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_configuring_by_property_name' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/PartitioningSamples.cs#L112-L125' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_configuring_by_property_name' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Explicit Group Ids
@@ -273,7 +273,7 @@ public static async Task SendMessageToGroup(IMessageBus bus)
         new() { GroupId = "agroup" });
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/PartitioningSamples.cs#L132-L141' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_send_message_with_group_id' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/PartitioningSamples.cs#L128-L136' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_send_message_with_group_id' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 If you are using [cascaded messages](/guide/handlers/cascading) from your message handlers, there's an extension method helper
@@ -287,7 +287,7 @@ public static IEnumerable<object> Handle(ApproveInvoice command)
     yield return new PayInvoice(command.Id).WithGroupId("aaa");
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/PartitioningSamples.cs#L168-L175' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_with_group_id_as_cascading_message' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/PartitioningSamples.cs#L162-L168' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_with_group_id_as_cascading_message' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Partitioned Publishing Locally
@@ -329,7 +329,7 @@ builder.UseWolverine(opts =>
         });
 });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/PartitioningSamples.cs#L45-L73' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_opting_into_local_partitioned_routing' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/PartitioningSamples.cs#L44-L71' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_opting_into_local_partitioned_routing' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Partitioned Processing at any Endpoint
@@ -363,7 +363,7 @@ builder.UseWolverine(opts =>
         .PartitionProcessingByGroupId(PartitionSlots.Seven);
 });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/PartitioningSamples.cs#L14-L40' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_configuring_partitioned_processing_on_any_listener' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/PartitioningSamples.cs#L14-L39' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_configuring_partitioned_processing_on_any_listener' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Partitioned Publishing to External Transports
@@ -379,8 +379,24 @@ application cluster while guaranteeing that messages within a group id are proce
 parallelism between message groups.
 :::
 
-At this point Wolverine has direct support for partitioned routing to Rabbit MQ or Amazon SQS. Note that in both
-of the following examples, Wolverine is both setting up publishing rules out to these queues, and also configuring
+Wolverine has direct support for partitioned routing to all ten of the transports that support the
+[global partitioning](#global-partitioning) topology through a `PublishToSharded*()` companion to each
+`UseSharded*()` extension method:
+
+| Transport | Extension Method |
+|-----------|-----------------|
+| RabbitMQ | `PublishToShardedRabbitQueues()` |
+| Kafka | `PublishToShardedKafkaTopics()` |
+| Amazon SQS | `PublishToShardedAmazonSqsQueues()` |
+| Pulsar | `PublishToShardedPulsarTopics()` |
+| Azure Service Bus | `PublishToShardedAzureServiceBusQueues()` |
+| GCP Pub/Sub | `PublishToShardedPubsubTopics()` |
+| NATS | `PublishToShardedNatsSubjects()` |
+| Redis Streams | `PublishToShardedRedisStreams()` |
+| PostgreSQL | `PublishToShardedPostgresqlQueues()` |
+| Sql Server | `PublishToShardedSqlServerQueues()` |
+
+Note that in both of the following examples, Wolverine is both setting up publishing rules out to these queues, and also configuring
 listeners for the queues. Beyond that, Wolverine is making each queue be "exclusive," meaning that only one node
 within a cluster is actively listening and processing messages from each partitioned queue at any one time.
 
@@ -409,7 +425,7 @@ opts.MessagePartitioning.PublishToShardedRabbitQueues("letters", 4, topology =>
     topology.ConfigureListening(x => x.BufferedInMemory());
 });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/concurrency_resilient_sharded_processing.cs#L71-L93' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_defining_partitioned_routing_for_rabbitmq' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/concurrency_resilient_sharded_processing.cs#L71-L92' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_defining_partitioned_routing_for_rabbitmq' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 And for Amazon SQS:
@@ -430,7 +446,7 @@ opts.MessagePartitioning.PublishToShardedAmazonSqsQueues("letters", 4, topology 
 
 });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/AWS/Wolverine.AmazonSqs.Tests/concurrency_resilient_sharded_processing.cs#L72-L87' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_partitioned_publishing_through_amazon_sqs' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/AWS/Wolverine.AmazonSqs.Tests/concurrency_resilient_sharded_processing.cs#L73-L87' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_partitioned_publishing_through_amazon_sqs' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Propagating GroupId to PartitionKey <Badge type="tip" text="5.17" />
@@ -458,7 +474,7 @@ builder.UseWolverine(opts =>
     opts.Policies.PropagateGroupIdToPartitionKey();
 });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/PartitioningSamples.cs#L145-L159' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_propagate_group_id_to_partition_key' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/PartitioningSamples.cs#L140-L153' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_propagate_group_id_to_partition_key' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ::: tip
@@ -468,7 +484,7 @@ The rule will not override an explicitly set `PartitionKey` on an outgoing envel
 
 ## Global Partitioning
 
-Global partitioning extends the [sharded publishing](#sharded-publishing) concept to support multi-node deployments where messages must be processed sequentially by group id across the entire cluster, not just within a single node.
+Global partitioning extends the [partitioned publishing](#partitioned-publishing-to-external-transports) concept to support multi-node deployments where messages must be processed sequentially by group id across the entire cluster, not just within a single node.
 
 ### How It Works
 
@@ -504,6 +520,20 @@ Each supported transport has its own extension method for configuring the extern
 | Kafka | `UseShardedKafkaTopics()` | [Kafka Global Partitioning](/guide/messaging/transports/kafka#global-partitioning) |
 | Amazon SQS | `UseShardedAmazonSqsQueues()` | [SQS Global Partitioning](/guide/messaging/transports/sqs/#global-partitioning) |
 | Pulsar | `UseShardedPulsarTopics()` | [Pulsar Global Partitioning](/guide/messaging/transports/pulsar#global-partitioning) |
+| Azure Service Bus | `UseShardedAzureServiceBusQueues()` | [Azure Service Bus Global Partitioning](/guide/messaging/transports/azureservicebus/#global-partitioning) |
+| GCP Pub/Sub | `UseShardedPubsubTopics()` | [GCP Pub/Sub Global Partitioning](/guide/messaging/transports/gcp-pubsub/#global-partitioning) |
+| NATS | `UseShardedNatsSubjects()` | [NATS Global Partitioning](/guide/messaging/transports/nats#global-partitioning) |
+| Redis Streams | `UseShardedRedisStreams()` | [Redis Global Partitioning](/guide/messaging/transports/redis#global-partitioning) |
+| PostgreSQL | `UseShardedPostgresqlQueues()` | [PostgreSQL Global Partitioning](/guide/durability/postgresql#global-partitioning) |
+| Sql Server | `UseShardedSqlServerQueues()` | [Sql Server Global Partitioning](/guide/durability/sqlserver#global-partitioning) |
+
+All ten extension methods share the same signature, `(string baseName, int numberOfEndpoints)`, and create endpoints named `baseName1`, `baseName2`, and so on, with matching companion local queues. Swap the RabbitMQ call in the example below for any of the others to use a different transport, for example `topology.UseShardedAzureServiceBusQueues("sequenced", 5)` or `topology.UseShardedNatsSubjects("sequenced", 5)`.
+
+A couple of transport-specific notes:
+
+* **Kafka** -- all nodes listening to the sharded topics share a single Kafka consumer group named after the base name so that Kafka assigns each topic's partitions exclusively to one consumer at a time. Wolverine stamps that consumer group id onto the `GroupId` of incoming envelopes by default, which you can turn off per listener with `DisableConsumerGroupIdStamping()` when the consumer group name is not meaningful as envelope metadata (e.g. when combined with `PropagateGroupIdToPartitionKey()`).
+* **Azure Service Bus** -- the broker's native [session identifiers](/guide/messaging/transports/azureservicebus/session-identifiers) provide strictly ordered, per-session processing with a single queue and may be a simpler alternative if you are exclusively on Azure Service Bus. Global partitioning is the transport-agnostic option that behaves the same way across every broker in the table above.
+* **PostgreSQL / Sql Server** -- the database queues need no extra infrastructure at all; each shard is just another pair of tables in the database you already have. They are inherently durable, which suits global partitioning since the topology forces `EndpointMode.Durable` on every slot anyway. The Sql Server shard queues additionally opt into the [`seq`-clustered high-throughput table layout](/guide/durability/sqlserver#optimizing-queue-throughput) by default.
 
 ### Example with RabbitMQ
 
@@ -524,7 +554,6 @@ using var host = await Host.CreateDefaultBuilder()
             // message grouping based on Saga identity among other things
             .UseInferredMessageGrouping()
 
-
             .GlobalPartitioned(topology =>
             {
                 // Creates 5 sharded RabbitMQ queues named "sequenced1" through "sequenced5"
@@ -535,7 +564,7 @@ using var host = await Host.CreateDefaultBuilder()
             });
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Samples.cs#L721-L746' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_global_partitioned_with_rabbit_mq' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Samples.cs#L718-L744' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_global_partitioned_with_rabbit_mq' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ### Validation
@@ -545,5 +574,42 @@ Wolverine validates global partitioning configuration at startup. It will throw 
 - No message type matching policies are configured
 - No external transport topology is configured
 - The external and local topologies have different shard counts
+
+### Native Per-Transport Alternatives
+
+Global partitioning is the *portable* answer: it behaves identically on all ten transports because
+Wolverine owns the slot assignment and the failover. Several brokers also ship a native primitive
+that solves the same problem their own way, and on a single-broker system that can be the simpler
+choice.
+
+| Transport | Native primitive | How to use it |
+|-----------|-----------------|---------------|
+| Azure Service Bus | Sessions | [`RequireSessions()`](/guide/messaging/transports/azureservicebus/session-identifiers) with the session id set from your group id |
+| Amazon SQS | FIFO `MessageGroupId` | A FIFO queue plus [`EnableFairQueueMessageGroups()`](/guide/messaging/transports/sqs/) |
+| GCP Pub/Sub | Ordering keys | `EnableMessageOrdering`; Wolverine already maps the envelope's `GroupId` onto `OrderingKey` |
+| Pulsar | `KeyShared` subscription | `SubscriptionType(SubscriptionType.KeyShared)` on the listener |
+| Kafka | Partitions + consumer group | One topic with N partitions plus [`PropagateGroupIdToPartitionKey()`](/guide/messaging/transports/kafka) |
+
+The important difference is the **unit of ordering**:
+
+* **Global partitioning orders per _slot_.** Two unrelated group ids that hash to the same slot are
+  serialized against each other. That is stronger than you asked for -- it costs some parallelism,
+  but the number of slots is fixed, so there is no resource that grows with your key count.
+* **Most native primitives order per _key_.** Sessions, message groups, ordering keys and
+  `KeyShared` all allow unrelated keys to proceed in parallel, which is usually what you actually
+  wanted. The trade is that the broker carries state per *active key*, so a system that mints a
+  fresh group id per message will accumulate sessions/groups until it hits a service limit.
+
+The second difference is **poison-message behavior**. Under a native per-key primitive, a message
+that keeps failing blocks its entire key until it dead-letters. Under global partitioning it only
+occupies one slot's companion local queue, which continues draining other group ids up to its
+`MaxDegreeOfParallelism`.
+
+::: tip Which should I use?
+Reach for the native primitive when you are committed to one broker, you want unrelated keys to run
+in parallel, and your group ids come from a bounded set (tenants, accounts, streams). Reach for
+global partitioning when you want the same behavior across brokers, when your group id cardinality
+is unbounded, or when a single poison message must not stall a key.
+:::
 
 

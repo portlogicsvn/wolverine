@@ -2,6 +2,16 @@
 
 Also see the full [quickstart code](https://github.com/JasperFx/wolverine/tree/main/src/Samples/Quickstart) on GitHub.
 
+::: tip Wolverine plays best with transparent IoC registrations
+Wolverine generates handler adapter code at startup by reading your IoC registrations. Stick to concrete-type
+registrations (`AddSingleton<UserRepository>()`, `AddScoped<TInterface, TImpl>()`) and constructor injection
+into your handlers and you'll never need to think about Wolverine's code generation — it just works.
+If you have a service registered with an opaque lambda factory (`AddScoped<T>(sp => ...)`) that handlers
+need to consume, see [Code Generation → Service Location](/guide/codegen.html#wolverine-code-generation-and-ioc)
+for the opt-in mechanism. As of 6.0, opaque registrations that handlers need will surface as a clear
+startup error rather than a silent fallback.
+:::
+
 For a first application, build a very simple issue tracking system for
 our own usage. If you're reading this web page, it's a pretty safe bet you spend quite a bit of time
 working with an issue tracking system. :)
@@ -32,17 +42,17 @@ public record CreateIssue(Guid OriginatorId, string Title, string Description);
 <sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/Quickstart/CreateIssue.cs#L3-L7' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_quickstart_commands' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
-<!-- snippet: sample_Quickstart_commands_AssignIssue -->
+<!-- snippet: sample_quickstart_commands_assignissue -->
 <a id='snippet-sample_quickstart_commands_assignissue'></a>
 ```cs
 public record AssignIssue(Guid IssueId, Guid AssigneeId);
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/Quickstart/AssignIssue.cs#L3-L7' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_quickstart_commands_assignissue' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/Quickstart/AssignIssue.cs#L3-L6' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_quickstart_commands_assignissue' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Let's jump right into the `Program.cs` file of our new web service:
 
-<!-- snippet: sample_Quickstart_Program -->
+<!-- snippet: sample_quickstart_program -->
 <a id='snippet-sample_quickstart_program'></a>
 ```cs
 using JasperFx;
@@ -51,9 +61,8 @@ using Wolverine;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// The almost inevitable inclusion of Swashbuckle:)
-builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+// The almost inevitable inclusion of OpenApi:)
+builder.Services.AddOpenApi();
 
 // For now, this is enough to integrate Wolverine into
 // your application, but there'll be *many* more
@@ -74,9 +83,7 @@ app.MapPost("/issues/create", (CreateIssue body, IMessageBus bus) => bus.InvokeA
 // An endpoint to assign an issue to an existing user that delegates to Wolverine as a mediator
 app.MapPost("/issues/assign", (AssignIssue body, IMessageBus bus) => bus.InvokeAsync(body));
 
-// Swashbuckle inclusion
-app.UseSwagger();
-app.UseSwaggerUI();
+app.MapOpenApi();
 
 app.MapGet("/", () => Results.Redirect("/swagger"));
 
@@ -85,7 +92,7 @@ app.MapGet("/", () => Results.Redirect("/swagger"));
 // your Wolverine application
 return await app.RunJasperFxCommands(args);
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/Quickstart/Program.cs#L1-L43' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_quickstart_program' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/Quickstart/Program.cs#L1-L39' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_quickstart_program' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ::: tip
@@ -106,7 +113,7 @@ In that method, Wolverine will direct the command to the correct handler and inv
 inline. In a simplistic form, here is the entire handler file for the `CreateIssue`
 command:
 
-<!-- snippet: sample_Quickstart_CreateIssueHandler -->
+<!-- snippet: sample_quickstart_createissuehandler -->
 <a id='snippet-sample_quickstart_createissuehandler'></a>
 ```cs
 namespace Quickstart;
@@ -141,7 +148,7 @@ public class CreateIssueHandler
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/Quickstart/CreateIssueHandler.cs#L1-L35' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_quickstart_createissuehandler' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/Quickstart/CreateIssueHandler.cs#L1-L34' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_quickstart_createissuehandler' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Hopefully that code is simple enough, but let's talk what you do not see in this code or
@@ -167,7 +174,7 @@ the initial web service call.
 
 The `IssueCreated` event message will be handled by this code:
 
-<!-- snippet: sample_Quickstart_IssueCreatedHandler -->
+<!-- snippet: sample_quickstart_issuecreatedhandler -->
 <a id='snippet-sample_quickstart_issuecreatedhandler'></a>
 ```cs
 public static class IssueCreatedHandler
@@ -192,7 +199,7 @@ public static class IssueCreatedHandler
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/Quickstart/IssueCreatedHandler.cs#L5-L29' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_quickstart_issuecreatedhandler' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/Quickstart/IssueCreatedHandler.cs#L5-L28' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_quickstart_issuecreatedhandler' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Now, you'll notice that Wolverine is happy to allow you to use static methods as

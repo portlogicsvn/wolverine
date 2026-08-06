@@ -1,15 +1,16 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
     <PropertyGroup>
-        <TargetFramework>net7.0</TargetFramework>
+        <OutputType>Exe</OutputType>
         <IsPackable>false</IsPackable>
+        <IsTestProject>true</IsTestProject>
     </PropertyGroup>
 
     <ItemGroup>
         <PackageReference Include="Alba" />
         <PackageReference Include="Microsoft.NET.Test.Sdk" />
         <PackageReference Include="Shouldly" />
-        <PackageReference Include="xunit" />
+        <PackageReference Include="xunit.v3" />
         <PackageReference Include="xunit.runner.visualstudio">
             <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
             <PrivateAssets>all</PrivateAssets>
@@ -37,4 +38,9 @@
     <ItemGroup>
         <Content Include="$(SolutionDir)xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
     </ItemGroup>
+  <ItemGroup>
+    <!-- Core WolverineFx no longer ships the Roslyn runtime compiler (#2876); this
+         Dynamic-mode test project needs it. The package auto-registers via its [WolverineModule]. -->
+    <ProjectReference Include="../../../Wolverine.RuntimeCompilation/Wolverine.RuntimeCompilation.csproj" />
+  </ItemGroup>
 </Project>

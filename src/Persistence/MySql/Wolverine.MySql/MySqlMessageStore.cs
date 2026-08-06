@@ -1,4 +1,5 @@
 using System.Data.Common;
+using System.Diagnostics.CodeAnalysis;
 using ImTools;
 using JasperFx;
 using JasperFx.Core;
@@ -41,6 +42,14 @@ internal class MySqlMessageStore : MessageDatabase<MySqlConnection>
         Id = new DatabaseId(descriptor.ServerName, descriptor.DatabaseName);
     }
 
+    // typeof(DatabaseSagaSchema<,>).CloseAndBuildAs<IDatabaseSagaSchema>(...) at L59
+    // closes the saga schema generic over (sagaType, idType) at startup. Same
+    // chunk D / I / J / K / AE / AF / AG CloseAndBuildAs pattern: AOT-clean apps
+    // preserve saga state types via TrimmerRootDescriptor. Cross-link to #2769.
+    [UnconditionalSuppressMessage("Trimming", "IL2026",
+        Justification = "DatabaseSagaSchema<,> closed over runtime saga / id types at startup; AOT consumers preserve via TrimmerRootDescriptor. See AOT guide / #2769.")]
+    [UnconditionalSuppressMessage("AOT", "IL3050",
+        Justification = "DatabaseSagaSchema<,> closed over runtime saga / id types at startup; AOT consumers preserve via TrimmerRootDescriptor. See AOT guide / #2769.")]
     public MySqlMessageStore(DatabaseSettings databaseSettings, DurabilitySettings settings,
         MySqlDataSource dataSource,
         ILogger<MySqlMessageStore> logger, IEnumerable<SagaTableDefinition> sagaTypes) : base(databaseSettings,
@@ -74,7 +83,8 @@ internal class MySqlMessageStore : MessageDatabase<MySqlConnection>
     {
         if (ex is MySqlException mySqlException)
         {
-            return mySqlException.Number == 1062;
+            if (mySqlException.Number == 1062) return true;
+            return mySqlException.Message.Contains("Duplicate entry");
         }
 
         return false;
@@ -159,6 +169,15 @@ internal class MySqlMessageStore : MessageDatabase<MySqlConnection>
         return false;
     }
 
+    protected override async Task ReleaseLockAsync(int lockId, MySqlConnection connection, CancellationToken token)
+    {
+        var lockName = $"wolverine_{lockId}";
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT RELEASE_LOCK(@lockName)";
+        cmd.Parameters.AddWithValue("@lockName", lockName);
+        await cmd.ExecuteScalarAsync(token).ConfigureAwait(false);
+    }
+
     protected override DbCommand buildFetchSql(MySqlConnection conn, DbObjectName tableName, string[] columnNames,
         int maxRecords)
     {
@@ -222,7 +241,7 @@ internal class MySqlMessageStore : MessageDatabase<MySqlConnection>
         {
             if (discards.Length > 0)
             {
-                var deleteCmd = conn.CreateCommand();
+                await using var deleteCmd = conn.CreateCommand();
                 var deletePlaceholders = MySqlCommandExtensions.WithEnvelopeIds(deleteCmd, "id", discards);
                 deleteCmd.CommandText =
                     $"DELETE FROM {SchemaName}.{DatabaseConstants.OutgoingTable} WHERE id IN ({deletePlaceholders})";
@@ -231,7 +250,7 @@ internal class MySqlMessageStore : MessageDatabase<MySqlConnection>
 
             if (reassigned.Length > 0)
             {
-                var reassignCmd = conn.CreateCommand();
+                await using var reassignCmd = conn.CreateCommand();
                 var reassignPlaceholders = MySqlCommandExtensions.WithEnvelopeIds(reassignCmd, "rid", reassigned);
                 reassignCmd.CommandText =
                     $"UPDATE {SchemaName}.{DatabaseConstants.OutgoingTable} SET owner_id = @node WHERE id IN ({reassignPlaceholders})";
@@ -251,7 +270,7 @@ internal class MySqlMessageStore : MessageDatabase<MySqlConnection>
         if (envelopes.Length == 0) return;
 
         await using var conn = await MySqlDataSource.OpenConnectionAsync(_cancellation);
-        var cmd = conn.CreateCommand();
+        await using var cmd = conn.CreateCommand();
         var placeholders = MySqlCommandExtensions.WithEnvelopeIds(cmd, "id", envelopes);
         cmd.CommandText = $"DELETE FROM {SchemaName}.{DatabaseConstants.OutgoingTable} WHERE id IN ({placeholders})";
         await cmd.ExecuteNonQueryAsync(_cancellation);
@@ -268,7 +287,7 @@ internal class MySqlMessageStore : MessageDatabase<MySqlConnection>
         int limit)
     {
         await using var conn = await MySqlDataSource.OpenConnectionAsync(_cancellation);
-        var cmd = conn.CreateCommand();
+        await using var cmd = conn.CreateCommand();
         cmd.CommandText = _findAtLargeEnvelopesSql;
         cmd.Parameters.AddWithValue("@address", listenerAddress.ToString());
         cmd.Parameters.AddWithValue("@limit", limit);
@@ -287,7 +306,7 @@ internal class MySqlMessageStore : MessageDatabase<MySqlConnection>
         if (HasDisposed) return false;
 
         await using var conn = await MySqlDataSource.OpenConnectionAsync(cancellation);
-        var cmd = conn.CreateCommand();
+        await using var cmd = conn.CreateCommand();
 
         if (Durability.MessageIdentity == MessageIdentity.IdOnly)
         {
@@ -331,7 +350,7 @@ internal class MySqlMessageStore : MessageDatabase<MySqlConnection>
             var tx = await conn.BeginTransactionAsync(cancellationToken);
 
             var lockName = $"wolverine_{Settings.ScheduledJobLockId}";
-            var lockCmd = conn.CreateCommand();
+            await using var lockCmd = conn.CreateCommand();
             lockCmd.Transaction = tx;
             lockCmd.CommandText = "SELECT GET_LOCK(@lockName, 0)";
             lockCmd.Parameters.AddWithValue("@lockName", lockName);
@@ -344,7 +363,7 @@ internal class MySqlMessageStore : MessageDatabase<MySqlConnection>
             {
                 var builder = new DbCommandBuilder(new MySqlCommand());
                 WriteLoadScheduledEnvelopeSql(builder, DateTimeOffset.UtcNow);
-                var cmd = (MySqlCommand)builder.Compile();
+                await using var cmd = (MySqlCommand)builder.Compile();
                 cmd.Connection = conn;
                 cmd.Transaction = tx;
 
@@ -353,7 +372,7 @@ internal class MySqlMessageStore : MessageDatabase<MySqlConnection>
 
                 if (!envelopes.Any())
                 {
-                    var releaseLockCmd = conn.CreateCommand();
+                    await using var releaseLockCmd = conn.CreateCommand();
                     releaseLockCmd.Transaction = tx;
                     releaseLockCmd.CommandText = "SELECT RELEASE_LOCK(@lockName)";
                     releaseLockCmd.Parameters.AddWithValue("@lockName", lockName);
@@ -364,7 +383,7 @@ internal class MySqlMessageStore : MessageDatabase<MySqlConnection>
                 }
 
                 var ids = envelopes.Select(x => x.Id).ToArray();
-                var reassignCmd = conn.CreateCommand();
+                await using var reassignCmd = conn.CreateCommand();
                 reassignCmd.Transaction = tx;
                 var placeholders = MySqlCommandExtensions.WithIdList(reassignCmd, "id", ids);
                 reassignCmd.CommandText =
@@ -372,13 +391,20 @@ internal class MySqlMessageStore : MessageDatabase<MySqlConnection>
                 reassignCmd.Parameters.AddWithValue("@owner", durabilitySettings.AssignedNodeNumber);
                 await reassignCmd.ExecuteNonQueryAsync(_cancellation);
 
-                var releaseLockCmd2 = conn.CreateCommand();
+                await using var releaseLockCmd2 = conn.CreateCommand();
                 releaseLockCmd2.Transaction = tx;
                 releaseLockCmd2.CommandText = "SELECT RELEASE_LOCK(@lockName)";
                 releaseLockCmd2.Parameters.AddWithValue("@lockName", lockName);
                 await releaseLockCmd2.ExecuteScalarAsync(cancellationToken);
 
                 await tx.CommitAsync(cancellationToken);
+
+                // Stamp owning store on each row so downstream pipeline routes
+                // its writes back here. See GH-2576.
+                foreach (var envelope in envelopes)
+                {
+                    envelope.Store = this;
+                }
 
                 await runtime.EnqueueDirectlyAsync(envelopes);
             }
@@ -396,7 +422,7 @@ internal class MySqlMessageStore : MessageDatabase<MySqlConnection>
         await using var conn = CreateConnection();
         await conn.OpenAsync(token);
 
-        var cmd = conn.CreateCommand();
+        await using var cmd = conn.CreateCommand();
         if (table.MessageTypeColumnName.IsEmpty())
         {
             cmd.CommandText =
@@ -518,6 +544,16 @@ internal class MySqlMessageStore : MessageDatabase<MySqlConnection>
             restrictionTable.AddColumn<string>("type").NotNull();
             restrictionTable.AddColumn<int>("node").NotNull().DefaultValue(0);
             yield return restrictionTable;
+
+            // Dynamic listener registry (GH-2685). Provisioned only when the opt-in
+            // flag is set so existing apps see no migration churn.
+            if (Durability.EnableDynamicListeners)
+            {
+                var listenerTable =
+                    new Table(new DbObjectName(SchemaName, DatabaseConstants.ListenersTableName));
+                listenerTable.AddColumn<string>("uri").AsPrimaryKey();
+                yield return listenerTable;
+            }
         }
 
         foreach (var table in _otherTables)
@@ -597,7 +633,7 @@ WHERE id IN (
         {
             while (deleted > 0)
             {
-                var cmd = conn.CreateCommand();
+                await using var cmd = conn.CreateCommand();
                 cmd.CommandText = sql;
                 deleted = await cmd.ExecuteNonQueryAsync();
                 await Task.Delay(10.Milliseconds());

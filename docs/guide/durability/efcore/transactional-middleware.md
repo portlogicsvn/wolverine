@@ -10,7 +10,7 @@ builder.Host.UseWolverine(opts =>
 {
     // Setting up Sql Server-backed message storage
     // This requires a reference to Wolverine.SqlServer
-    opts.PersistMessagesWithSqlServer(connectionString, "wolverine");
+    opts.PersistMessagesWithSqlServer(connectionString!, "wolverine");
 
     // Set up Entity Framework Core as the support
     // for Wolverine's transactional middleware
@@ -21,11 +21,11 @@ builder.Host.UseWolverine(opts =>
     opts.Policies.UseDurableLocalQueues();
 });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/EFCoreSample/ItemService/Program.cs#L36-L53' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_registering_efcore_middleware' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/EFCoreSample/ItemService/Program.cs#L50-L66' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_registering_efcore_middleware' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ::: tip
-When using the opt in `Handlers.AutoApplyTransactions()` option, Wolverine (really Lamar) can detect that your handler method uses a `DbContext` if it's a method argument,
+When using the opt in `Handlers.AutoApplyTransactions()` option, Wolverine can detect that your handler method uses a `DbContext` if it's a method argument,
 a dependency of any service injected as a method argument, or a dependency of any service injected as a constructor
 argument of the handler class.
 :::
@@ -65,7 +65,7 @@ public static ItemCreated Handle(
     };
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/EFCoreSample/ItemService/CreateItemCommandHandler.cs#L7-L37' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_handler_using_efcore' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/EFCoreSample/ItemService/CreateItemCommandHandler.cs#L7-L36' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_handler_using_efcore' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 When using the transactional middleware around a message handler, the `DbContext` is used to persist
@@ -124,7 +124,7 @@ using var host = await Host.CreateDefaultBuilder()
             .IncludeType<LightweightModeHandler>();
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/EfCoreTests/transaction_middleware_mode_tests.cs#L50-L72' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_lightweight_ef_core_transactions' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/EfCoreTests/transaction_middleware_mode_tests.cs#L51-L72' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_lightweight_ef_core_transactions' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 You can also selectively configure the transaction middleware mode on singular message handlers or HTTP endpoints
@@ -141,7 +141,7 @@ public class LightweightAttributeHandler
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/EfCoreTests/transaction_middleware_mode_tests.cs#L207-L217' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_explicit_usage_of_transaction_middleware_mode' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/EfCoreTests/transaction_middleware_mode_tests.cs#L270-L279' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_explicit_usage_of_transaction_middleware_mode' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Auto Apply Transactional Middleware
@@ -169,10 +169,16 @@ builder.UseWolverine(opts =>
 using var host = builder.Build();
 await host.StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/EfCoreTests/SampleUsageWithAutoApplyTransactions.cs#L16-L35' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_bootstrapping_with_auto_apply_transactions_for_sql_server' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/EfCoreTests/SampleUsageWithAutoApplyTransactions.cs#L16-L34' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_bootstrapping_with_auto_apply_transactions_for_sql_server' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 With this option, you will no longer need to decorate handler methods with the `[Transactional]` attribute.
+
+::: tip
+If an auto-transaction handler depends on **more than one** `DbContext` type, Wolverine cannot infer
+which one owns the transaction and will fail fast at startup. See
+[Selecting the Transactional DbContext](#selecting-the-transactional-dbcontext) for how to designate it.
+:::
 
 ## Transaction Middleware Mode
 
@@ -223,3 +229,248 @@ public static void Handle(UpdateItemCommand command, ItemsDbContext db)
 }
 ```
 
+
+## DbContext Abstractions <Badge type="tip" text="6.2" />
+
+Sometimes the application code wants to depend on an interface that's implemented by a `DbContext`
+rather than on the concrete `DbContext` itself — a `DbContext` that doubles as a custom
+`IRepository`, an `IUnitOfWork`, or a similar abstraction. Wolverine's EF Core transactional
+middleware can be taught to recognise those abstractions at handler-graph compile time so the
+auto-applied transaction/outbox still wraps the handler. Register the abstraction with
+`WithDbContextAbstraction<TAbstraction, TDbContext>()`:
+
+<!-- snippet: sample_register_dbcontext_abstraction -->
+<a id='snippet-sample_register_dbcontext_abstraction'></a>
+```cs
+opts.Services.AddDbContextWithWolverineIntegration<OrdersDbContext>(x =>
+    x.UseNpgsql(connectionString));
+
+// Forward the abstraction to the SAME scoped DbContext via a factory. This keeps
+// `IOrderRepository` and `OrdersDbContext` pointing at one instance per scope, which is
+// what `AddScoped<TAbs, TImpl>()` does NOT do (it would create a separate one per
+// registered interface).
+opts.Services.AddScoped<IOrderRepository>(sp => sp.GetRequiredService<OrdersDbContext>());
+
+opts.PersistMessagesWithPostgresql(connectionString, "wolverine");
+
+opts.UseEntityFrameworkCoreTransactions()
+    .WithDbContextAbstraction<IOrderRepository, OrdersDbContext>();
+
+opts.Policies.AutoApplyTransactions();
+```
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/EfCoreTests/dbContext_abstraction_scenarios.cs#L432-L450' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_register_dbcontext_abstraction' title='Start of snippet'>anchor</a></sup>
+<!-- endSnippet -->
+
+::: tip
+The generic constraint `where TDbContext : DbContext, TAbstraction` means the registration only
+covers abstractions that the `DbContext` implements **directly**. Wrappers around a `DbContext`
+are out of scope; declare the abstraction on the `DbContext` itself.
+:::
+
+Handlers depend on the abstraction the same way they'd depend on any other service. Wolverine
+emits a runtime cast at the top of the handler chain so `SaveChangesAsync` and the EF Core
+outbox enrolment fire against the concrete `DbContext` underneath:
+
+<!-- snippet: sample_handler_using_dbcontext_abstraction -->
+<a id='snippet-sample_handler_using_dbcontext_abstraction'></a>
+```cs
+public class PlaceOrderViaAbstractionHandler
+{
+    public static void Handle(PlaceOrderViaAbstraction cmd, IOrderRepository orders)
+    {
+        // The handler depends on the abstraction. Wolverine's transactional middleware
+        // recognises the chain as `DbContext`-backed via the registered abstraction and emits
+        // a runtime cast at the top of the chain so SaveChangesAsync + outbox enrolment fire
+        // against the concrete OrdersDbContext underneath.
+        orders.Orders.Add(new OrderEntity { Id = cmd.Id, Description = cmd.Description });
+    }
+}
+```
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/EfCoreTests/dbContext_abstraction_scenarios.cs#L351-L365' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_handler_using_dbcontext_abstraction' title='Start of snippet'>anchor</a></sup>
+<!-- endSnippet -->
+
+### Multiple abstractions for the same DbContext
+
+A single `DbContext` can implement several abstractions, and a handler may depend on more than
+one of them. The contract Wolverine honours is: **both parameters resolve to the same scoped
+`DbContext` instance, just viewed through different interfaces**, so a single `SaveChangesAsync`
+commits all the writes the handler made through either parameter.
+
+To make this work the abstractions must forward to the same scoped `DbContext` in DI — use a
+factory registration, **not** `AddScoped<TAbstraction, TDbContext>()` (the latter would create a
+separate `DbContext` per registered abstraction):
+
+<!-- snippet: sample_register_multiple_dbcontext_abstractions -->
+<a id='snippet-sample_register_multiple_dbcontext_abstractions'></a>
+```cs
+opts.Services.AddDbContextWithWolverineIntegration<StoreDbContext>(x =>
+    x.UseNpgsql(Servers.PostgresConnectionString,
+        b => b.MigrationsHistoryTable("__EFMigrationsHistory", "store_abs_schema")));
+
+// Two abstractions forwarded to the SAME scoped DbContext instance via factory
+// lambdas. `AddScoped<TAbs, TImpl>()` would create *separate* instances per
+// registration; the factory form is the one users want when an abstraction is
+// just a view over a DbContext that's already in the scope.
+opts.Services.AddScoped<IItemRepository>(sp => sp.GetRequiredService<StoreDbContext>());
+opts.Services.AddScoped<IOrderInsightRepository>(sp => sp.GetRequiredService<StoreDbContext>());
+
+opts.PersistMessagesWithPostgresql(Servers.PostgresConnectionString, "wolverine_abs");
+
+opts.UseEntityFrameworkCoreTransactions()
+    .WithDbContextAbstraction<IItemRepository, StoreDbContext>()
+    .WithDbContextAbstraction<IOrderInsightRepository, StoreDbContext>();
+```
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/EfCoreTests/dbContext_abstraction_scenarios.cs#L130-L149' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_register_multiple_dbcontext_abstractions' title='Start of snippet'>anchor</a></sup>
+<!-- endSnippet -->
+
+A handler can take both abstractions; the casts inside the chain land on the single shared
+`DbContext` and one transaction commits everything atomically:
+
+<!-- snippet: sample_handler_using_multiple_abstractions -->
+<a id='snippet-sample_handler_using_multiple_abstractions'></a>
+```cs
+public class CrossAbstractionAuditHandler
+{
+    public static (bool SameInstance, Type ItemsType, Type OrdersType) LastSeen;
+
+    // The handler depends on TWO abstractions of the same `DbContext`. At runtime both
+    // parameters resolve to the same scoped `StoreDbContext`, just viewed through different
+    // interfaces — so a single `SaveChangesAsync` commits writes the handler made through
+    // either parameter atomically. The forwarding-factory DI registrations above are what
+    // make this work; without them you'd get two separate `DbContext` instances.
+    public static void Handle(CrossAbstractionAudit cmd, IItemRepository items, IOrderInsightRepository orders)
+    {
+        // Cast both back to the concrete DbContext - the cast must succeed (the constraint on
+        // WithDbContextAbstraction guarantees TDbContext : TAbstraction) and the resulting
+        // references must be the SAME instance. That's the contract Wolverine's
+        // CastDbContextFrame + the user's forwarding-factory DI registrations together provide:
+        // one DbContext in scope, viewed through different interfaces.
+        var itemsCtx = (StoreDbContext)items;
+        var ordersCtx = (StoreDbContext)orders;
+
+        LastSeen = (ReferenceEquals(itemsCtx, ordersCtx), itemsCtx.GetType(), ordersCtx.GetType());
+
+        // Both writes go through the single scoped DbContext - the EF Core middleware's
+        // SaveChangesAsync postprocessor commits them as one transaction.
+        items.Items.Add(new StoreItem { Id = cmd.ItemId, Name = "cross-abs" });
+        orders.StoreOrders.Add(new StoreOrder { Id = cmd.OrderId, Status = "audited" });
+    }
+}
+```
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/EfCoreTests/dbContext_abstraction_scenarios.cs#L391-L421' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_handler_using_multiple_abstractions' title='Start of snippet'>anchor</a></sup>
+<!-- endSnippet -->
+
+### Multi-DbContext, mixed abstraction
+
+Each `DbContext` is independent — a host can mix abstracted and non-abstracted `DbContext`s
+freely. The middleware picks the right one for each handler based on its actual parameter
+dependencies:
+
+<!-- snippet: sample_register_mixed_dbcontexts -->
+<a id='snippet-sample_register_mixed_dbcontexts'></a>
+```cs
+// First DbContext: abstracted via IOrderRepository.
+opts.Services.AddDbContextWithWolverineIntegration<OrdersDbContext>(x =>
+    x.UseNpgsql(Servers.PostgresConnectionString,
+        b => b.MigrationsHistoryTable("__EFMigrationsHistory", "orders_abs_schema")));
+opts.Services.AddScoped<IOrderRepository>(sp => sp.GetRequiredService<OrdersDbContext>());
+
+// Second DbContext: used directly, no abstraction.
+opts.Services.AddDbContextWithWolverineIntegration<CustomersDbContext>(x =>
+    x.UseNpgsql(Servers.PostgresConnectionString,
+        b => b.MigrationsHistoryTable("__EFMigrationsHistory", "customers_abs_schema")));
+
+opts.PersistMessagesWithPostgresql(Servers.PostgresConnectionString, "wolverine_abs");
+
+// Only OrdersDbContext is registered as having an abstraction — Wolverine's
+// transactional middleware still wraps handlers that depend on
+// CustomersDbContext directly.
+opts.UseEntityFrameworkCoreTransactions()
+    .WithDbContextAbstraction<IOrderRepository, OrdersDbContext>();
+```
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/EfCoreTests/dbContext_abstraction_scenarios.cs#L62-L83' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_register_mixed_dbcontexts' title='Start of snippet'>anchor</a></sup>
+<!-- endSnippet -->
+
+## Selecting the Transactional DbContext <Badge type="tip" text="6.17" />
+
+A handler chain can only have **one** transactional `DbContext` — the one Wolverine enrolls in the
+transaction and uses for the outbox. But a handler is often legitimately given more than one
+`DbContext`-shaped dependency: one it writes through, plus one it only *reads* from — a shared
+read-only lookup database, or another module's context in a modular monolith.
+
+This applies uniformly to every kind of Wolverine chain — message handlers, HTTP endpoints, and gRPC
+endpoints — since they all resolve their transactional storage the same way. The attributes below can
+be placed on the handler method or the containing class (for HTTP, on the endpoint method).
+
+When a chain depends on more than one `DbContext`-shaped service, Wolverine will **not** guess which
+one is transactional. There is no automatic selection and no "magic" — you designate it explicitly, or
+Wolverine fails fast at startup:
+
+```
+Cannot determine the DbContext type for <handler>, multiple DbContext types detected:
+AppDbContext, LookupDbContext. Wolverine will not guess which one owns the transaction. Either
+remove the automatic transactional middleware from this handler (e.g. with [NonTransactional] or
+by not calling AutoApplyTransactions), or explicitly designate the transactional DbContext with
+[Transactional(typeof(YourDbContext))] or [Storage(typeof(YourDbContext))] on the handler.
+```
+
+You have three ways to resolve it.
+
+### 1. `[Transactional(typeof(TDbContext))]`
+
+Name the write context on the handler. The other `DbContext` is simply an ordinary injected read
+dependency:
+
+```csharp
+public class GrantAccessHandler
+{
+    [Transactional(typeof(AppDbContext))]
+    public static void Handle(GrantAccess message, AppDbContext users, LookupDbContext lookup)
+    {
+        // users.SaveChanges() is enrolled in the transaction + outbox.
+        // lookup is just an ordinary injected read-only dependency.
+    }
+}
+```
+
+`[Transactional]` lives in the core `Wolverine` assembly and only stores a `System.Type`, so neither the
+attribute nor your handler assembly needs to reference anything EF-Core-specific beyond `typeof`. The
+type may also be a **DbContext abstraction** registered via `WithDbContextAbstraction<TAbstraction,
+TDbContext>()`, so a Clean Architecture handler can name the abstraction it depends on rather than the
+concrete EF Core type:
+
+```csharp
+opts.UseEntityFrameworkCoreTransactions()
+    .WithDbContextAbstraction<IAppStore, AppDbContext>();
+
+// ...
+
+[Transactional(typeof(IAppStore))]
+public static void Handle(GrantAccess message, IAppStore users, LookupDbContext lookup) { }
+```
+
+### 2. `[Storage(typeof(TDbContext))]`
+
+The provider-agnostic `[Storage]` attribute — the same one used to route a handler to a Marten or
+Polecat ancillary store — can equally designate the transactional `DbContext`:
+
+```csharp
+[Storage(typeof(AppDbContext))]
+public static void Handle(GrantAccess message, AppDbContext users, LookupDbContext lookup) { }
+```
+
+This behaves identically to `[Transactional(typeof(AppDbContext))]` for the purpose of choosing the
+transactional context. Use whichever attribute reads better in your codebase.
+
+### 3. Opt the handler out
+
+If a multi-`DbContext` handler should not be transactional at all, mark it `[NonTransactional]` (or
+don't apply `AutoApplyTransactions`). Wolverine then leaves both contexts as plain injected
+dependencies.
+
+### No guessing
+
+A designation that names a type the handler does **not** actually depend on — directly or via a
+registered abstraction — fails loudly at startup and names the offending type, rather than silently
+falling back to a default. Single-`DbContext` handlers are unaffected by any of this: there is exactly
+one candidate, so no attribute is needed.

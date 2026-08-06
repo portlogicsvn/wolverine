@@ -12,7 +12,6 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Host.ApplyJasperFxExtensions();
 
 #region sample_using_the_marten_persistence_integration
-
 // Adding Marten
 builder.Services.AddMarten(opts =>
     {
@@ -27,7 +26,6 @@ builder.Services.AddMarten(opts =>
 #endregion
 
 #region sample_configure_global_exception_rules
-
 builder.Host.UseWolverine(opts =>
 {
     // Retry policies if a Marten concurrency exception is encountered
@@ -39,15 +37,13 @@ builder.Host.UseWolverine(opts =>
 
 #endregion
 
-builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddOpenApi();
 
 var app = builder.Build();
 
-app.UseSwagger();
-app.UseSwaggerUI();
+app.MapOpenApi();
 
 app.MapPost("/items/ready", (MarkItemReady command, IMessageBus bus) => bus.InvokeAsync(command));
-app.MapGet("/", () => Results.Redirect("/swagger"));
+app.MapGet("/", () => Results.Redirect("/openapi/v1.json"));
 
 return await app.RunJasperFxCommands(args);

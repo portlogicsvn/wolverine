@@ -17,7 +17,6 @@ using Wolverine.Util;
 
 namespace MartenTests.Persistence;
 
-[Trait("Category", "Flaky")]
 public class marten_durability_end_to_end : IAsyncLifetime
 {
     private const string SenderSchemaName = "sender";
@@ -27,8 +26,10 @@ public class marten_durability_end_to_end : IAsyncLifetime
     private DocumentStore _receiverStore = null!;
     private LightweightCache<string, IHost> _senders = null!;
     private DocumentStore _sendingStore = null!;
+    private PostgresqlMessageStore? _receiverMessageStore;
+    private PostgresqlMessageStore? _senderMessageStore;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _listener = new Uri($"tcp://localhost:{PortFinder.GetAvailablePort()}");
 
@@ -52,15 +53,15 @@ public class marten_durability_end_to_end : IAsyncLifetime
         var advanced = new DurabilitySettings();
 
         var logger = new NullLogger<PostgresqlMessageStore>();
-        await new PostgresqlMessageStore(new DatabaseSettings()
+        _receiverMessageStore = new PostgresqlMessageStore(new DatabaseSettings()
                     { ConnectionString = Servers.PostgresConnectionString, SchemaName = ReceiverSchemaName }, advanced, NpgsqlDataSource.Create(Servers.PostgresConnectionString),
-                logger)
-            .RebuildAsync();
+                logger);
+        await _receiverMessageStore.RebuildAsync();
 
-        await new PostgresqlMessageStore(new DatabaseSettings()
+        _senderMessageStore = new PostgresqlMessageStore(new DatabaseSettings()
                     { ConnectionString = Servers.PostgresConnectionString, SchemaName = SenderSchemaName }, advanced, NpgsqlDataSource.Create(Servers.PostgresConnectionString),
-                logger)
-            .RebuildAsync();
+                logger);
+        await _senderMessageStore.RebuildAsync();
 
         await _sendingStore.Advanced.Clean.CompletelyRemoveAllAsync();
         await _sendingStore.Storage.ApplyAllConfiguredChangesToDatabaseAsync();
@@ -72,6 +73,7 @@ public class marten_durability_end_to_end : IAsyncLifetime
             return Host.CreateDefaultBuilder()
                 .UseWolverine(opts =>
                 {
+                    opts.Durability.Mode = DurabilityMode.Solo;
                     opts.Policies.AutoApplyTransactions();
                     opts.DisableConventionalDiscovery();
                     opts.IncludeType<TraceHandler>();
@@ -93,6 +95,7 @@ public class marten_durability_end_to_end : IAsyncLifetime
             return Host.CreateDefaultBuilder()
                 .UseWolverine(opts =>
                 {
+                    opts.Durability.Mode = DurabilityMode.Solo;
                     opts.DisableConventionalDiscovery();
                     opts.Policies.AutoApplyTransactions();
 
@@ -115,7 +118,7 @@ public class marten_durability_end_to_end : IAsyncLifetime
         });
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         foreach (var host in _receivers)
         {
@@ -137,6 +140,18 @@ public class marten_durability_end_to_end : IAsyncLifetime
         _receiverStore = null!;
         _sendingStore.Dispose();
         _sendingStore = null!;
+
+        if (_receiverMessageStore != null)
+        {
+            await _receiverMessageStore.DisposeAsync();
+            _receiverMessageStore = null;
+        }
+
+        if (_senderMessageStore != null)
+        {
+            await _senderMessageStore.DisposeAsync();
+            _senderMessageStore = null;
+        }
     }
 
     protected void StartReceiver(string name)
@@ -166,50 +181,63 @@ public class marten_durability_end_to_end : IAsyncLifetime
         }
     }
 
-    protected int ReceivedMessageCount()
+    protected async Task<int> ReceivedMessageCount()
     {
-        using var session = _receiverStore.LightweightSession();
-        return session.Query<TraceDoc>().Count();
+        await using var session = _receiverStore.LightweightSession();
+        return await session.Query<TraceDoc>().CountAsync();
     }
 
     protected async Task WaitForMessagesToBeProcessed(int count)
     {
         await using var session = _receiverStore.QuerySession();
-        for (var i = 0; i < 200; i++)
+
+        var actual = 0L;
+        long envelopeCount = 0;
+        long outgoingCount = 0;
+
+        for (var i = 0; i < 480; i++)
         {
-            var actual = session.Query<TraceDoc>().Count();
-            var envelopeCount = PersistedIncomingCount();
+            actual = await session.Query<TraceDoc>().CountAsync();
+            envelopeCount = await PersistedIncomingCount();
 
+            // The sender deletes its outgoing rows through a RetryBlock that is POSTED to
+            // rather than awaited (DurableSendingAgent.MarkSuccessfulAsync), so the sender's
+            // outbox can still be draining after the receiver has processed everything. Wait
+            // for it here rather than letting the callers' assertions race the drain. GH-3821.
+            outgoingCount = await PersistedOutgoingCount();
 
-            if (actual == count && envelopeCount == 0)
-            {
+            if (actual == count && envelopeCount == 0 && outgoingCount == 0)
                 return;
-            }
 
             await Task.Delay(250);
         }
 
-        throw new Exception("All messages were not received");
+        throw new Exception(
+            $"All messages were not received. Expected {count} trace docs with 0 incoming and 0 outgoing envelopes, but last saw {actual} trace docs, {envelopeCount} incoming and {outgoingCount} outgoing.");
     }
 
-    protected long PersistedIncomingCount()
+    protected async Task<long> PersistedIncomingCount()
     {
-        using var conn = _receiverStore.Tenancy.Default.Database.CreateConnection();
-        conn.Open();
+        await using var conn = _receiverStore.Tenancy.Default.Database.CreateConnection();
+        await conn.OpenAsync();
 
-        return (long)conn.CreateCommand(
-                $"select count(*) from receiver.{DatabaseConstants.IncomingTable} where {DatabaseConstants.Status} = '{EnvelopeStatus.Incoming}'")
-            .ExecuteScalar()!;
+        var command = conn.CreateCommand(
+            $"select count(*) from receiver.{DatabaseConstants.IncomingTable} where {DatabaseConstants.Status} = '{EnvelopeStatus.Incoming}'");
+
+        var count = await command.ExecuteScalarAsync();
+        return Convert.ToInt64(count);
     }
 
-    protected long PersistedOutgoingCount()
+    protected async Task<long> PersistedOutgoingCount()
     {
-        using var conn = _sendingStore.Tenancy.Default.Database.CreateConnection();
-        conn.Open();
+        await using var conn = _sendingStore.Tenancy.Default.Database.CreateConnection();
+        await conn.OpenAsync();
 
-        return (long)conn.CreateCommand(
-                $"select count(*) from sender.{DatabaseConstants.OutgoingTable}")
-            .ExecuteScalar()!;
+        var command = conn.CreateCommand(
+            $"select count(*) from sender.{DatabaseConstants.OutgoingTable}");
+
+        var count = await command.ExecuteScalarAsync();
+        return Convert.ToInt64(count);
     }
 
     protected async Task StopReceiver(string name)
@@ -234,13 +262,13 @@ public class marten_durability_end_to_end : IAsyncLifetime
         StartSender("Sender1");
         await SendMessages("Sender1", 10);
         await StopSender("Sender1");
-        PersistedOutgoingCount().ShouldBe(10);
+        (await PersistedOutgoingCount()).ShouldBe(10);
         StartReceiver("Receiver1");
         StartSender("Sender2");
         await WaitForMessagesToBeProcessed(10);
-        PersistedIncomingCount().ShouldBe(0);
-        PersistedOutgoingCount().ShouldBe(0);
-        ReceivedMessageCount().ShouldBe(10);
+        (await PersistedIncomingCount()).ShouldBe(0);
+        (await PersistedOutgoingCount()).ShouldBe(0);
+        (await ReceivedMessageCount()).ShouldBe(10);
     }
 
     [Fact]
@@ -250,9 +278,9 @@ public class marten_durability_end_to_end : IAsyncLifetime
         await SendMessages("Sender1", 5);
         StartReceiver("Receiver1");
         await WaitForMessagesToBeProcessed(5);
-        PersistedIncomingCount().ShouldBe(0);
-        PersistedOutgoingCount().ShouldBe(0);
-        ReceivedMessageCount().ShouldBe(5);
+        (await PersistedIncomingCount()).ShouldBe(0);
+        (await PersistedOutgoingCount()).ShouldBe(0);
+        (await ReceivedMessageCount()).ShouldBe(5);
     }
 }
 

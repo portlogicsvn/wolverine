@@ -28,7 +28,7 @@ public class sqlserver_durability_end_to_end : IAsyncLifetime
 
     private LightweightCache<string, IHost> _senders = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _listener = new Uri($"tcp://localhost:{PortFinder.GetAvailablePort()}");
 
@@ -88,7 +88,7 @@ public class sqlserver_durability_end_to_end : IAsyncLifetime
         });
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         foreach (var host in _receivers)
         {
@@ -170,14 +170,29 @@ create table receiver.trace_doc
         await using var conn = new SqlConnection(Servers.SqlServerConnectionString);
         await conn.OpenAsync();
 
+        var actual = 0;
+        long envelopeCount = 0;
+        long outgoingCount = 0;
+
         for (var i = 0; i < 200; i++)
         {
-            var actual = (int)conn.CreateCommand("select count(*) from receiver.trace_doc").ExecuteScalar()!;
-            var envelopeCount = PersistedIncomingCount();
+            await using var cmd = conn.CreateCommand("select count(*) from receiver.trace_doc");
+            var countResult = await cmd.ExecuteScalarAsync();
+            actual = Convert.ToInt32(countResult);
+            envelopeCount = PersistedIncomingCount();
 
-            Trace.WriteLine($"waitForMessages: {actual} actual & {envelopeCount} incoming envelopes");
+            // The sender deletes its outgoing rows through a RetryBlock that is POSTED to
+            // rather than awaited (DurableSendingAgent.MarkSuccessfulAsync), so the sender's
+            // outbox can still be draining after the receiver has processed everything. This
+            // condition used to be left to the assertions in the tests below, which meant they
+            // raced the drain -- on CI that surfaced as "PersistedOutgoingCount() should be 0
+            // but was 10". Wait for the drain here instead. GH-3821.
+            outgoingCount = PersistedOutgoingCount();
 
-            if (actual == count && envelopeCount == 0)
+            Trace.WriteLine(
+                $"waitForMessages: {actual} actual & {envelopeCount} incoming envelopes & {outgoingCount} outgoing envelopes");
+
+            if (actual == count && envelopeCount == 0 && outgoingCount == 0)
             {
                 await conn.CloseAsync();
                 return;
@@ -186,7 +201,8 @@ create table receiver.trace_doc
             await Task.Delay(250);
         }
 
-        throw new Exception("All messages were not received");
+        throw new Exception(
+            $"All messages were not received. Expected {count} trace docs with 0 incoming and 0 outgoing envelopes, but last saw {actual} trace docs, {envelopeCount} incoming and {outgoingCount} outgoing.");
     }
 
     protected long PersistedIncomingCount()
@@ -225,7 +241,7 @@ create table receiver.trace_doc
         _senders.Remove(name);
     }
 
-    [Fact] // This test "blinks"
+    [Fact]
     public async Task sending_recovered_messages_when_sender_starts_up()
     {
         StartSender("Sender1");

@@ -43,6 +43,41 @@ public static class QuerystringEndpoints
         return values.OrderBy(x => x).Select(x => x.ToString()).Join(",");
     }
 
+    [WolverineGet("/querystring/enumarray")]
+    public static string EnumArray(Direction[]? values)
+    {
+        if (values == null || values.IsEmpty()) return "none";
+
+        return values.Select(x => x.ToString()).Join(",");
+    }
+
+    // GH-3602: an explicit [FromQuery] on an array/collection of a simple element must bind from repeated
+    // query values exactly like the attribute-less StringArray/IntArray above, not get misrouted into the
+    // complex-type member-flattening path (which threw at discovery because arrays have no ctor).
+    [WolverineGet("/querystring/stringarray2")]
+    public static string StringArray2([FromQuery] string[]? values)
+    {
+        if (values == null || values.IsEmpty()) return "none";
+
+        return values.Join(",");
+    }
+
+    [WolverineGet("/querystring/intarray2")]
+    public static string IntArray2([FromQuery] int[]? values)
+    {
+        if (values == null || values.IsEmpty()) return "none";
+
+        return values.OrderBy(x => x).Select(x => x.ToString()).Join(",");
+    }
+
+    [WolverineGet("/querystring/intlist2")]
+    public static string IntList2([FromQuery] List<int>? values)
+    {
+        if (values == null || values.IsEmpty()) return "none";
+
+        return values.OrderBy(x => x).Select(x => x.ToString()).Join(",");
+    }
+
     [WolverineGet("/querystring/datetime")]
     public static string DateTime(DateTime value)
     {
@@ -53,6 +88,35 @@ public static class QuerystringEndpoints
     public static string DateTime2([FromQuery] DateTime value)
     {
         return value.ToString("O");
+    }
+
+    // GH-3586 follow-up: a scalar [FromQuery] decimal is a single query value like [FromQuery] DateTime
+    // above. It used to throw at discovery ("System.Decimal has multiple constructors") because decimal was
+    // routed into the complex-type flattening path; guarded now in IsComplexQueryStringType.
+    [WolverineGet("/querystring/decimal2")]
+    public static string Decimal2([FromQuery] decimal value)
+    {
+        return value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    [WolverineGet("/querystring/decimal2/nullable")]
+    public static string Decimal2Nullable([FromQuery] decimal? value)
+    {
+        return value.HasValue ? value.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "Value is missing";
+    }
+
+    // GH-3586 follow-up: enum values arrive on the wire as their string name (?value=North). A scalar
+    // [FromQuery] enum must parse that name, case-insensitively, through the explicit-attribute path.
+    [WolverineGet("/querystring/enum2")]
+    public static string Enum2([FromQuery] Direction value)
+    {
+        return value.ToString();
+    }
+
+    [WolverineGet("/querystring/enum2/nullable")]
+    public static string Enum2Nullable([FromQuery] Direction? value)
+    {
+        return value.HasValue ? value.Value.ToString() : "Value is missing";
     }
 
     [WolverineGet("/querystring/datetime/nullable")]

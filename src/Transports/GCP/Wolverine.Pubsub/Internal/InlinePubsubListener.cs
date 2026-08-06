@@ -10,8 +10,9 @@ public class InlinePubsubListener : PubsubListener
         PubsubEndpoint endpoint,
         PubsubTransport transport,
         IReceiver receiver,
-        IWolverineRuntime runtime
-    ) : base(endpoint, transport, receiver, runtime)
+        IWolverineRuntime runtime,
+        PubsubClientSet clients
+    ) : base(endpoint, transport, receiver, runtime, clients)
     {
 
     }
@@ -20,12 +21,15 @@ public class InlinePubsubListener : PubsubListener
     {
         await listenForMessagesAsync(async () =>
         {
-            var subscriptionName = _endpoint.Server.Subscription.Name;
-            await using SubscriberClient subscriber = await new SubscriberClientBuilder
+            var subscriptionName = ListeningSubscriptionName;
+            var subscriberBuilder = new SubscriberClientBuilder
             {
                 SubscriptionName = subscriptionName,
-                EmulatorDetection = _transport.EmulatorDetection,
-            }.BuildAsync();
+                EmulatorDetection = _clients.EmulatorDetection,
+            };
+            if (_clients.ConfigureSubscriberClientBuilder != null)
+                await _clients.ConfigureSubscriberClientBuilder(subscriberBuilder);
+            await using SubscriberClient subscriber = await subscriberBuilder.BuildAsync();
             var ctRegistration = _cancellation.Token.Register(() => subscriber.StopAsync(CancellationToken.None));
             try
             {

@@ -15,7 +15,7 @@ public class SqlTransportDurableFixture : TransportComplianceFixture, IAsyncLife
     {
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         await SenderIs(opts =>
         {
@@ -43,10 +43,6 @@ public class SqlTransportDurableFixture : TransportComplianceFixture, IAsyncLife
         });
     }
 
-    public new async Task DisposeAsync()
-    {
-        await base.DisposeAsync();
-    }
 }
 
 public class SqlServerTransport_Durable_Compliance : TransportCompliance<SqlTransportDurableFixture>;
@@ -57,7 +53,7 @@ public class SqlTransportBufferedFixture : TransportComplianceFixture, IAsyncLif
     {
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         await SenderIs(opts =>
         {
@@ -65,7 +61,6 @@ public class SqlTransportBufferedFixture : TransportComplianceFixture, IAsyncLif
                 .AutoProvision().AutoPurgeOnStartup().DisableInboxAndOutboxOnAll();
 
             #region sample_setting_sql_server_queue_to_buffered
-
             opts.ListenToSqlServerQueue("sender").BufferedInMemory();
 
             #endregion
@@ -91,10 +86,6 @@ public class SqlTransportBufferedFixture : TransportComplianceFixture, IAsyncLif
         });
     }
 
-    public new async Task DisposeAsync()
-    {
-        await base.DisposeAsync();
-    }
 }
 
 public class SqlServerTransport_Buffered_Compliance : TransportCompliance<SqlTransportBufferedFixture>

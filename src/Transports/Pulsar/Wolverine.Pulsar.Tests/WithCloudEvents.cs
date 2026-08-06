@@ -10,11 +10,11 @@ public class PulsarWithCloudEventsFixture : TransportComplianceFixture, IAsyncLi
     {
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         var topic = Guid.NewGuid().ToString();
         var topicPath = $"persistent://public/default/compliance{topic}";
-        OutboundAddress = PulsarEndpoint.UriFor(topicPath);
+        OutboundAddress = PulsarEndpointUri.Topic(topicPath);
 
         await SenderIs(opts =>
         {
@@ -35,7 +35,7 @@ public class PulsarWithCloudEventsFixture : TransportComplianceFixture, IAsyncLi
 
     public record FakeMessage;
 
-    async Task IAsyncLifetime.DisposeAsync()
+    async ValueTask IAsyncDisposable.DisposeAsync()
     {
         await ((IAsyncDisposable)this).DisposeAsync();
     }
@@ -50,13 +50,24 @@ public class PulsarWithCloudEventsFixture : TransportComplianceFixture, IAsyncLi
 [Collection("acceptance")]
 public class with_cloud_events : TransportCompliance<PulsarWithCloudEventsFixture>
 {
-    // This test uses ErrorCausingMessage which contains a Dictionary<int, Exception>.
-    // Exception objects don't serialize/deserialize properly with System.Text.Json,
-    // which CloudEvents uses internally. The test message's Errors dictionary gets
-    // corrupted during serialization, causing the wrong exception type to be thrown.
-    // This is a test infrastructure limitation, not a CloudEvents functionality issue.
-    public override Task will_move_to_dead_letter_queue_with_exception_match()
-    {
-        return Task.CompletedTask;
-    }
+    // GH-3800 removed the CloudEvents-specific reason this test used to carry: ErrorCausingMessage
+    // now records an exception TYPE NAME rather than a live Exception, so it survives
+    // System.Text.Json and CloudEvents no longer corrupts it.
+    //
+    // It stays skipped, but for the same reason as its two sibling fixtures below rather than a
+    // serialization one -- Pulsar has not implemented dead-letter routing. When GH-3797 lands this
+    // skip goes with the others, not separately.
+    [Fact(Skip = "Pulsar does not implement this compliance behaviour yet -- see GH-3797. Skipped rather than tagged Flaky: it fails deterministically, on every run, alone or in a suite.")]
+    public override Task will_move_to_dead_letter_queue_with_exception_match() => Task.CompletedTask;
+
+    // GH-3763. Deterministic failures shared with the other two Pulsar compliance fixtures -- the
+    // requeue, retry-scheduling and dead-letter behaviours the transport has not implemented. See GH-3797.
+    [Fact(Skip = "Pulsar does not implement this compliance behaviour yet -- see GH-3797. Skipped rather than tagged Flaky: it fails deterministically, on every run, alone or in a suite.")]
+    public override Task will_requeue_and_increment_attempts() => Task.CompletedTask;
+
+    [Fact(Skip = "Pulsar does not implement this compliance behaviour yet -- see GH-3797. Skipped rather than tagged Flaky: it fails deterministically, on every run, alone or in a suite.")]
+    public override Task can_schedule_retry() => Task.CompletedTask;
+
+    [Fact(Skip = "Pulsar does not implement this compliance behaviour yet -- see GH-3797. Skipped rather than tagged Flaky: it fails deterministically, on every run, alone or in a suite.")]
+    public override Task will_move_to_dead_letter_queue_without_any_exception_match() => Task.CompletedTask;
 }

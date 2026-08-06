@@ -18,7 +18,7 @@ builder.UseWolverine(opts =>
     // connection string out of configuration
     var azureServiceBusConnectionString = builder
         .Configuration
-        .GetConnectionString("azure-service-bus");
+        .GetConnectionString("azure-service-bus")!;
 
     // Connect to the broker in the simplest possible way
     opts.UseAzureServiceBus(azureServiceBusConnectionString).AutoProvision()
@@ -54,7 +54,7 @@ builder.UseWolverine(opts =>
 using var host = builder.Build();
 await host.StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Azure/Wolverine.AzureServiceBus.Tests/DocumentationSamples.cs#L399-L444' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_conventional_routing_for_azure_service_bus' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Azure/Wolverine.AzureServiceBus.Tests/DocumentationSamples.cs#L614-L658' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_conventional_routing_for_azure_service_bus' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Route to Topics and Subscriptions <Badge type="tip" text="1.6.0" />
@@ -65,7 +65,7 @@ message type names like this:
 <!-- snippet: sample_using_topic_and_subscription_conventional_routing_with_azure_service_bus -->
 <a id='snippet-sample_using_topic_and_subscription_conventional_routing_with_azure_service_bus'></a>
 ```cs
-opts.UseAzureServiceBusTesting()
+opts.UseAzureServiceBusEmulator()
     .UseTopicAndSubscriptionConventionalRouting(convention =>
     {
         // Optionally control every aspect of the convention and
@@ -82,7 +82,7 @@ opts.UseAzureServiceBusTesting()
     .AutoProvision()
     .AutoPurgeOnStartup();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Azure/Wolverine.AzureServiceBus.Tests/ConventionalRouting/Broadcasting/end_to_end_with_conventional_routing.cs#L32-L51' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_topic_and_subscription_conventional_routing_with_azure_service_bus' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Azure/Wolverine.AzureServiceBus.Tests/DocumentationSamples.cs#L180-L199' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_topic_and_subscription_conventional_routing_with_azure_service_bus' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Handler Type Naming <Badge type="tip" text="5.25" />

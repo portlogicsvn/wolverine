@@ -1,5 +1,3 @@
-using System.Diagnostics;
-using System.Reflection;
 using JasperFx;
 using JasperFx.CodeGeneration;
 using JasperFx.CodeGeneration.Frames;
@@ -10,8 +8,10 @@ using JasperFx.Core.Reflection;
 using JasperFx.Events;
 using Marten;
 using Marten.Events;
-using Microsoft.CodeAnalysis.VisualBasic;
 using Microsoft.Extensions.DependencyInjection;
+using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
+using System.Reflection;
 using Wolverine.Attributes;
 using Wolverine.Configuration;
 using Wolverine.Marten.Codegen;
@@ -109,7 +109,7 @@ public class AggregateHandlerAttribute : ModifyChainAttribute, IDataRequirement,
         handling.Apply(chain, container);
     }
 
-    public bool TryInferMessageIdentity(IChain chain, out PropertyInfo property)
+    public bool TryInferMessageIdentity(IChain chain, [NotNullWhen(true)] out PropertyInfo? property)
     {
         var inputType = chain.InputType();
         property = default!;
@@ -218,6 +218,10 @@ internal class EventCaptureActionSource : IReturnVariableActionSource
             yield break;
         }
 
+        [UnconditionalSuppressMessage("Trimming", "IL2062",
+            Justification = "streamType = MakeGenericType(IEventStream<>, _aggregateType) at codegen time; AppendOne is statically referenced via nameof and the closed-generic IEventStream<TAggregate>.AppendOne method is preserved by the aggregate-type registration. AOT consumers pre-generate via TypeLoadMode.Static.")]
+        [UnconditionalSuppressMessage("AOT", "IL3050",
+            Justification = "MakeGenericType closes IEventStream<TAggregate> at codegen time; AOT consumers pre-generate via TypeLoadMode.Static so the reflective close never fires.")]
         public IEnumerable<Frame> Frames()
         {
             var streamType = typeof(IEventStream<>).MakeGenericType(_aggregateType);

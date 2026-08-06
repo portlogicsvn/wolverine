@@ -42,14 +42,32 @@ public partial class HttpGraph : EndpointDataSource, ICodeFileCollectionWithServ
         Container = container;
         Rules = _options.CodeGeneration;
     }
-    
+
     internal IServiceContainer Container { get; }
+
+    // CritterWatch #396 Phase 4 item 5: HTTP chains need the WolverineOptions to read
+    // Tracking.EnableMessageCausationTracking when deciding whether to emit the endpoint-causation frame.
+    internal WolverineOptions Options => _options;
+
+    // Types registered via WolverineHttpOptions.SourceServiceFromHttpContext<T>().
+    // Stored on the HTTP graph so the RequestServicesVariableSource is only added to
+    // HTTP chains' per-method sources, never to the shared WolverineOptions.CodeGeneration.Sources
+    // that non-HTTP message-handler chains also read from.
+    internal HashSet<Type> HttpContextSourcedTypes { get; } = new();
 
     /// <summary>
     /// When true, automatically apply antiforgery metadata to form data and file upload endpoints.
     /// Defaults to false. Enable by calling <see cref="WolverineHttpOptions.AutoAntiforgeryOnFormEndpoints"/>.
     /// </summary>
     internal bool AutoAntiforgeryOnFormEndpoints { get; set; }
+
+    /// <summary>
+    /// When true, generated query string binding emits a 400 + ProblemDetails short circuit
+    /// for query string values that are present but unparseable. Mirrors
+    /// <see cref="WolverineHttpOptions.RejectUnparseableQueryValues"/>; transferred before
+    /// endpoint discovery so chain construction sees the final value. GH-3372.
+    /// </summary>
+    internal bool RejectUnparseableQueryValues { get; set; }
 
     internal IEnumerable<IResourceWriterPolicy> WriterPolicies => _optionsWriterPolicies.Concat(_builtInWriterPolicies);
 
@@ -68,7 +86,16 @@ public partial class HttpGraph : EndpointDataSource, ICodeFileCollectionWithServ
 
     public IReadOnlyList<ICodeFile> BuildFiles()
     {
-        return _chains;
+        // Pre-generated endpoint registry for TypeLoadMode.Static cold-start (GH-2925, the Wolverine.Http
+        // counterpart to the GH-2906 handler manifest): capture the discovered endpoint types so startup
+        // can skip the HttpChainSource.FindActions ExportedTypes scan. The types come from the already-built
+        // chains (chain.EndpointType), so no scan is needed to produce the manifest.
+        var files = new List<ICodeFile>(_chains)
+        {
+            new HttpEndpointRegistryCodeFile(_chains.Select(x => x.EndpointType))
+        };
+
+        return files;
     }
 
     public string ChildNamespace => "WolverineHandlers";
@@ -95,10 +122,26 @@ public partial class HttpGraph : EndpointDataSource, ICodeFileCollectionWithServ
 
     public void DiscoverEndpoints(WolverineHttpOptions wolverineHttpOptions)
     {
-        var source = new HttpChainSource(_options.Assemblies);
+        var source = new HttpChainSource(_options.Assemblies, wolverineHttpOptions.EndpointDiscovery);
         var logger = Container.GetInstance<ILogger<HttpGraph>>();
 
-        var calls = source.FindActions();
+        // Cold-start fast path (GH-2925): in TypeLoadMode.Static, consume the pre-generated
+        // HttpEndpointRegistry instead of scanning assemblies. Never applies during `codegen write`
+        // itself — that must run a fresh scan to regenerate the registry accurately.
+        MethodCall[] calls;
+        if (!DynamicCodeBuilder.WithinCodegenCommand && Rules.TypeLoadMode == TypeLoadMode.Static &&
+            HttpEndpointRegistry.TryLoad(_options.ApplicationAssembly, out var endpointTypes))
+        {
+            logger.LogInformation(
+                "Using pre-generated Wolverine HTTP endpoint registry ({Count} endpoint types); skipping assembly scan",
+                endpointTypes.Count);
+            calls = source.FindActions(endpointTypes);
+        }
+        else
+        {
+            calls = source.FindActions();
+        }
+
         logger.LogInformation("Found {Count} Wolverine HTTP endpoints in assemblies {Assemblies}", calls.Length,
             _options.Assemblies.Select(x => x.GetName().Name!).Join(", "));
         if (calls.Length == 0)
@@ -108,6 +151,19 @@ public partial class HttpGraph : EndpointDataSource, ICodeFileCollectionWithServ
         }
 
         _chains.AddRange(calls.Select(x => new HttpChain(x, this){ServiceProviderSource = wolverineHttpOptions.ServiceProviderSource}));
+
+        // Two different routes can sanitize to the same generated C# type name (e.g. "/a$b" and "/a-b"
+        // both -> "a_b"). Append a deterministic suffix to any that actually collide so codegen stays
+        // valid. See GH-3282.
+        ResolveDuplicateTypeNames(_chains);
+
+        // Expand multi-version handlers before any policy runs, so middleware, route prefix,
+        // and other policies are applied uniformly to every per-version clone. Without this,
+        // clones would miss whatever the policies subsequently mutate.
+        if (wolverineHttpOptions.ApiVersioning is not null)
+        {
+            ApiVersioning.MultiVersionExpansion.ExpandInPlace(_chains);
+        }
 
         wolverineHttpOptions.Middleware.Apply(_chains, Rules, Container);
         _optionsWriterPolicies.AddRange(wolverineHttpOptions.ResourceWriterPolicies);
@@ -125,6 +181,34 @@ public partial class HttpGraph : EndpointDataSource, ICodeFileCollectionWithServ
         _endpoints.AddRange(_chains.Select(x => x.BuildEndpoint(wolverineHttpOptions.WarmUpRoutes)));
     }
 
+    internal static void ResolveDuplicateTypeNames(IReadOnlyList<HttpChain> chains)
+    {
+        foreach (var group in chains.GroupBy(x => x.Description).Where(g => g.Count() > 1))
+        {
+            foreach (var chain in group)
+            {
+                chain.DisambiguateTypeName(deterministicSuffix(chain));
+            }
+        }
+    }
+
+    // A stable (process-independent) FNV-1a hash of what actually distinguishes two colliding chains,
+    // so the generated type names stay deterministic across builds — important for TypeLoadMode.Static
+    // where the codegen-time names must match what was written to disk.
+    private static string deterministicSuffix(HttpChain chain)
+    {
+        var key = $"{chain.Method.HandlerType.FullName}.{chain.Method.Method.Name}|{chain.HttpMethods.Join(",")}|{chain.RoutePattern?.RawText}";
+
+        uint hash = 2166136261u;
+        foreach (var b in System.Text.Encoding.UTF8.GetBytes(key))
+        {
+            hash ^= b;
+            hash *= 16777619u;
+        }
+
+        return hash.ToString("x8");
+    }
+
     public override IChangeToken GetChangeToken()
     {
         return this;
@@ -137,15 +221,32 @@ public partial class HttpGraph : EndpointDataSource, ICodeFileCollectionWithServ
 
     public HttpChain Add(MethodCall method, HttpMethod httpMethod, string url)
     {
-        var chain = new HttpChain(method, this);
-        chain.MapToRoute(httpMethod.ToString(), url);
+        // GH-3646: the route goes through the constructor rather than being mapped onto the finished chain,
+        // so the parameter strategies run before applyMetadata() reads what they assign.
+        var chain = new HttpChain(method, this, httpMethod.ToString(), url);
         _chains.Add(chain);
         return chain;
     }
 
-    internal void UseNewtonsoftJson()
+    internal INewtonsoftHttpCodeGen? NewtonsoftCodeGen { get; private set; }
+
+    /// <summary>
+    ///     Wire the Newtonsoft.Json HTTP codegen path. Called by the WolverineFx.Http.Newtonsoft
+    ///     extension package's <c>UseNewtonsoftJsonForSerialization()</c> extension method;
+    ///     core <see cref="JsonResourceWriterPolicy"/> / <see cref="JsonBodyParameterStrategy"/>
+    ///     dispatch through the supplied hook when <see cref="JsonUsage.NewtonsoftJson"/>
+    ///     is selected.
+    /// </summary>
+    internal void UseNewtonsoftJson(INewtonsoftHttpCodeGen codeGen)
     {
-        _builtInWriterPolicies.OfType<JsonResourceWriterPolicy>().Single().Usage = JsonUsage.NewtonsoftJson;
-        _strategies.OfType<JsonBodyParameterStrategy>().Single().Usage = JsonUsage.NewtonsoftJson;
+        NewtonsoftCodeGen = codeGen ?? throw new ArgumentNullException(nameof(codeGen));
+
+        var writerPolicy = _builtInWriterPolicies.OfType<JsonResourceWriterPolicy>().Single();
+        writerPolicy.Usage = JsonUsage.NewtonsoftJson;
+        writerPolicy.NewtonsoftCodeGen = codeGen;
+
+        var bodyStrategy = _strategies.OfType<JsonBodyParameterStrategy>().Single();
+        bodyStrategy.Usage = JsonUsage.NewtonsoftJson;
+        bodyStrategy.NewtonsoftCodeGen = codeGen;
     }
 }

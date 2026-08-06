@@ -26,8 +26,7 @@ public class multi_tenanted_session_factory_without_wolverine
                 options.Schema.For<ColorDoc>().MultiTenanted();
             });
 
-        #region sample_using_AddMartenTenancyDetection
-
+        #region sample_using_addmartentenancydetection
         builder.Services.AddMartenTenancyDetection(tenantId =>
         {
             tenantId.IsQueryStringValue("tenant");
@@ -53,7 +52,7 @@ public class multi_tenanted_session_factory_without_wolverine
                 Number = 1
             });
 
-            await session.SaveChangesAsync();
+            await session.SaveChangesAsync(TestContext.Current.CancellationToken);
         }
         
         // Store the green doc
@@ -65,7 +64,7 @@ public class multi_tenanted_session_factory_without_wolverine
                 Number = 2
             });
 
-            await session.SaveChangesAsync();
+            await session.SaveChangesAsync(TestContext.Current.CancellationToken);
         }
 
         var blueDoc = await host.GetAsJson<ColorDoc>("/color?tenant=blue");
@@ -89,8 +88,7 @@ public class multi_tenanted_session_factory_without_wolverine
                 options.Schema.For<ColorDoc>().MultiTenanted();
             });
 
-        #region sample_using_AddMartenTenancyDetection
-
+        #region sample_using_addmartentenancydetection
         builder.Services.AddMartenTenancyDetection(tenantId =>
         {
             tenantId.IsQueryStringValue("tenant");
@@ -119,7 +117,7 @@ public class multi_tenanted_session_factory_without_wolverine
                 Number = 1
             });
 
-            await session.SaveChangesAsync();
+            await session.SaveChangesAsync(TestContext.Current.CancellationToken);
         }
 
         // Store the green doc
@@ -131,7 +129,7 @@ public class multi_tenanted_session_factory_without_wolverine
                 Number = 2
             });
 
-            await session.SaveChangesAsync();
+            await session.SaveChangesAsync(TestContext.Current.CancellationToken);
         }
 
         var blueDoc = await host.GetAsJson<ColorDoc>("/color?tenant=blue");

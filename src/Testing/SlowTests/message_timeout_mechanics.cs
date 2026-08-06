@@ -15,10 +15,9 @@ namespace SlowTests;
 
 public class message_timeout_mechanics
 {
-    public static async Task set_default_timeout()
+    private static async Task set_default_timeout()
     {
         #region sample_set_default_timeout
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts => { opts.DefaultExecutionTimeout = 1.Minutes(); }).StartAsync();
 
@@ -51,7 +50,7 @@ public class message_timeout_mechanics
     {
         PotentiallySlowMessageHandler.DidTimeout = false; // start clean
 
-        using var host = WolverineHost.For(
+        using var host = await WolverineHost.ForAsync(
             opts => { opts.DefaultExecutionTimeout = 50.Milliseconds(); });
 
         var session = await host
@@ -94,8 +93,7 @@ public class PotentiallySlowMessageHandler
 {
     public static bool DidTimeout { get; set; }
 
-    #region sample_MessageTimeout_on_handler
-
+    #region sample_messagetimeout_on_handler
     [MessageTimeout(1)]
     public async Task Handle(PotentiallySlowMessage message, CancellationToken cancellationToken)
 

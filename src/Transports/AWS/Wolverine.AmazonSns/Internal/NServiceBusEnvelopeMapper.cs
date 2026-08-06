@@ -3,7 +3,8 @@ using System.Text;
 using Amazon.SimpleNotificationService.Model;
 using JasperFx.Core;
 using Newtonsoft.Json;
-using Wolverine.Runtime.Serialization;
+using Wolverine.Newtonsoft;
+using Wolverine.Transports;
 using Wolverine.Util;
 using Endpoint = Wolverine.Configuration.Endpoint;
 
@@ -21,6 +22,8 @@ internal class NServiceBusEnvelopeMapper : ISnsEnvelopeMapper
         _replyName = replyName;
         _endpoint = endpoint;
     }
+
+    public override string ToString() => "NServiceBus Interop";
 
     public IEnumerable<KeyValuePair<string, MessageAttributeValue>> ToAttributes(Envelope envelope)
     {
@@ -86,17 +89,10 @@ internal class NServiceBusEnvelopeMapper : ISnsEnvelopeMapper
             }
         }
 
-        if (sqs.Headers.TryGetValue("NServiceBus.EnclosedMessageTypes", out var messageTypeName))
+        if (sqs.Headers.TryGetValue(NServiceBusInterop.EnclosedMessageTypesHeader, out var enclosed)
+            && NServiceBusInterop.ResolveMessageType(enclosed) is string messageType)
         {
-            Type? messageType = Type.GetType(messageTypeName);
-            if (messageType != null)
-            {
-                envelope.MessageType = messageType.ToMessageTypeName();
-            }
-            else
-            {
-                envelope.MessageType = messageTypeName;
-            }
+            envelope.MessageType = messageType;
         }
     }
     

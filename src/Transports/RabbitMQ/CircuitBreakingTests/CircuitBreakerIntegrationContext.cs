@@ -1,85 +1,57 @@
+using IntegrationTests;
 using JasperFx.Core;
 using JasperFx.Core.Reflection;
+using JasperFx.Resources;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
-using JasperFx.Resources;
 using Shouldly;
 using Wolverine;
-using Wolverine.Logging;
 using Wolverine.Runtime;
 using Wolverine.Transports;
-using Xunit.Abstractions;
-
+using Xunit;
 namespace CircuitBreakingTests;
 
-[Collection("circuit_breaker")]
-public abstract class CircuitBreakerIntegrationContext : IDisposable, IObserver<IWolverineEvent>
+public abstract class CircuitBreakerIntegrationContext(ITestOutputHelper output)
+    : IAsyncLifetime
 {
-    private readonly IHost _host;
-    private readonly ITestOutputHelper _output;
-    private readonly Random _random = new();
+    private readonly List<Task> _tasks = [];
+    private IHost _host = null!;
+    private MessageRecorder _recorder = null!;
+    private WolverineRuntime _runtime = null!;
+    private ListenerObserver _observer = null!;
+    private IDisposable _trackerSubscription = null!;
+    protected string _queueName = null!;
 
-    private readonly List<ListenerState> _recordedStates = new();
-    private readonly WolverineRuntime _runtime;
-    private readonly List<Task> _tasks = new();
-
-    public CircuitBreakerIntegrationContext(ITestOutputHelper output)
+    public async ValueTask InitializeAsync()
     {
-        _output = output;
-        _host = Host.CreateDefaultBuilder()
-            .UseWolverine(configureListener).UseResourceSetupOnStartup(StartupAction.ResetState)
+        _queueName = $"{GetType().Name}_{DateTime.UtcNow:yyyyMMddHHmmss}";
+
+        _host = await Host.CreateDefaultBuilder()
+            .UseWolverine(configureListener)
+            .UseResourceSetupOnStartup(StartupAction.ResetState)
             .ConfigureServices(services =>
             {
-                services.AddSingleton(output);
-                services.AddSingleton(typeof(ILogger<>), typeof(OutputLogger<>));
+                services.AddLogging(x => x.AddXunitLogging(output));
+                services.AddSingleton<MessageRecorder>();
+                services.AddSingleton<ListenerObserver>();
             })
-            .Start();
+            .StartAsync();
 
+        _recorder = _host.Services.GetRequiredService<MessageRecorder>();
         _runtime = _host.Services.GetRequiredService<IWolverineRuntime>().As<WolverineRuntime>();
-        _runtime.Tracker.Subscribe(this);
+        _observer = _host.Services.GetRequiredService<ListenerObserver>();
+        _trackerSubscription = _runtime.Tracker.Subscribe(_observer);
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
+        _trackerSubscription.Dispose();
+        await _host.TeardownResources();
+        await _host.StopAsync();
         _host.Dispose();
     }
 
-    void IObserver<IWolverineEvent>.OnCompleted()
-    {
-    }
-
-    void IObserver<IWolverineEvent>.OnError(Exception error)
-    {
-    }
-
-    void IObserver<IWolverineEvent>.OnNext(IWolverineEvent value)
-    {
-        if (value is ListenerState state)
-        {
-            _output.WriteLine($"Got status update {state.Status} with {Recorder.Received} processed");
-            _recordedStates.Add(state);
-        }
-    }
-
     protected abstract void configureListener(WolverineOptions opts);
-
-    protected void assertTheCircuitBreakerNeverTripped()
-    {
-        _recordedStates.Any(x => x.Status == ListeningStatus.Stopped).ShouldBeFalse();
-    }
-
-    protected void assertTheCircuitBreakerTripped()
-    {
-        _recordedStates.Any(x => x.Status == ListeningStatus.Stopped).ShouldBeTrue();
-    }
-
-    protected void assertTheCircuitBreakerWasReset()
-    {
-        assertTheCircuitBreakerTripped();
-
-        _recordedStates.Last().Status.ShouldBe(ListeningStatus.Accepting);
-    }
 
     protected SometimesFails[] buildHundredMessages(int failurePercent)
     {
@@ -91,7 +63,8 @@ public abstract class CircuitBreakerIntegrationContext : IDisposable, IObserver<
         {
             var shouldFail = i > 0 && i % everyOther == 0;
 
-            var message = new SometimesFails(i, shouldFail ? MessageResult.BadImage : MessageResult.Success,
+            var message = new SometimesFails(Guid.NewGuid(),
+                shouldFail ? MessageResult.BadImage : MessageResult.Success,
                 MessageResult.Success, MessageResult.Success);
 
             messages[i] = message;
@@ -103,12 +76,16 @@ public abstract class CircuitBreakerIntegrationContext : IDisposable, IObserver<
     protected void publishHundredMessagesNow(int failures)
     {
         var messages = buildHundredMessages(failures);
-        var publisher = new MessageBus(_runtime);
-        var task = Task.Factory.StartNew(async () =>
+        var publisher = _host.MessageBus();
+        var task = Task.Run(async () =>
         {
-            foreach (var message in messages) await publisher.PublishAsync(message);
+            foreach (var message in messages)
+            {
+                await publisher.PublishAsync(message);
+                _recorder.TrackPublished(message.Id);
+            }
 
-            _output.WriteLine($"Finished publishing a batch with {failures}% failures");
+            output.WriteLine($"Finished publishing a batch with {failures}% failures");
         });
 
         _tasks.Add(task);
@@ -117,14 +94,19 @@ public abstract class CircuitBreakerIntegrationContext : IDisposable, IObserver<
     protected void delayPublishHundredMessages(TimeSpan delay, int failures)
     {
         var messages = buildHundredMessages(failures);
-        var publisher = new MessageBus(_runtime);
-        var task = Task.Factory.StartNew(async () =>
+        var publisher = _host.MessageBus();
+        var task = Task.Run(async () =>
         {
             await Task.Delay(delay);
-            _output.WriteLine($"Starting to publish a batch with {failures}% failures");
-            foreach (var message in messages) await publisher.PublishAsync(message);
+            output.WriteLine($"Starting to publish a batch with {failures}% failures");
 
-            _output.WriteLine($"Finished publishing a batch with {failures}% failures");
+            foreach (var message in messages)
+            {
+                await publisher.PublishAsync(message);
+                _recorder.TrackPublished(message.Id);
+            }
+
+            output.WriteLine($"Finished publishing a batch with {failures}% failures");
         });
 
         _tasks.Add(task);
@@ -135,10 +117,34 @@ public abstract class CircuitBreakerIntegrationContext : IDisposable, IObserver<
         return Task.WhenAll(_tasks);
     }
 
+    // GH-3137: how long we allow the listener to churn through the published messages (with requeues,
+    // and, in the trip test, a 10s circuit pause eating into the window). These assertions are about
+    // circuit-breaker *behavior*, not throughput — on a slow/contended CI runner the old 1-minute
+    // budget was itself the thing that failed. Kept generous so processing time is never under test.
+    protected static readonly TimeSpan ProcessingBudget = 3.Minutes();
+
+    // GH-3137: how many of the 1200 published messages must be processed for the trip test to pass.
+    // Buffered variants override this below 1200 — buffered mode acks each message to the broker the
+    // moment it lands in the in-memory buffer, so the handful caught in the listener teardown when the
+    // breaker trips are lost (already acked, never persisted). That is buffered mode's documented
+    // non-durable tradeoff; durable persists and inline has no buffer, so both still require all 1200.
+    // The trip/restart *behavior* is still asserted for every variant.
+    protected virtual int RequiredProcessedCountOnTrip => 1200;
+
+    // GH-3137: the circuit's Accepting transition after a trip is emitted by the Restarter, PauseTime
+    // (10s) after the trip and fully decoupled from message completion — the backlog can drain (and the
+    // waiter resolve) while the listener is still paused. Synchronize to the listener's real lifecycle
+    // instead of snapshotting RecordedStates at the instant messages happen to finish. Returns
+    // immediately if the listener is already Accepting.
+    protected Task waitForListenerToResumeAsync(TimeSpan timeout)
+    {
+        return _runtime.Tracker.WaitForListenerStatusAsync(_queueName, ListeningStatus.Accepting, timeout);
+    }
+
     [Fact]
     public async Task everything_is_wonderful_even_though_there_are_some_failures_so_do_not_ever_trip()
     {
-        var messageWaiter = Recorder.WaitForMessagesToBeProcessed(_output, 1200, 2.Minutes());
+        var messageWaiter = _recorder.WaitForMessagesToBeProcessed(1200, ProcessingBudget);
 
         publishHundredMessagesNow(5);
         publishHundredMessagesNow(5);
@@ -157,13 +163,17 @@ public abstract class CircuitBreakerIntegrationContext : IDisposable, IObserver<
 
         await messageWaiter;
 
-        assertTheCircuitBreakerNeverTripped();
+        // GH-3832: a trip now publishes Paused, not Stopped. This assertion has to follow it --
+        // left on Stopped it would pass no matter how many times the breaker tripped.
+        _observer.RecordedStates.ShouldNotContain(ListeningStatus.Paused);
     }
 
+    // virtual so a single variant can be skipped without taking the other variants with it --
+    // see durable_and_not_parallel and GH-3680.
     [Fact]
-    public async Task the_circuit_breaker_should_trip_and_restart()
+    public virtual async Task the_circuit_breaker_should_trip_and_restart()
     {
-        var messageWaiter = Recorder.WaitForMessagesToBeProcessed(_output, 1200, 1.Minutes());
+        var messageWaiter = _recorder.WaitForMessagesToBeProcessed(RequiredProcessedCountOnTrip, ProcessingBudget);
 
         publishHundredMessagesNow(10);
         publishHundredMessagesNow(80);
@@ -171,13 +181,11 @@ public abstract class CircuitBreakerIntegrationContext : IDisposable, IObserver<
         publishHundredMessagesNow(25);
         publishHundredMessagesNow(25);
 
-#pragma warning disable CS4014
-        Task.Factory.StartNew(async () =>
-#pragma warning restore CS4014
+        _ = Task.Run(async () =>
         {
             await Task.Delay(10.Seconds());
-            Recorder.NeverFail = true;
-        });
+            _recorder.NeverFail = true;
+        }, TestContext.Current.CancellationToken);
 
         delayPublishHundredMessages(5.Seconds(), 5);
         delayPublishHundredMessages(10.Seconds(), 5);
@@ -191,8 +199,14 @@ public abstract class CircuitBreakerIntegrationContext : IDisposable, IObserver<
 
         await messageWaiter;
 
-        assertTheCircuitBreakerTripped();
-        assertTheCircuitBreakerWasReset();
+        // It tripped at least once... (GH-3832: a circuit breaker trip is a timed pause, so it
+        // reports Paused rather than Stopped)
+        _observer.RecordedStates.ShouldContain(ListeningStatus.Paused);
+
+        // ...and it recovers. Wait for the actual restart rather than asserting RecordedStates.Last()
+        // at the instant messages finish — that snapshot races the Restarter's post-pause Accepting
+        // (see waitForListenerToResumeAsync / GH-3137).
+        await waitForListenerToResumeAsync(1.Minutes());
     }
 }
 
@@ -203,35 +217,4 @@ public enum MessageResult
     BadImage
 }
 
-public record SometimesFails(int Number, MessageResult First, MessageResult Second, MessageResult Third);
-
-public class OutputLogger<T> : ILogger<T>, IDisposable
-{
-    private readonly ITestOutputHelper _output;
-
-    public OutputLogger(ITestOutputHelper output)
-    {
-        _output = output;
-    }
-
-    public void Dispose()
-    {
-    }
-
-    public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
-        Func<TState, Exception?, string> formatter)
-    {
-        _output.WriteLine(formatter(state, exception));
-    }
-
-    public bool IsEnabled(LogLevel logLevel)
-    {
-        return true;
-        //return typeof(T).Name == "DurabilityAgent";
-    }
-
-    public IDisposable BeginScope<TState>(TState state) where TState : notnull
-    {
-        return this;
-    }
-}
+public record SometimesFails(Guid Id, MessageResult First, MessageResult Second, MessageResult Third);

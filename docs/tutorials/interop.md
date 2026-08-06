@@ -54,7 +54,7 @@ envelope.TenantId = "222";
 // Not every broker cares about this of course
 envelope.GroupId = "BBB";
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/InteropSamples.cs#L9-L35' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_create_an_outgoing_envelope' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/InteropSamples.cs#L9-L34' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_create_an_outgoing_envelope' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 As you can probably imagine, Wolverine uses this structure all throughout its internals to handle, send, track, and otherwise
@@ -108,7 +108,7 @@ the raw binary data (the MassTransit and CloudEvents interoperability works this
 In this first sample, I'm going to write a simplistic mapper for Kafka that assumes everything coming into an 
 endpoint is JSON and a specific type:
 
-<!-- snippet: sample_OurKafkaJsonMapper -->
+<!-- snippet: sample_ourkafkajsonmapper -->
 <a id='snippet-sample_ourkafkajsonmapper'></a>
 ```cs
 // Simplistic envelope mapper that expects every message to be of
@@ -145,7 +145,7 @@ public class OurKafkaJsonMapper<TMessage> : IKafkaEnvelopeMapper
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Kafka/Wolverine.Kafka.Tests/DocumentationSamples.cs#L193-L229' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_ourkafkajsonmapper' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Kafka/Wolverine.Kafka.Tests/DocumentationSamples.cs#L197-L232' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_ourkafkajsonmapper' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Which is essentially how the built in "Raw JSON" mapper works in external transport mappers. In the envelope mapper above
@@ -166,7 +166,7 @@ builder.UseWolverine(opts =>
     // connection string out of configuration
     var azureServiceBusConnectionString = builder
         .Configuration
-        .GetConnectionString("azure-service-bus");
+        .GetConnectionString("azure-service-bus")!;
 
     // Connect to the broker in the simplest possible way
     opts.UseAzureServiceBus(azureServiceBusConnectionString).AutoProvision();
@@ -178,28 +178,32 @@ builder.UseWolverine(opts =>
         {
             // Not sure how useful this would be, but we can start from
             // the baseline Wolverine mapping and just override a few mappings
-            mapper.MapPropertyToHeader(x => x.ContentType, "OtherTool.ContentType");
-            mapper.MapPropertyToHeader(x => x.CorrelationId, "OtherTool.CorrelationId");
+            mapper.MapPropertyToHeader(x => x.ContentType!, "OtherTool.ContentType");
+            mapper.MapPropertyToHeader(x => x.CorrelationId!, "OtherTool.CorrelationId");
             // and more
             
             // or a little uglier where you might be mapping and transforming data between
             // the transport's model and the Wolverine Envelope
-            mapper.MapProperty(x => x.ReplyUri, 
+            mapper.MapProperty(x => x.ReplyUri!,
                 (e, msg) => e.ReplyUri = new Uri($"asb://queue/{msg.ReplyTo}"),
                 (e, msg) => msg.ReplyTo = "response");
+
+            // customize the incoming mapping
+            mapper.MapIncomingProperty(x => x.ReplyUri!,
+                (e, msg) => e.ReplyUri = new Uri($"asb://queue/{msg.ReplyTo}"));
             
         });
 
 });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Azure/Wolverine.AzureServiceBus.Tests/DocumentationSamples.cs#L466-L501' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_customized_envelope_mapping' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Azure/Wolverine.AzureServiceBus.Tests/DocumentationSamples.cs#L451-L489' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_customized_envelope_mapping' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 That code isn't necessarily for the feint of heart, but that will sometimes be an easier recipe than trying to write
 a custom mapper from scratch. The NServiceBus interoperability for everything but Amazon SQS/SNS transports uses this 
 approach:
 
-<!-- snippet: sample_show_the_NServiceBus_mapping -->
+<!-- snippet: sample_show_the_nservicebus_mapping -->
 <a id='snippet-sample_show_the_nservicebus_mapping'></a>
 ```cs
 public void UseNServiceBusInterop()
@@ -222,14 +226,14 @@ public void UseNServiceBusInterop()
 
         void WriteReplyToAddress(Envelope e, IBasicProperties props)
         {
-            props.Headers["NServiceBus.ReplyToAddress"] = replyAddress.Value;
+            props.Headers!["NServiceBus.ReplyToAddress"] = replyAddress.Value;
         }
 
         void ReadReplyUri(Envelope e, IReadOnlyBasicProperties props)
         {
-            if (props.Headers.TryGetValue("NServiceBus.ReplyToAddress", out var raw))
+            if (props.Headers!.TryGetValue("NServiceBus.ReplyToAddress", out var raw))
             {
-                var queueName = (raw is byte[] b ? Encoding.Default.GetString(b) : raw.ToString())!;
+                var queueName = (raw is byte[] b ? Encoding.UTF8.GetString(b) : raw!.ToString())!;
                 e.ReplyUri = new Uri($"{_parent.Protocol}://queue/{queueName}");
             }
         }
@@ -238,12 +242,12 @@ public void UseNServiceBusInterop()
     });
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ/Internal/RabbitMqEndpoint.NServiceBus.cs#L10-L48' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_show_the_nservicebus_mapping' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ/Internal/RabbitMqEndpoint.NServiceBus.cs#L10-L47' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_show_the_nservicebus_mapping' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Finally, here's another example that works quite differently where the mapper sets a serializer directly on the `Envelope`:
 
-<!-- snippet: sample_MassTransitMapper_for_SQS -->
+<!-- snippet: sample_masstransitmapper_for_sqs -->
 <a id='snippet-sample_masstransitmapper_for_sqs'></a>
 ```cs
 // This guy is the envelope mapper for interoperating
@@ -259,6 +263,8 @@ internal class MassTransitMapper : ISqsEnvelopeMapper
         _serializer = new MassTransitJsonSerializer(endpoint);
     }
 
+    public override string ToString() => "MassTransit Interop";
+
     public MassTransitJsonSerializer Serializer => _serializer;
 
     public string BuildMessageBody(Envelope envelope)
@@ -268,21 +274,31 @@ internal class MassTransitMapper : ISqsEnvelopeMapper
 
     public IEnumerable<KeyValuePair<string, MessageAttributeValue>> ToAttributes(Envelope envelope)
     {
-        yield break;
+        if (!string.IsNullOrEmpty(envelope.ParentId))
+        {
+            yield return new KeyValuePair<string, MessageAttributeValue>(
+                MassTransitHeaders.ActivityId,
+                new MessageAttributeValue { DataType = "String", StringValue = envelope.ParentId });
+        }
     }
 
     public void ReadEnvelopeData(Envelope envelope, string messageBody, IDictionary<string, MessageAttributeValue> attributes)
     {
         // TODO -- this could be more efficient of course
         envelope.Data = Encoding.UTF8.GetBytes(messageBody);
-        
+
         // This is the really important part
         // of the mapping
         envelope.Serializer = _serializer;
+
+        if (attributes.TryGetValue(MassTransitHeaders.ActivityId, out var activityId))
+        {
+            envelope.ParentId = activityId.StringValue;
+        }
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/AWS/Wolverine.AmazonSqs/Internal/MassTransitMapper.cs#L7-L45' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_masstransitmapper_for_sqs' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/AWS/Wolverine.AmazonSqs/Internal/MassTransitMapper.cs#L7-L56' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_masstransitmapper_for_sqs' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 In the case above, the `MassTransitSerializer` is a two step process that first deserializes a JSON document that contains
@@ -330,7 +346,7 @@ using var host = await Host.CreateDefaultBuilder()
                 });
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Samples.cs#L193-L226' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_rabbitmq_interop_with_masstransit' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Samples.cs#L210-L242' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_rabbitmq_interop_with_masstransit' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Here's some details that you will need to know:
@@ -360,7 +376,7 @@ builder.UseWolverine(opts =>
     // connection string out of configuration
     var azureServiceBusConnectionString = builder
         .Configuration
-        .GetConnectionString("azure-service-bus");
+        .GetConnectionString("azure-service-bus")!;
 
     // Connect to the broker in the simplest possible way
     opts.UseAzureServiceBus(azureServiceBusConnectionString).AutoProvision();
@@ -375,7 +391,7 @@ builder.UseWolverine(opts =>
     opts.Policies.RegisterInteropMessageAssembly(typeof(IInterfaceMessage).Assembly);
 });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Azure/Wolverine.AzureServiceBus.Tests/DocumentationSamples.cs#L509-L533' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_opting_into_nservicebus' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Azure/Wolverine.AzureServiceBus.Tests/DocumentationSamples.cs#L497-L520' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_opting_into_nservicebus' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 And some details that you will need to know:
@@ -418,7 +434,7 @@ using var host = await Host.CreateDefaultBuilder()
             .InteropWithCloudEvents(new JsonSerializerOptions());
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Samples.cs#L231-L249' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_rabbitmq_interop_with_cloudevents' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Samples.cs#L247-L264' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_rabbitmq_interop_with_cloudevents' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 With CloudEvents interoperability:
@@ -427,3 +443,89 @@ With CloudEvents interoperability:
 * Wolverine is again depending on [message type aliases](/guide/messages.html#message-type-name-or-alias) to "know" what message type the CloudEvents envelopes are referring to, and you might very well
   have to explicitly register message type aliases to bridge the gap between CloudEvents and your Wolverine application.
 
+
+## Interop with NServiceBus over Database Transports
+
+Besides the broker transports above, Wolverine can interoperate with NServiceBus over its
+[SQL Server **and** PostgreSQL transports](https://docs.particular.net/transports/sql/) by reading and writing the
+NServiceBus queue tables directly. Rather than a custom envelope mapper layered onto a shared broker, these are
+dedicated transports that speak Particular's documented
+[native integration](https://docs.particular.net/transports/sql/native-integration) contract — one table per queue
+with a JSON `Headers` column and a raw `Body` column. The SQL Server flavor is shown below; PostgreSQL is identical
+with `UseNServiceBusPostgresqlInterop()` / `ListenToNServiceBusPostgresqlQueue()` / `ToNServiceBusPostgresqlQueue()`
+from `Wolverine.Postgresql.Transport.NServiceBus`.
+
+```cs
+using Wolverine.SqlServer.Transport.NServiceBus;
+
+builder.UseWolverine(opts =>
+{
+    // Wolverine's own durable inbox/outbox still lives in SQL Server
+    opts.PersistMessagesWithSqlServer(connectionString, "wolverine");
+
+    opts.UseNServiceBusSqlServerInterop();
+
+    // Publish to an NServiceBus endpoint's queue table
+    opts.PublishMessage<OrderPlaced>().ToNServiceBusSqlServerQueue("nsb");
+
+    // Listen to Wolverine's own queue table and use it for replies
+    opts.ListenToNServiceBusSqlServerQueue("wolverine").UseForReplies();
+
+    // Bind NServiceBus interface-typed messages to Wolverine's concrete types
+    opts.Policies.RegisterInteropMessageAssembly(typeof(IOrderContract).Assembly);
+});
+```
+
+A few things to note about NServiceBus database interop:
+
+* NServiceBus normally owns and provisions its own queue tables, so `AutoProvision` is **off by default** for these
+  endpoints. Pass `UseNServiceBusSqlServerInterop(autoProvision: true)` only when you want Wolverine to create them.
+* Message-type identity is mapped two ways. Outgoing messages carry the `NServiceBus.EnclosedMessageTypes` hierarchy
+  (concrete type *plus* implemented interfaces) so an NServiceBus handler registered against a shared interface still
+  binds. Incoming `EnclosedMessageTypes` are resolved against the assemblies you register with
+  `RegisterInteropMessageAssembly`.
+* Request/reply works: Wolverine stamps `NServiceBus.ReplyToAddress` from the endpoint you mark `UseForReplies()`.
+
+See the [SQL Server](/guide/durability/sqlserver.html#nservicebus-interoperability) and
+[PostgreSQL](/guide/durability/postgresql.html#nservicebus-interoperability) transport guides for the full set of
+options, including complete inline samples of both frameworks hosted side by side and the multi-tenant case.
+
+## Interop with MassTransit over Database Transports
+
+Wolverine can also interoperate with MassTransit over its
+[PostgreSQL SQL transport](https://masstransit.io/documentation/transports/sql). This is quite different from the
+NServiceBus database interop above: MassTransit's SQL transport is a function-driven, two-table model
+(`transport.message` + `transport.message_delivery`) that MassTransit owns and migrates itself. Rather than reading and
+writing a table, Wolverine calls MassTransit's stored functions — `send_message` to publish, `fetch_messages` to lease
+a batch, and `delete_message` / `unlock_message` to ack / nack.
+
+```cs
+using Wolverine.Postgresql.Transport.MassTransit;
+
+builder.UseWolverine(opts =>
+{
+    opts.PersistMessagesWithPostgresql(connectionString, "wolverine");
+
+    opts.UseMassTransitPostgresqlInterop(autoProvision: true);
+
+    opts.PublishMessage<OrderPlaced>().ToMassTransitPostgresqlQueue("masstransit");
+
+    opts.ListenToMassTransitPostgresqlQueue("wolverine").UseForReplies();
+
+    opts.Policies.RegisterInteropMessageAssembly(typeof(IOrderContract).Assembly);
+});
+```
+
+A few things to note:
+
+* MassTransit owns and migrates its `transport` schema, so it must be running (or have run) to create it. Wolverine
+  never provisions that schema — `autoProvision: true` only calls `create_queue_v2` for the queues Wolverine listens to.
+* Wolverine writes the **bare** message JSON to the `body` column plus the envelope fields as columns, and emits the
+  MassTransit `urn:message:{Namespace}:{TypeName}` message type. This is *not* the wrapped
+  `application/vnd.masstransit+json` envelope used by the broker transports above.
+* Receive is lease-based: each fetched message carries a `(message_delivery_id, lock_id)` pair that Wolverine uses to
+  ack (`delete_message`) on success or nack (`unlock_message`) on failure.
+
+See the [PostgreSQL transport guide](/guide/durability/postgresql.html#masstransit-interoperability) for the full set of
+options. The Wolverine-side configuration shown above is the complete setup; MassTransit owns and migrates its own
+`transport` schema.

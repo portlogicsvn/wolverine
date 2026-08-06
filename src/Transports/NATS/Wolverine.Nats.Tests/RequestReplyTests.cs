@@ -1,12 +1,10 @@
+using IntegrationTests;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using NATS.Client.Core;
-using Wolverine.Nats.Tests.Helpers;
 using Wolverine.Runtime.Routing;
 using Wolverine.Tracking;
 using Xunit;
-using Xunit.Abstractions;
-
 namespace Wolverine.Nats.Tests;
 
 [Collection("NATS Integration Tests")]
@@ -21,7 +19,7 @@ public class RequestReplyTests : IAsyncLifetime
         _output = output;
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         var natsUrl = Environment.GetEnvironmentVariable("NATS_URL") ?? "nats://localhost:4222";
 
@@ -61,7 +59,7 @@ public class RequestReplyTests : IAsyncLifetime
         }
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         if (_host != null)
         {
@@ -105,10 +103,8 @@ public class RequestReplyTests : IAsyncLifetime
         await Assert.ThrowsAsync<UnknownEndpointException>(async () =>
         {
             await bus.EndpointFor("nats://nonexistent.subject")
-                .InvokeAsync<PongMessage>(
-                    new PingMessage { Name = "NoEndpoint" },
-                    timeout: TimeSpan.FromSeconds(1)
-                );
+                .InvokeAsync<PongMessage>(new PingMessage { Name = "NoEndpoint" },
+                    cancellation: TestContext.Current.CancellationToken);
         });
     }
 }

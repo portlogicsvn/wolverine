@@ -77,7 +77,7 @@ public class sticky_message_handlers : IntegrationContext
                 
                 opts.Policies.Add(policy);
 
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
         
         // Original chain for StickyMessage
         // The sticky handler for "blue"
@@ -109,7 +109,7 @@ public class when_definining_sticky_handlers_by_fluent_interface
 
                 opts.LocalQueue("blue").AddStickyHandler(typeof(BlueSticky2Handler));
                 opts.LocalQueue("green").AddStickyHandler(typeof(GreenSticky2Handler));
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
         
         var stickyMessage = new StickyMessage2();
         var session = await host.SendMessageAndWaitAsync(stickyMessage, timeoutInMilliseconds:60000);
@@ -167,10 +167,9 @@ public class when_building_a_handler_chain_for_sticky_handlers
             .EndpointName.ShouldBe("green");
     }
 
-    public static async Task explicit_listener()
+    private static async Task explicit_listener()
     {
         #region sample_named_listener_endpoint
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -182,10 +181,9 @@ public class when_building_a_handler_chain_for_sticky_handlers
         #endregion
     }
 
-    public static async Task explicit_listeners_by_fluent_interface()
+    private static async Task explicit_listeners_by_fluent_interface()
     {
         #region sample_sticky_handlers_by_endpoint_with_fluent_interface
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -231,14 +229,12 @@ public class HandlerGrouping : IGrouping<Type, HandlerCall>
 
 
 
-#region sample_StickyMessage
-
+#region sample_stickymessage
 public class StickyMessage;
 
     #endregion
 
     #region sample_using_sticky_handler_attribute
-
     [StickyHandler("blue")]
     public static class BlueStickyHandler
     {

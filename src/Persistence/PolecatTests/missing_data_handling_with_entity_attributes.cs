@@ -13,9 +13,9 @@ namespace PolecatTests;
 
 public class missing_data_handling_with_entity_attributes : IAsyncLifetime
 {
-    private IHost _host;
+    private IHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -32,9 +32,10 @@ public class missing_data_handling_with_entity_attributes : IAsyncLifetime
             .ApplyAllConfiguredChangesToDatabaseAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _host.StopAsync();
+        _host.Dispose();
     }
 
     [Fact]
@@ -60,7 +61,7 @@ public class missing_data_handling_with_entity_attributes : IAsyncLifetime
         var thing = new PcThing();
         await using var insertSession = _host.Services.GetRequiredService<IDocumentStore>().LightweightSession();
         insertSession.Store(thing);
-        await insertSession.SaveChangesAsync();
+        await insertSession.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         var tracked = await _host.InvokeMessageAndWaitAsync(new UsePcThing1(thing.Id));
 
@@ -117,7 +118,7 @@ public class missing_data_handling_with_entity_attributes : IAsyncLifetime
         var guidThing = new PcGuidThing();
         await using var insertSession = _host.Services.GetRequiredService<IDocumentStore>().LightweightSession();
         insertSession.Store(guidThing);
-        await insertSession.SaveChangesAsync();
+        await insertSession.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         var tracked = await _host.InvokeMessageAndWaitAsync(new UsePcGuidThing1(guidThing.Id));
 

@@ -16,12 +16,22 @@ internal class ExclusiveListenerAgent : IAgent
         _endpoint = endpoint;
         _runtime = runtime;
 
-        Uri = new Uri($"{ExclusiveListenerFamily.SchemeName}://{_endpoint.EndpointName}");
+        // Include the endpoint's transport scheme so two endpoints that share the same logical
+        // EndpointName across different transports (e.g. a "critterwatch" queue on both Rabbit and
+        // SQS) don't collapse to the same agent Uri and collide in the family's ToDictionary. GH-3027.
+        Uri = new Uri($"{ExclusiveListenerFamily.SchemeName}://{_endpoint.Uri.Scheme}/{_endpoint.EndpointName}");
     }
 
-    public Task StartAsync(CancellationToken cancellationToken)
+    public async Task StartAsync(CancellationToken cancellationToken)
     {
-        return _runtime.Endpoints.StartListenerAsync(_endpoint, cancellationToken);
+        await _runtime.Endpoints.StartListenerAsync(_endpoint, cancellationToken);
+
+        // GH-3604: the family hands out ONE cached agent instance per endpoint for the life of the runtime,
+        // so a restart lands on the very object a previous StopAsync() marked Stopped. Without resetting the
+        // status here, a node that has ever given this listener up runs it but reports it as not running --
+        // it never appears in AllRunningAgentUris() again, and CheckHealthAsync() below reports Unhealthy
+        // forever.
+        Status = AgentStatus.Running;
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
@@ -33,6 +43,12 @@ internal class ExclusiveListenerAgent : IAgent
     public Uri Uri { get; set; }
 
     public AgentStatus Status { get; set; } = AgentStatus.Running;
+
+    /// <summary>
+    /// Human-readable description for monitoring tools — see
+    /// <see cref="IAgent.Description"/>.
+    /// </summary>
+    public string Description => $"Exclusive listener for {_endpoint.Uri} — only one node at a time holds the listening role for this endpoint, so the cluster avoids competing consumers.";
 
     public Task<HealthCheckResult> CheckHealthAsync(HealthCheckContext context,
         CancellationToken cancellationToken = default)
@@ -51,6 +67,7 @@ internal class ExclusiveListenerAgent : IAgent
         return Task.FromResult(listeningAgent.Status switch
         {
             ListeningStatus.TooBusy => HealthCheckResult.Degraded($"Listener {_endpoint.EndpointName} is too busy"),
+            ListeningStatus.Paused => HealthCheckResult.Degraded($"Listener {_endpoint.EndpointName} is administratively paused and will not self-resume"),
             ListeningStatus.GloballyLatched => HealthCheckResult.Unhealthy($"Listener {_endpoint.EndpointName} is globally latched"),
             _ => HealthCheckResult.Healthy()
         });

@@ -31,6 +31,8 @@ internal class CoreNatsSubscriber : INatsSubscriber
 
     public bool SupportsNativeDeadLetterQueue => false;
 
+    public TransportConnectionState ConnectionState => _connection.ConnectionState.ToTransportConnectionState();
+
     public async Task StartAsync(
         IListener listener,
         IReceiver receiver,
@@ -59,7 +61,7 @@ internal class CoreNatsSubscriber : INatsSubscriber
                 "Starting Core NATS listener for pattern {Pattern} (base subject: {Subject}) with queue group {QueueGroup}",
                 _subscriptionPattern,
                 _endpoint.Subject,
-                _endpoint.QueueGroup ?? "(none)"
+                _endpoint.EffectiveQueueGroup ?? "(none)"
             );
         }
 
@@ -67,11 +69,12 @@ internal class CoreNatsSubscriber : INatsSubscriber
         {
             IAsyncDisposable subscription;
 
-            if (!string.IsNullOrEmpty(_endpoint.QueueGroup))
+            var queueGroup = _endpoint.EffectiveQueueGroup;
+            if (!string.IsNullOrEmpty(queueGroup))
             {
                 subscription = await _connection.SubscribeCoreAsync<byte[]>(
                     pattern,
-                    _endpoint.QueueGroup,
+                    queueGroup,
                     cancellationToken: cancellation
                 );
             }
@@ -105,7 +108,7 @@ internal class CoreNatsSubscriber : INatsSubscriber
                                 // Skip messages without headers or without message-type header.
                                 // These are typically NATS protocol messages (JetStream acks, etc.)
                                 // that should not be processed by Wolverine.
-                                if (msg.Headers == null || !msg.Headers.ContainsKey("message-type"))
+                                if (_endpoint.MessageType == null && (msg.Headers == null || !msg.Headers.ContainsKey("message-type")))
                                 {
                                     _logger.LogDebug(
                                         "Skipping NATS message without message-type header from subject {Subject}. DataLength={DataLength}, HasHeaders={HasHeaders}",

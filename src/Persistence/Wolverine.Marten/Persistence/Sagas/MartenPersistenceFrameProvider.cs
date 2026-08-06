@@ -1,23 +1,31 @@
-﻿using System.Reflection;
+using System.Diagnostics.CodeAnalysis;
+using System.Reflection;
 using JasperFx;
 using JasperFx.CodeGeneration;
 using JasperFx.CodeGeneration.Frames;
 using JasperFx.CodeGeneration.Model;
 using JasperFx.Core.Reflection;
 using Marten;
+using JasperFx.Events;
 using Marten.Events;
 using Marten.Storage.Metadata;
 using Wolverine.Configuration;
 using Wolverine.Marten.Codegen;
+using Wolverine.Marten.Requirements;
 using Wolverine.Persistence;
 using Wolverine.Persistence.Sagas;
 using Wolverine.Runtime;
-using IRevisioned = Marten.Metadata.IRevisioned;
+using IRevisioned = JasperFx.IRevisioned;
 
 namespace Wolverine.Marten.Persistence.Sagas;
 
 internal class MartenPersistenceFrameProvider : IPersistenceFrameProvider
 {
+    // Marten can persist any document, so CanPersist claims every type. Yield to selective
+    // providers (EF Core) for the entity types they actually map, regardless of the order the
+    // integrations were registered in
+    public bool IsCatchAll => true;
+
     public bool CanPersist(Type entityType, IServiceContainer container, out Type persistenceService)
     {
         persistenceService = typeof(IDocumentSession);
@@ -38,7 +46,7 @@ internal class MartenPersistenceFrameProvider : IPersistenceFrameProvider
         {
             chain.Middleware.Add(new CreateDocumentSessionFrame(chain));
         }
-        
+
         if (chain is not SagaChain)
         {
             if (!chain.Postprocessors.OfType<DocumentSessionSaveChanges>().Any())
@@ -49,6 +57,22 @@ internal class MartenPersistenceFrameProvider : IPersistenceFrameProvider
             if (!chain.Postprocessors.OfType<FlushOutgoingMessages>().Any())
             {
                 chain.Postprocessors.Add(new FlushOutgoingMessages());
+            }
+        }
+
+        // Codegen-time opt-in: when WolverineOptions.Tracking.OutboxDiagnosticsEnabled
+        // is set, bracket the Marten SaveChangesAsync postprocessor with
+        // marten.savechanges.start / marten.savechanges.finished ActivityEvents so
+        // operators can profile slow transactional commits via OTel without paying
+        // the cost when the flag is off (the ActivityEvent calls aren't generated
+        // at all in that case - same no-runtime-if/then design as GH-2694).
+        var options = container.GetInstance<WolverineOptions>();
+        if (options?.Tracking.OutboxDiagnosticsEnabled == true)
+        {
+            foreach (var saveChanges in chain.Postprocessors.OfType<DocumentSessionSaveChanges>())
+            {
+                saveChanges.ActivityEventBeforeCall = MartenTracing.MartenSaveChangesStarted;
+                saveChanges.ActivityEventAfterCall = MartenTracing.MartenSaveChangesFinished;
             }
         }
     }
@@ -67,9 +91,60 @@ internal class MartenPersistenceFrameProvider : IPersistenceFrameProvider
 
         if (chain.ReturnVariablesOfType<IMartenOp>().Any()) return true;
 
+        // GH-2941: detect parameter attributes whose Modify() injects a non-MethodCall frame that
+        // depends on IDocumentSession. Chain.serviceDependencies() only walks
+        // Middleware.OfType<MethodCall>() so those dependencies are invisible, AND
+        // WolverineParameterAttribute.Modify() runs lazily inside HandlerChain.applyCustomizations
+        // - long AFTER AutoApplyTransactions has evaluated CanApply. Without this detection,
+        // AutoApplyTransactions skips the chain entirely, no SaveChangesAsync postprocessor is
+        // attached, and a scheduled cascade (e.g. DeliveryMessage<T>.DelayedFor(...)) is queued
+        // onto the session via StoreIncoming(...) but never flushed -> the scheduled envelope
+        // never lands in wolverine_incoming_envelopes and is lost.
+        //
+        // [WriteAggregate] and [BoundaryModel] don't need this branch - their Modify() paths
+        // explicitly call ApplyTransactionSupport themselves. The at-risk attributes are
+        // [ReadAggregate] (injects FetchLatestAggregateFrame) and DocumentExists/DoesNotExist
+        // (ModifyChainAttributes that inject DocumentExistenceCheckFrame).
+        if (ChainHasMartenSessionAttributes(chain)) return true;
+
         var serviceDependencies = chain
             .ServiceDependencies(container, new []{typeof(IDocumentSession), typeof(IQuerySession), typeof(IDocumentOperations)}).ToArray();
         return serviceDependencies.Any(x => x == typeof(IDocumentSession) || x == typeof(IDocumentOperations) || x.Closes(typeof(IEventStream<>)));
+    }
+
+    private static bool ChainHasMartenSessionAttributes(IChain chain)
+    {
+        foreach (var call in chain.HandlerCalls())
+        {
+            foreach (var parameter in call.Method.GetParameters())
+            {
+                if (parameter.GetCustomAttributes().Any(a => a is ReadAggregateAttribute)) return true;
+            }
+        }
+
+        // [DocumentExists<T>] / [DocumentDoesNotExist<T>] are ModifyChainAttribute-based and can
+        // sit on either the handler method or the message type. Walk both.
+        foreach (var call in chain.HandlerCalls())
+        {
+            if (call.Method.GetCustomAttributes().Any(IsDocumentExistsAttribute)) return true;
+            if (call.HandlerType.GetCustomAttributes(true).OfType<Attribute>().Any(IsDocumentExistsAttribute)) return true;
+        }
+
+        var messageType = chain.InputType();
+        if (messageType != null && messageType.GetCustomAttributes(true).OfType<Attribute>().Any(IsDocumentExistsAttribute))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool IsDocumentExistsAttribute(Attribute attribute)
+    {
+        var type = attribute.GetType();
+        if (!type.IsGenericType) return false;
+        var def = type.GetGenericTypeDefinition();
+        return def == typeof(DocumentExistsAttribute<>) || def == typeof(DocumentDoesNotExistAttribute<>);
     }
 
     public Frame DetermineLoadFrame(IServiceContainer container, Type sagaType, Variable sagaId)
@@ -126,6 +201,48 @@ internal class MartenPersistenceFrameProvider : IPersistenceFrameProvider
     public Frame[] DetermineFrameToNullOutMaybeSoftDeleted(Variable entity)
     {
         return [new SetVariableToNullIfSoftDeletedFrame(entity)];
+    }
+
+    public bool TryBuildFetchSpecificationFrame(
+        Variable specVariable,
+        IServiceContainer container,
+        [NotNullWhen(true)] out Frame? frame,
+        [NotNullWhen(true)] out Variable? result)
+    {
+        if (specVariable is null)
+        {
+            frame = null;
+            result = null;
+            return false;
+        }
+
+        var specType = specVariable.VariableType;
+
+        // Marten spec shapes: ICompiledQuery<,>, IBatchQueryPlan<>, IQueryPlan<>
+        var compiled = specType.FindInterfaceThatCloses(typeof(global::Marten.Linq.ICompiledQuery<,>));
+        var batchPlan = specType.FindInterfaceThatCloses(typeof(global::Marten.IBatchQueryPlan<>));
+        var queryPlan = specType.FindInterfaceThatCloses(typeof(global::Marten.IQueryPlan<>));
+
+        // Namespace guard - only Marten's own interfaces match (user types in other
+        // namespaces that happen to be named the same won't match).
+        var isMartenCompiled = compiled is not null
+                               && compiled.Namespace == typeof(global::Marten.Linq.ICompiledQuery<,>).Namespace;
+        var isMartenBatchPlan = batchPlan is not null
+                                && batchPlan.Namespace == typeof(global::Marten.IBatchQueryPlan<>).Namespace;
+        var isMartenPlan = queryPlan is not null
+                           && queryPlan.Namespace == typeof(global::Marten.IQueryPlan<>).Namespace;
+
+        if (!isMartenCompiled && !isMartenBatchPlan && !isMartenPlan)
+        {
+            frame = null;
+            result = null;
+            return false;
+        }
+
+        var fetch = new FetchSpecificationFrame(specVariable);
+        frame = fetch;
+        result = fetch.Result;
+        return true;
     }
 }
 

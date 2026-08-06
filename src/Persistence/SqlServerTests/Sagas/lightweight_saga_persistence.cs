@@ -16,20 +16,20 @@ public class SqlServerSagaHost : ISagaHost
 {
     private IHost _host = null!;
 
-    public IHost BuildHost<TSaga>()
+    public async Task<IHost> BuildHostAsync<TSaga>()
     {
-        _host =  Host.CreateDefaultBuilder()
+        _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
                 opts.DisableConventionalDiscovery().IncludeType<TSaga>();
 
                 opts.PersistMessagesWithSqlServer(Servers.SqlServerConnectionString, "sagas");
-            }).Start();
+            }).StartAsync();
 
         return _host;
     }
 
-    public async Task<T> LoadState<T>(Guid id) where T : Saga
+    public async Task<T?> LoadState<T>(Guid id) where T : Saga
     {
         var messageStore = _host.Services.GetRequiredService<IMessageStore>()
             .ShouldBeOfType<SqlServerMessageStore>();
@@ -44,7 +44,7 @@ public class SqlServerSagaHost : ISagaHost
         return saga!;
     }
 
-    public async Task<T> LoadState<T>(int id) where T : Saga
+    public async Task<T?> LoadState<T>(int id) where T : Saga
     {
         var messageStore = _host.Services.GetRequiredService<IMessageStore>()
             .ShouldBeOfType<SqlServerMessageStore>();
@@ -60,7 +60,7 @@ public class SqlServerSagaHost : ISagaHost
         return saga!;
     }
 
-    public async Task<T> LoadState<T>(long id) where T : Saga
+    public async Task<T?> LoadState<T>(long id) where T : Saga
     {
         var messageStore = _host.Services.GetRequiredService<IMessageStore>()
             .ShouldBeOfType<SqlServerMessageStore>();
@@ -76,7 +76,7 @@ public class SqlServerSagaHost : ISagaHost
         return saga!;
     }
 
-    public async Task<T> LoadState<T>(string id) where T : Saga
+    public async Task<T?> LoadState<T>(string id) where T : Saga
     {
         var messageStore = _host.Services.GetRequiredService<IMessageStore>()
             .ShouldBeOfType<SqlServerMessageStore>();

@@ -3,8 +3,7 @@ using JasperFx.Resources;
 using Microsoft.Extensions.Hosting;
 using Shouldly;
 using Wolverine.Tracking;
-using Xunit.Abstractions;
-
+using Xunit;
 namespace Wolverine.Kafka.Tests;
 
 public class configuration_precedence
@@ -34,7 +33,7 @@ public class configuration_precedence
                     }).Named("Specific"); // Not working as expected
 
                 opts.Services.AddResourceSetupOnStartup();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var runtime = host.GetRuntime();
 

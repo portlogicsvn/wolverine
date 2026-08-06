@@ -3,6 +3,7 @@ using Amazon.SQS.Model;
 using Newtonsoft.Json;
 using Wolverine.AmazonSqs.Internal;
 using Wolverine.Configuration;
+using Wolverine.Newtonsoft;
 using Wolverine.Runtime.Interop.MassTransit;
 using Wolverine.Runtime.Serialization;
 
@@ -23,6 +24,20 @@ public class
     public AmazonSqsSubscriberConfiguration ConfigureQueueCreation(Action<CreateQueueRequest> configure)
     {
         add(e => configure(e.Configuration));
+        return this;
+    }
+
+    /// <summary>
+    ///     Opt this standard (non-FIFO) queue into Amazon SQS fair queues by mapping
+    ///     <see cref="Envelope.GroupId"/> (set through <c>DeliveryOptions.GroupId</c> or message
+    ///     partitioning) to the SQS <c>MessageGroupId</c> on outgoing messages. This improves
+    ///     fairness for multi-tenant workloads and implies no ordering or deduplication semantics.
+    ///     Has no effect on FIFO queues, which always set <c>MessageGroupId</c>. See
+    ///     https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/using-messagegroupid-property.html
+    /// </summary>
+    public AmazonSqsSubscriberConfiguration EnableFairQueueMessageGroups()
+    {
+        add(e => e.EnableFairQueueMessageGroups = true);
         return this;
     }
 

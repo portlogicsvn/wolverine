@@ -24,7 +24,7 @@ public class with_one_sqlserver_context : IAsyncLifetime
 {
     private IHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         using var conn = new SqlConnection(Servers.SqlServerConnectionString);
         await conn.OpenAsync();
@@ -49,7 +49,7 @@ public class with_one_sqlserver_context : IAsyncLifetime
             }).StartAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _host.StopAsync();
         _host.Dispose();
@@ -73,8 +73,8 @@ public class with_one_sqlserver_context : IAsyncLifetime
         {
             BlogId = 1,
             Url = "http://codebetter.com"
-        });
-        await context.SaveChangesAsync();
+        }, TestContext.Current.CancellationToken);
+        await context.SaveChangesAsync(TestContext.Current.CancellationToken);
     }
 
     [Fact]
@@ -105,7 +105,11 @@ public class with_one_sqlserver_context : IAsyncLifetime
 
 public class Blog
 {
+    // The did_apply test assigns the id explicitly; without this, EF's convention
+    // makes the int key an identity column and Weasel >= 9.18's faithful
+    // translation creates the table that way (weasel#382), rejecting explicit ids
     [Column("id")]
+    [DatabaseGenerated(DatabaseGeneratedOption.None)]
     public int BlogId { get; set; }
     
     [Column("url")]

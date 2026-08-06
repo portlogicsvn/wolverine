@@ -8,18 +8,19 @@ using Xunit;
 
 namespace Wolverine.AzureServiceBus.Tests.ConventionalRouting;
 
-[Trait("Category", "Flaky")]
 public class end_to_end_with_conventional_routing : IAsyncLifetime
 {
     private IHost _receiver = null!;
     private IHost _sender = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _sender = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
-                opts.UseAzureServiceBusTesting().UseConventionalRouting().AutoProvision().AutoPurgeOnStartup();
+                opts.UseAzureServiceBusTesting()
+                    .UseConventionalRouting(x => x.ExcludeTypes(t => t != typeof(RoutedMessage)))
+                    .AutoProvision().AutoPurgeOnStartup();
                 opts.DisableConventionalDiscovery();
                 opts.ServiceName = "Sender";
 
@@ -29,14 +30,16 @@ public class end_to_end_with_conventional_routing : IAsyncLifetime
         _receiver = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
-                opts.UseAzureServiceBusTesting().UseConventionalRouting().AutoProvision().AutoPurgeOnStartup();
+                opts.UseAzureServiceBusTesting()
+                    .UseConventionalRouting(x => x.ExcludeTypes(t => t != typeof(RoutedMessage)))
+                    .AutoProvision().AutoPurgeOnStartup();
                 opts.ServiceName = "Receiver";
                 
                 opts.Services.AddResourceSetupOnStartup();
             }).StartAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _sender.StopAsync();
         _sender.Dispose();

@@ -14,7 +14,7 @@ public class global_entity_defaults_http : IAsyncLifetime
 {
     private IAlbaHost theHost = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         var builder = WebApplication.CreateBuilder([]);
 
@@ -41,7 +41,7 @@ public class global_entity_defaults_http : IAsyncLifetime
         });
     }
 
-    async Task IAsyncLifetime.DisposeAsync()
+    async ValueTask IAsyncDisposable.DisposeAsync()
     {
         if (theHost != null)
         {
@@ -62,7 +62,7 @@ public class global_entity_defaults_http : IAsyncLifetime
             x.ContentTypeShouldBe("application/problem+json");
         });
 
-        var details = tracked.ReadAsJson<ProblemDetails>();
+        var details = await tracked.ReadAsJsonAsync<ProblemDetails>();
         details.Detail.ShouldBe("Unknown Todo2 with identity nonexistent");
     }
 
@@ -77,6 +77,7 @@ public class global_entity_defaults_http : IAsyncLifetime
             x.StatusCodeShouldBe(404);
         });
 
-        tracked.ReadAsText().ShouldBeEmpty();
+        var text = await tracked.ReadAsTextAsync();
+        text.ShouldBeEmpty();
     }
 }

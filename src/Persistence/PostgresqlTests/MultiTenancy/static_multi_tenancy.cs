@@ -11,8 +11,7 @@ using Wolverine;
 using Wolverine.Persistence.Durability;
 using Wolverine.Postgresql;
 using Wolverine.RDBMS;
-using Xunit.Abstractions;
-
+using Xunit;
 namespace PostgresqlTests.MultiTenancy;
 
 // TODO -- gotta repeat this test, but with NpgsqlDataSource instead. Ugh.
@@ -83,7 +82,7 @@ public class static_multi_tenancy : MultiTenancyContext
     {
         var store = theHost.Services.GetRequiredService<IMessageStore>()
             .ShouldBeOfType<MultiTenantedMessageStore>();
-        var tables = await store.Main.As<PostgresqlMessageStore>().SchemaTables();
+        var tables = await store.Main.As<PostgresqlMessageStore>().SchemaTables(TestContext.Current.CancellationToken);
 
         var expected = @"
 static_multi_tenancy2.blues
@@ -121,7 +120,7 @@ static_multi_tenancy2.wolverine_outgoing_envelopes
         foreach (var tenantId in new string[] { "red", "blue", "green" })
         {
             var messageStore = await store.Source.FindAsync(tenantId);
-            var tables = await messageStore.As<PostgresqlMessageStore>().SchemaTables();
+            var tables = await messageStore.As<PostgresqlMessageStore>().SchemaTables(TestContext.Current.CancellationToken);
 
             tables.OrderBy(x => x.QualifiedName).Select(x => x.QualifiedName).ToArray()
                 .ShouldBe(expected);

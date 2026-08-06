@@ -12,7 +12,7 @@ using Wolverine.Transports;
 
 namespace Wolverine.Postgresql.Transport;
 
-internal class PostgresqlQueueListener : IListener
+internal class PostgresqlQueueListener : IListener, IReportReceiveLoopHealth
 {
     private readonly CancellationTokenSource _cancellation = new();
     private readonly PostgresqlQueue _queue;
@@ -20,14 +20,15 @@ internal class PostgresqlQueueListener : IListener
     private readonly NpgsqlDataSource _dataSource;
     private readonly string? _databaseName;
     private readonly ILogger<PostgresqlQueueListener> _logger;
-    private Task? _task;
+    // GH-3236: the main poll loop runs on the shared BackgroundReceiveLoop (heartbeat + fault/hung detection).
+    private BackgroundReceiveLoop? _loop;
     private readonly DurabilitySettings _settings;
     private Task? _scheduledTask;
     private readonly PostgresqlQueueSender _sender;
     private readonly string _tryPopMessagesDirectlySql;
     private readonly string _queueTableName;
     private readonly string _queueName;
-    private readonly string _schemaName;
+    private readonly string _quotedSchemaName;
     private readonly string _scheduledTableName;
     private readonly TimeSpan _pollingInterval;
 
@@ -47,7 +48,7 @@ internal class PostgresqlQueueListener : IListener
 
         _queueTableName = _queue.QueueTable.Identifier.QualifiedName;
         _scheduledTableName = _queue.ScheduledTable.Identifier.QualifiedName;
-        _schemaName = _queue.Parent.MessageStorageSchemaName;
+        _quotedSchemaName = _queue.Parent.MessageStorageSchemaName.QuoteIdentifier();
 
         _tryPopMessagesDirectlySql = $@"
 WITH message AS (
@@ -62,6 +63,10 @@ SELECT message.{DatabaseConstants.Body} from message;
 
     public IHandlerPipeline? Pipeline => _receiver.Pipeline;
 
+    // GH-3236: surface the poll loop's liveness (heartbeat + faulted/hung detection) for EndpointHealthSnapshot.
+    public ReceiveLoopStatus ReceiveLoopStatus => _loop?.ReceiveLoopStatus ?? ReceiveLoopStatus.NotStarted;
+    public DateTimeOffset? LastReceiveLoopActivityAt => _loop?.LastReceiveLoopActivityAt;
+
     public ValueTask CompleteAsync(Envelope envelope)
     {
         return ValueTask.CompletedTask;
@@ -72,23 +77,27 @@ SELECT message.{DatabaseConstants.Body} from message;
         await _sender.SendAsync(envelope, _cancellation.Token);
     }
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
-        _cancellation.Cancel();
-        _task.SafeDispose();
+        await _cancellation.CancelAsync();
+        if (_loop != null)
+        {
+            await _loop.DisposeAsync();
+        }
         _scheduledTask.SafeDispose();
-        return ValueTask.CompletedTask;
     }
 
     public Uri Address { get; }
-    public ValueTask StopAsync()
+
+    public async ValueTask StopAsync()
     {
-        _cancellation.Cancel();
+        await _cancellation.CancelAsync();
 
-        _task?.SafeDispose();
+        if (_loop != null)
+        {
+            await _loop.StopAsync(_settings.DrainTimeout);
+        }
         _scheduledTask?.SafeDispose();
-
-        return ValueTask.CompletedTask;
     }
 
     private async Task lookForScheduledMessagesAsync()
@@ -151,7 +160,7 @@ SELECT message.{DatabaseConstants.Body} from message;
             builder.StartNewCommand();
             builder.Append($"select count(*) from temp_move_{_queueName}");
 
-            var batch = builder.Compile();
+            await using var batch = builder.Compile();
             batch.Connection = conn;
 
             count = (long)(await batch
@@ -165,57 +174,28 @@ SELECT message.{DatabaseConstants.Body} from message;
         return count;
     }
 
-    private async Task listenForMessagesAsync()
+    // One poll-and-process iteration, driven by BackgroundReceiveLoop (which owns the loop task, the
+    // log -> backoff -> continue policy on error, the idle delay, the heartbeat, and teardown). Returns true when
+    // messages were processed (the busy-path delay below preserves the original pacing), false when idle (the loop
+    // applies its idle delay = _pollingInterval).
+    private async Task<bool> pollOnceAsync(CancellationToken token)
     {
-        var failedCount = 0;
+        var messages = _queue.Mode == EndpointMode.Durable
+            ? await TryPopDurablyAsync(_queue.MaximumMessagesToReceive, _settings, _logger, token)
+            : await TryPopAsync(_queue.MaximumMessagesToReceive, _logger, token);
 
-        while (!_cancellation.Token.IsCancellationRequested)
+        if (!messages.Any())
         {
-            try
-            {
-
-                var messages = _queue.Mode == EndpointMode.Durable
-                    ? await TryPopDurablyAsync(_queue.MaximumMessagesToReceive, _settings, _logger,
-                        _cancellation.Token)
-                    : await TryPopAsync(_queue.MaximumMessagesToReceive, _logger, _cancellation.Token);
-
-                failedCount = 0;
-
-                if (messages.Any())
-                {
-                    await _receiver.ReceivedAsync(this, messages.ToArray());
-
-                    if (messages.Count > _queue.MaximumMessagesToReceive)
-                    {
-                        await Task.Delay(250.Milliseconds());
-                    }
-                    else
-                    {
-                        await Task.Delay(_pollingInterval);
-                    }
-                }
-                else
-                {
-                    // Slow down if this is a periodically used queue
-                    await Task.Delay(_pollingInterval);
-                }
-            }
-            catch (Exception e)
-            {
-                if (e is TaskCanceledException && _cancellation.IsCancellationRequested)
-                {
-                    break;
-                }
-
-                failedCount++;
-                var pauseTime = failedCount > 5 ? 1.Seconds() : (failedCount * 100).Milliseconds();
-
-                _logger.LogError(e, "Error while trying to retrieve messages from PostgreSQL Queue {Name}",
-                    _queueName);
-
-                await Task.Delay(pauseTime);
-            }
+            return false;
         }
+
+        await _receiver.ReceivedAsync(this, messages.ToArray());
+
+        // Preserve the original post-process pacing between polls.
+        await Task.Delay(
+            messages.Count > _queue.MaximumMessagesToReceive ? 250.Milliseconds() : _pollingInterval, token);
+
+        return true;
     }
 
     public async Task<IReadOnlyList<Envelope>> TryPopDurablyAsync(int count, DurabilitySettings settings,
@@ -223,7 +203,7 @@ SELECT message.{DatabaseConstants.Body} from message;
     {
         var builder = new BatchBuilder();
 
-        builder.Append($"delete FROM {_queueTableName} where id in (select id from {_schemaName}.{DatabaseConstants.IncomingTable})");
+        builder.Append($"delete FROM {_queueTableName} where id in (select id from {_quotedSchemaName}.{DatabaseConstants.IncomingTable})");
         builder.StartNewCommand();
         builder.Append($"create temporary table temp_pop_{_queueName} ON COMMIT DROP as select id, body, message_type, keep_until from {_queueTableName} ORDER BY {_queueTableName}.timestamp limit ");
         builder.AppendParameter(count);
@@ -232,13 +212,13 @@ SELECT message.{DatabaseConstants.Body} from message;
         builder.StartNewCommand();
         builder.Append($"delete from {_queueTableName} where id in (select id from temp_pop_{_queueName})");
         builder.StartNewCommand();
-        var parameters = builder.AppendWithParameters($"INSERT INTO {_schemaName}.{DatabaseConstants.IncomingTable} (id, status, owner_id, body, message_type, received_at, keep_until) SELECT id, 'Incoming', ?, body, message_type, '{Address}', keep_until FROM temp_pop_{_queueName}");
+        var parameters = builder.AppendWithParameters($"INSERT INTO {_quotedSchemaName}.{DatabaseConstants.IncomingTable} (id, status, owner_id, body, message_type, received_at, keep_until) SELECT id, 'Incoming', ?, body, message_type, '{Address}', keep_until FROM temp_pop_{_queueName}");
         parameters[0].Value = settings.AssignedNodeNumber;
         parameters[0].NpgsqlDbType = NpgsqlDbType.Integer;
 
         builder.StartNewCommand();
         builder.Append($"select body from temp_pop_{_queueName}");
-        var batch = builder.Compile();
+        await using var batch = builder.Compile();
 
         await using var conn = await _dataSource.OpenConnectionAsync(cancellationToken);
 
@@ -313,7 +293,7 @@ SELECT message.{DatabaseConstants.Body} from message;
             builder.Append($"delete from {_queueTableName} where {DatabaseConstants.KeepUntil} IS NOT NULL and {DatabaseConstants.KeepUntil} <= (now() at time zone 'utc')");
             builder.StartNewCommand();
             builder.Append($"delete from {_queue.ScheduledTable.Identifier} where {DatabaseConstants.KeepUntil} IS NOT NULL and {DatabaseConstants.KeepUntil} <= (now() at time zone 'utc')");
-            var batch = builder.Compile();
+            await using var batch = builder.Compile();
 
             batch.Connection = conn;
 
@@ -332,7 +312,8 @@ SELECT message.{DatabaseConstants.Body} from message;
             await _queue.EnsureSchemaExists(_databaseName ?? string.Empty, _dataSource);
         }
         
-        _task = Task.Run(listenForMessagesAsync, _cancellation.Token);
+        _loop = new BackgroundReceiveLoop(Address, _logger, pollOnceAsync, _cancellation.Token, _pollingInterval);
+        _loop.Start();
         _scheduledTask = Task.Run(lookForScheduledMessagesAsync, _cancellation.Token);
     }
 }

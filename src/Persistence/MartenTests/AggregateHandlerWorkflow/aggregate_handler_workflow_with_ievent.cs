@@ -14,8 +14,7 @@ using Wolverine;
 using Wolverine.Marten;
 using Wolverine.Runtime;
 using Wolverine.Tracking;
-using Xunit.Abstractions;
-
+using Xunit;
 namespace MartenTests.AggregateHandlerWorkflow;
 
 public class aggregate_handler_workflow_with_ievent
@@ -33,12 +32,14 @@ public class aggregate_handler_workflow_with_ievent
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
-                opts.Discovery.DisableConventionalDiscovery().IncludeType(typeof(AEventHandler)).IncludeType(typeof(RaiseLetterHandler));
+                opts.Discovery.DisableConventionalDiscovery()
+                    .IncludeType(typeof(AEventHandler))
+                    .IncludeType(typeof(RaiseLetterHandler));
                 
                 opts.Services.AddMarten(m =>
                     {
                         m.Connection(Servers.PostgresConnectionString);
-                        m.Projections.Snapshot<LetterAggregate>(SnapshotLifecycle.Inline);
+                        m.Projections.Snapshot<LetterAggregate>(JasperFx.Events.Projections.SnapshotLifecycle.Inline);
 
                         m.DisableNpgsqlLogging = true;
                     })
@@ -49,10 +50,9 @@ public class aggregate_handler_workflow_with_ievent
                     });
                 
                 opts.Policies.AutoApplyTransactions();
-                
-
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Services.AddResourceSetupOnStartup();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var store = host.DocumentStore();
         using var session = store.LightweightSession();
@@ -60,13 +60,13 @@ public class aggregate_handler_workflow_with_ievent
         var streamId = Guid.NewGuid();
 
         session.Events.StartStream<LetterAggregate>(streamId, new AEvent(), new BEvent());
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         var tracked = await host.InvokeMessageAndWaitAsync(new RaiseABC(streamId));
 
         tracked.Executed.SingleEnvelope<IEvent<AEvent>>().ShouldNotBeNull();
 
-        var doc = await session.LoadAsync<LetterAggregate>(streamId);
+        var doc = await session.LoadAsync<LetterAggregate>(streamId, TestContext.Current.CancellationToken);
         doc!.DCount.ShouldBe(1);
     }
 
@@ -76,7 +76,8 @@ public class aggregate_handler_workflow_with_ievent
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
-                opts.Discovery.DisableConventionalDiscovery().IncludeType(typeof(StringIdentifiedHandler));
+                opts.Discovery.DisableConventionalDiscovery()
+                    .IncludeType(typeof(StringIdentifiedHandler));
                 
                 opts.Services.AddMarten(m =>
                     {
@@ -98,7 +99,7 @@ public class aggregate_handler_workflow_with_ievent
                 
 
                 opts.Services.AddResourceSetupOnStartup();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var store = host.DocumentStore();
         using var session = store.LightweightSession();
@@ -109,7 +110,7 @@ public class aggregate_handler_workflow_with_ievent
 
         tracked.Executed.SingleEnvelope<IEvent<AEvent>>().ShouldNotBeNull();
 
-        var doc = await session.LoadAsync<LetterCountsByString>(streamKey);
+        var doc = await session.LoadAsync<LetterCountsByString>(streamKey, TestContext.Current.CancellationToken);
         doc!.DCount.ShouldBe(1);
     }
     
@@ -154,7 +155,7 @@ public static class StringIdentifiedHandler
     }
 }
 
-public class LetterCountsByStringProjection: SingleStreamProjection<LetterCountsByString, string>
+public partial class LetterCountsByStringProjection: SingleStreamProjection<LetterCountsByString, string>
 {
     public override LetterCountsByString Evolve(LetterCountsByString? snapshot, string id, IEvent e)
     {

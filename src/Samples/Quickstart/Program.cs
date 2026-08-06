@@ -1,14 +1,12 @@
-#region sample_Quickstart_Program
-
+#region sample_quickstart_program
 using JasperFx;
 using Quickstart;
 using Wolverine;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// The almost inevitable inclusion of Swashbuckle:)
-builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+// The almost inevitable inclusion of OpenApi:)
+builder.Services.AddOpenApi();
 
 // For now, this is enough to integrate Wolverine into
 // your application, but there'll be *many* more
@@ -29,9 +27,7 @@ app.MapPost("/issues/create", (CreateIssue body, IMessageBus bus) => bus.InvokeA
 // An endpoint to assign an issue to an existing user that delegates to Wolverine as a mediator
 app.MapPost("/issues/assign", (AssignIssue body, IMessageBus bus) => bus.InvokeAsync(body));
 
-// Swashbuckle inclusion
-app.UseSwagger();
-app.UseSwaggerUI();
+app.MapOpenApi();
 
 app.MapGet("/", () => Results.Redirect("/swagger"));
 

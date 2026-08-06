@@ -2,8 +2,10 @@ using System.Collections.Concurrent;
 using IntegrationTests;
 using JasperFx.Core;
 using JasperFx.Resources;
+using JasperFx.Events;
 using Marten;
 using Marten.Metadata;
+using JasperFx;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Shouldly;
@@ -12,8 +14,6 @@ using Wolverine.Marten;
 using Wolverine.Runtime.Partitioning;
 using Wolverine.Tracking;
 using Xunit;
-using Xunit.Abstractions;
-
 namespace Wolverine.Kafka.Tests;
 
 /// <summary>
@@ -92,7 +92,7 @@ public class global_partitioned_aggregate_concurrency : IAsyncLifetime
         opts.Services.AddResourceSetupOnStartup();
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         ConcurrencyTracker.Reset();
 
@@ -130,7 +130,7 @@ public class global_partitioned_aggregate_concurrency : IAsyncLifetime
         await Task.Delay(5.Seconds());
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         if (_publisher != null) { await _publisher.StopAsync(); _publisher.Dispose(); }
         if (_replica2 != null) { await _replica2.StopAsync(); _replica2.Dispose(); }
@@ -150,7 +150,7 @@ public class global_partitioned_aggregate_concurrency : IAsyncLifetime
     public async Task should_not_have_concurrency_exceptions_for_same_stream()
     {
         var store = _replica1.Services.GetRequiredService<IDocumentStore>();
-        await store.Advanced.Clean.DeleteAllEventDataAsync();
+        await store.Advanced.Clean.DeleteAllEventDataAsync(TestContext.Current.CancellationToken);
 
         var bus = _publisher.Services.GetRequiredService<IMessageBus>();
 
@@ -166,6 +166,8 @@ public class global_partitioned_aggregate_concurrency : IAsyncLifetime
             {
                 var id = streamId;
                 var iteration = i;
+                // xUnit's own fixer declines this shape (it cannot tell which Task.Run overload to
+                // bind), so the token is threaded by hand.
                 tasks.Add(Task.Run(async () =>
                 {
                     if (iteration % 2 == 0)
@@ -178,7 +180,7 @@ public class global_partitioned_aggregate_concurrency : IAsyncLifetime
                     }
 
                     Interlocked.Increment(ref messageCount);
-                }));
+                }, TestContext.Current.CancellationToken));
             }
         }
 
@@ -186,7 +188,7 @@ public class global_partitioned_aggregate_concurrency : IAsyncLifetime
         _output.WriteLine($"Published {messageCount} messages across {streamIds.Length} streams");
 
         // Wait for processing to complete across both replicas
-        await Task.Delay(45.Seconds());
+        await Task.Delay(45.Seconds(), TestContext.Current.CancellationToken);
 
         var errors = ConcurrencyTracker.Errors.ToList();
         var concurrentAccessCount = ConcurrencyTracker.ConcurrentAccessDetected;
@@ -222,10 +224,12 @@ public record GpStreamEventB(string Data);
 public record GpStreamEventCascaded(string Source);
 
 // --- Aggregate ---
-public class GpStreamAggregate : IRevisioned
+public partial class GpStreamAggregate : JasperFx.ILongVersioned
 {
     public Guid Id { get; set; }
-    public int Version { get; set; }
+    // ILongVersioned (long), not IRevisioned (int): this is an event-sourced
+    // aggregate tracking a long stream version under JasperFx 2.0 rc.
+    public long Version { get; set; }
     public int ACount { get; set; }
     public int BCount { get; set; }
     public int CascadedCount { get; set; }

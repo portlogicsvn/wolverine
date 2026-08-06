@@ -32,6 +32,9 @@ partial class Build : NukeBuild
     [Parameter]readonly string Framework;
     [Parameter] readonly string PostgresConnectionString ="Host=localhost;Port=5433;Database=postgres;Username=postgres;password=postgres";
 
+    [Parameter] readonly string SqlServerConnectionString =
+        "Server=localhost,1434;User Id=sa;Password=P@55w0rd;Timeout=5;Initial Catalog=master;Encrypt=False";
+
     Target Init => _ => _
         .Executes(Clean);
 
@@ -56,7 +59,7 @@ partial class Build : NukeBuild
         });
 
     Target CI => _ => _
-        .DependsOn(CoreTests);
+        .DependsOn(CoreTests, CIMessageRouting);
 
     Target Test => _ => _
         .DependsOn(CoreTests, TestExtensions, Commands, PolicyTests, HttpTests);
@@ -64,17 +67,16 @@ partial class Build : NukeBuild
     Target Full => _ => _
         .DependsOn(Test, PersistenceTests, SqliteTests, RabbitmqTests, PulsarTests);
 
+    // Every test target in this file goes through RunTestProject rather than calling DotNetTest
+    // directly, so they all get the flaky-retry harness and the standard Category!=Flaky filter.
+    // CoreTests is the one that matters most: the `CI` target above is what the .NET workflow runs,
+    // so before GH-3705 the largest core suite was the only thing in CI without a second attempt.
     Target CoreTests => _ => _
         .DependsOn(Compile)
         .ProceedAfterFailure()
         .Executes(() =>
         {
-            DotNetTest(c => c
-                .SetProjectFile(Solution.Testing.CoreTests)
-                .SetConfiguration(Configuration)
-                .EnableNoBuild()
-                .EnableNoRestore()
-                .SetFramework(Framework));
+            RunTestProject(Solution.Testing.CoreTests);
         });
    
     Target PolicyTests => _ => _
@@ -82,12 +84,7 @@ partial class Build : NukeBuild
         .ProceedAfterFailure()
         .Executes(() =>
         {
-            DotNetTest(c => c
-                .SetProjectFile(Solution.Testing.PolicyTests)
-                .SetConfiguration(Configuration)
-                .EnableNoBuild()
-                .EnableNoRestore()
-                .SetFramework(Framework));
+            RunTestProject(Solution.Testing.PolicyTests);
         });
 
     Target TestExtensions => _ => _
@@ -98,12 +95,7 @@ partial class Build : NukeBuild
         .ProceedAfterFailure()
         .Executes(() =>
         {
-            DotNetTest(c => c
-                .SetProjectFile(Solution.Extensions.Wolverine_FluentValidation_Tests)
-                .SetConfiguration(Configuration)
-                .EnableNoBuild()
-                .EnableNoRestore()
-                .SetFramework(Framework));
+            RunTestProject(Solution.Extensions.Wolverine_FluentValidation_Tests);
         });
 
     Target DataAnnotationsValidationTests => _ => _
@@ -111,12 +103,7 @@ partial class Build : NukeBuild
         .ProceedAfterFailure()
         .Executes(() =>
         {
-            DotNetTest(c => c
-                .SetProjectFile(Solution.Extensions.Wolverine_DataAnnotationsValidation_Tests)
-                .SetConfiguration(Configuration)
-                .EnableNoBuild()
-                .EnableNoRestore()
-                .SetFramework(Framework));
+            RunTestProject(Solution.Extensions.Wolverine_DataAnnotationsValidation_Tests);
         });
 
     Target MemoryPackTests => _ => _
@@ -124,12 +111,7 @@ partial class Build : NukeBuild
         .ProceedAfterFailure()
         .Executes(() =>
         {
-            DotNetTest(c => c
-                .SetProjectFile(Solution.Extensions.Wolverine_MemoryPack_Tests)
-                .SetConfiguration(Configuration)
-                .EnableNoBuild()
-                .EnableNoRestore()
-                .SetFramework(Framework));
+            RunTestProject(Solution.Extensions.Wolverine_MemoryPack_Tests);
         });
     
     Target MessagePackTests => _ => _
@@ -137,12 +119,7 @@ partial class Build : NukeBuild
         .ProceedAfterFailure()
         .Executes(() =>
         {
-            DotNetTest(c => c
-                .SetProjectFile(Solution.Extensions.Wolverine_MessagePack_Tests)
-                .SetConfiguration(Configuration)
-                .EnableNoBuild()
-                .EnableNoRestore()
-                .SetFramework(Framework));
+            RunTestProject(Solution.Extensions.Wolverine_MessagePack_Tests);
         });
 
     Target HttpTests => _ => _
@@ -153,12 +130,7 @@ partial class Build : NukeBuild
         .ProceedAfterFailure()
         .Executes(() =>
         {
-            DotNetTest(c => c
-                .SetProjectFile(Solution.Http.Wolverine_Http_Tests)
-                .SetConfiguration(Configuration)
-                .EnableNoBuild()
-                .EnableNoRestore()
-                .SetFramework(Framework));
+            RunTestProject(Solution.Http.Wolverine_Http_Tests);
         });
 
     Target Commands => _ => _
@@ -193,7 +165,7 @@ partial class Build : NukeBuild
         });
     
     Target CodegenPreviewCommand => _ => _
-        .DependsOn(Compile)    
+        .DependsOn(Compile)
         .ProceedAfterFailure()
         .Executes(() =>
         {
@@ -206,18 +178,48 @@ partial class Build : NukeBuild
                 .AddApplicationArguments("codegen")
                 .AddApplicationArguments("preview"));
         });
-    
+
+    // Exercises the Wolverine.Http `openapi` command (GH-2903) against the TodoWebService sample,
+    // which uses Marten/PostgreSQL-backed message persistence and AddOpenApi(). Modeled on
+    // CodegenPreviewCommand above. This intentionally runs without a database (no docker services
+    // started) to prove the command generates the OpenAPI document straight from endpoint metadata
+    // without any database connectivity. Builds on demand so it can run as a standalone http CI step.
+    Target OpenApiCommand => _ => _
+        .ProceedAfterFailure()
+        .Executes(() =>
+        {
+            var project = RootDirectory / "src" / "Samples" / "TodoWebService" / "TodoWebService" /
+                          "TodoWebService.csproj";
+
+            // Full document for the default "v1" document. --no-launch-profile keeps the host
+            // environment (e.g. ASPNETCORE_ENVIRONMENT=Development on CI) intact instead of letting
+            // launchSettings.json override it; Development turns on DI scope validation, which also
+            // guards the GH-2911 fix.
+            DotNetRun(c => c
+                .SetProjectFile(project)
+                .SetConfiguration(Configuration)
+                .EnableNoLaunchProfile()
+                .SetFramework(Framework)
+                .AddApplicationArguments("openapi"));
+
+            // The fuzzy --route filter, which emits only the matching paths and their schemas
+            DotNetRun(c => c
+                .SetProjectFile(project)
+                .SetConfiguration(Configuration)
+                .EnableNoBuild()
+                .EnableNoLaunchProfile()
+                .SetFramework(Framework)
+                .AddApplicationArguments("openapi")
+                .AddApplicationArguments("--route")
+                .AddApplicationArguments("todoitems"));
+        });
+
     Target SqliteTests => _ => _
         .DependsOn(Compile)
         .ProceedAfterFailure()
         .Executes(() =>
         {
-            DotNetTest(c => c
-                .SetProjectFile(Solution.Persistence.Sqlite.SqliteTests)
-                .SetConfiguration(Configuration)
-                .EnableNoBuild()
-                .EnableNoRestore()
-                .SetFramework(Framework));
+            RunTestProject(Solution.Persistence.Sqlite.SqliteTests);
         });
 
     Target PersistenceTests => _ => _
@@ -225,12 +227,7 @@ partial class Build : NukeBuild
         .ProceedAfterFailure()
         .Executes(() =>
         {
-            DotNetTest(c => c
-                .SetProjectFile(Solution.Persistence.PersistenceTests)
-                .SetConfiguration(Configuration)
-                .EnableNoBuild()
-                .EnableNoRestore()
-                .SetFramework(Framework));
+            RunTestProject(Solution.Persistence.PersistenceTests);
         });
     
     Target RabbitmqTests => _ => _
@@ -238,12 +235,7 @@ partial class Build : NukeBuild
         .ProceedAfterFailure()
         .Executes(() =>
         {
-            DotNetTest(c => c
-                .SetProjectFile(Solution.Transports.RabbitMQ.Wolverine_RabbitMQ_Tests)
-                .SetConfiguration(Configuration)
-                .EnableNoBuild()
-                .EnableNoRestore()
-                .SetFramework(Framework));
+            RunTestProject(Solution.Transports.RabbitMQ.Wolverine_RabbitMQ_Tests);
         });
     
     Target PulsarTests => _ => _
@@ -251,12 +243,7 @@ partial class Build : NukeBuild
         .ProceedAfterFailure()
         .Executes(() =>
         {
-            DotNetTest(c => c
-                .SetProjectFile(Solution.Transports.Pulsar.Wolverine_Pulsar_Tests)
-                .SetConfiguration(Configuration)
-                .EnableNoBuild()
-                .EnableNoRestore()
-                .SetFramework(Framework));
+            RunTestProject(Solution.Transports.Pulsar.Wolverine_Pulsar_Tests);
         });
 
     Target TestSamples => _ => _
@@ -268,12 +255,7 @@ partial class Build : NukeBuild
         .ProceedAfterFailure()
         .Executes(() =>
         {
-            DotNetTest(c => c
-                .SetProjectFile(Solution.Samples.TodoWebService.TodoWebServiceTests)
-                .SetConfiguration(Configuration)
-                .EnableNoBuild()
-                .EnableNoRestore()
-                .SetFramework(Framework));
+            RunTestProject(Solution.Samples.TodoWebService.TodoWebServiceTests);
         });
    
     Target BankingServiceSampleTests => _ => _
@@ -281,12 +263,7 @@ partial class Build : NukeBuild
         .ProceedAfterFailure()
         .Executes(() =>
         {
-            DotNetTest(c => c
-                .SetProjectFile(Solution.Samples.TestHarness.BankingService_Tests)
-                .SetConfiguration(Configuration)
-                .EnableNoBuild()
-                .EnableNoRestore()
-                .SetFramework(Framework));
+            RunTestProject(Solution.Samples.TestHarness.BankingService_Tests);
         });
 
     Target AppWithMiddlewareSampleTests => _ => _
@@ -294,12 +271,7 @@ partial class Build : NukeBuild
         .ProceedAfterFailure()
         .Executes(() =>
         {
-            DotNetTest(c => c
-                .SetProjectFile(Solution.Samples.Middleware.AppWithMiddleware_Tests)
-                .SetConfiguration(Configuration)
-                .EnableNoBuild()
-                .EnableNoRestore()
-                .SetFramework(Framework));
+            RunTestProject(Solution.Samples.Middleware.AppWithMiddleware_Tests);
         });
 
     Target ItemServiceSampleTests => _ => _
@@ -307,12 +279,7 @@ partial class Build : NukeBuild
         .ProceedAfterFailure()
         .Executes(() =>
         {
-            DotNetTest(c => c
-                .SetProjectFile(Solution.Samples.EFCoreSample.ItemService_Tests)
-                .SetConfiguration(Configuration)
-                .EnableNoBuild()
-                .EnableNoRestore()
-                .SetFramework(Framework));
+            RunTestProject(Solution.Samples.EFCoreSample.ItemService_Tests);
         });
 
     Target Pack => _ => _
@@ -321,11 +288,14 @@ partial class Build : NukeBuild
             var nugetProjects = new[]
             {
                 Solution.Wolverine,
+                Solution.Wolverine_RuntimeCompilation,
+                Solution.Wolverine_HealthChecks,
                 Solution.Transports.RabbitMQ.Wolverine_RabbitMQ,
                 Solution.Transports.Azure.Wolverine_AzureServiceBus,
                 Solution.Transports.AWS.Wolverine_AmazonSqs,
                 Solution.Transports.AWS.Wolverine_AmazonSns,
                 Solution.Transports.MQTT.Wolverine_MQTT,
+                Solution.Transports.MQTT.Wolverine_Mqtt5,
                 Solution.Transports.Kafka.Wolverine_Kafka,
                 Solution.Transports.Pulsar.Wolverine_Pulsar,
                 Solution.Transports.GCP.Wolverine_Pubsub,
@@ -338,11 +308,19 @@ partial class Build : NukeBuild
                 Solution.Persistence.Oracle.Wolverine_Oracle,
                 Solution.Persistence.Sqlite.Wolverine_Sqlite,
                 Solution.Persistence.CosmosDb.Wolverine_CosmosDb,
+                Solution.Persistence.ClaimCheck.Wolverine_ClaimCheck_AmazonS3,
+                Solution.Persistence.ClaimCheck.Wolverine_ClaimCheck_AzureBlobStorage,
+                Solution.Persistence.ClaimCheck.Wolverine_ClaimCheck_GoogleCloudStorage,
+                Solution.Persistence.ClaimCheck.Wolverine_ClaimCheck_Nats,
+                Solution.Persistence.ClaimCheck.Wolverine_ClaimCheck_Postgresql,
                 Solution.Extensions.Wolverine_FluentValidation,
                 Solution.Extensions.Wolverine_MemoryPack,
                 Solution.Extensions.Wolverine_MessagePack,
+                Solution.Extensions.Wolverine_Newtonsoft,
                 Solution.Extensions.Wolverine_Protobuf,
                 Solution.Http.Wolverine_Http,
+                Solution.Http.Wolverine_Http_AspVersioning,
+                Solution.Http.Wolverine_Http_Newtonsoft,
                 Solution.Http.Wolverine_Http_FluentValidation,
                 Solution.Http.Wolverine_Http_Marten,
                 Solution.Persistence.Polecat.Wolverine_Http_Polecat,
@@ -350,6 +328,7 @@ partial class Build : NukeBuild
                 Solution.Transports.Redis.Wolverine_Redis,
                 Solution.Transports.SignalR.Wolverine_SignalR,
                 Solution.Transports.NATS.Wolverine_Nats,
+                Solution.Grpc.Wolverine_Grpc,
                 Solution.Persistence.EFCore.Wolverine_EntityFrameworkCore,
                 Solution.Persistence.Polecat.Wolverine_Polecat
             };
@@ -366,21 +345,9 @@ partial class Build : NukeBuild
     Target DockerUp => _ => _
         .Executes(() =>
         {
-            bool IsToolAvailable(string toolName)
-            {
-                try
-                { ToolPathResolver.GetPathExecutable(toolName);
-                  return true; }
-                catch (ArgumentException)
-                { return false; }
-            }
-
-            string toolName = new List<string> { "docker", "podman" }
-                                  .FirstOrDefault(IsToolAvailable) ?? "docker";
-            ProcessTasks
-                .StartProcess(toolName, "compose up -d", logOutput: false)
-                .AssertWaitForExit()
-                .AssertZeroExitCode();
+            // Shares ComposeUp with the CI targets so this path gets the same registry-timeout
+            // retry — it pulls every image in the compose file, so it is the most exposed of all.
+            ComposeUp("compose up -d", "all services");
             WaitForDatabaseToBeReady();
         });
 
@@ -438,38 +405,37 @@ partial class Build : NukeBuild
         return output.Any(line => line.Contains(toolName, StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>
+    /// Postgres readiness. This was the thinnest gate in the build by a wide margin: ten attempts
+    /// separated by 250ms is a <b>2.5 second</b> budget for a container start, after which it logged
+    /// an error and let the suite run anyway.
+    ///
+    /// <para>It was already running out of room in production. In CIMQTT5 on main run 30847233633 it
+    /// spent four of its ten attempts before Postgres answered — roughly 1.1s of a 2.5s allowance —
+    /// so a slower runner would have sailed past the end and started the tests against a database
+    /// that was not up. Every failure after that would have looked like a test problem.</para>
+    /// </summary>
     private void WaitForDatabaseToBeReady()
     {
-        var attempt = 0;
-        while (attempt < 10)
-            try
-            {
-                using var conn = new Npgsql.NpgsqlConnection(PostgresConnectionString + ";Pooling=false");
-                conn.Open();
+        awaitService("PostgreSQL", TimeSpan.FromMinutes(2), () =>
+        {
+            using var conn = new Npgsql.NpgsqlConnection(PostgresConnectionString + ";Pooling=false");
+            conn.Open();
 
-                var cmd = conn.CreateCommand();
-                cmd.CommandText = "select 1";
-                cmd.ExecuteNonQuery();
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = "select 1";
+            cmd.ExecuteNonQuery();
 
-                Log.Information("Postgresql is up and ready!");
-                return;
-            }
-            catch (Exception ex)
-            {
-                Log.Information("Database is not ready ({Error})", ex.Message);
-                Thread.Sleep(250);
-                attempt++;
-            }
-
-        Log.Error("Database is not ready after all attempts.");
+            return null;
+        });
     }
 
     private Dictionary<string, string[]> ReferencedProjects = new()
     {
         { "jasperfx", ["JasperFx", "JasperFx.Events", "EventTests", "JasperFx.RuntimeCompiler"] },
         { "weasel", ["Weasel.Core", "Weasel.Postgresql", "Weasel.SqlServer"] },
-        {"lamar", ["Lamar", "Lamar.Microsoft.DependencyInjection"]},
-        {"marten", ["Marten"]}
+        {"marten", ["Marten"]},
+        {"polecat", ["Polecat"]}
     };
 
     //string[] Nugets = ["JasperFx", "JasperFx.Events", "JasperFx.RuntimeCompiler", "Weasel.Postgresql"];
@@ -479,11 +445,12 @@ partial class Build : NukeBuild
     private IEnumerable<NugetToProjectReference> nugetReferences()
     {
         yield return new(Solution.Wolverine, ["JasperFx", "JasperFx.RuntimeCompiler", "JasperFx.Events"]);
-        
+
         yield return new(Solution.Persistence.PostgreSQL.Wolverine_Postgresql, ["Weasel.Postgresql"]);
         yield return new(Solution.Persistence.Wolverine_RDBMS, ["Weasel.Core"]);
         yield return new(Solution.Persistence.SqlServer.Wolverine_SqlServer, ["Weasel.SqlServer"]);
         yield return new(Solution.Persistence.Marten.Wolverine_Marten, ["Marten"]);
+        yield return new(Solution.Persistence.Polecat.Wolverine_Polecat, ["Polecat"]);
     }
     
     Target Attach => _ => _.Executes(() =>

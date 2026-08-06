@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Text;
 using JasperFx.Core;
 using RabbitMQ.Client;
@@ -16,6 +17,18 @@ public interface IRabbitMqEnvelopeMapper : IEnvelopeMapper<IReadOnlyBasicPropert
 
 public class RabbitMqEnvelopeMapper : EnvelopeMapper<IReadOnlyBasicProperties, IBasicProperties>, IRabbitMqEnvelopeMapper
 {
+    // Inherits EnvelopeMapper<,>'s reflection-based property mapping (chunk B
+    // #2753 annotated the base ctor as [RequiresDynamicCode] +
+    // [RequiresUnreferencedCode]). Suppress at the leaf so the cascade
+    // doesn't propagate through Endpoint.buildMapper (an abstract method
+    // overridden by every transport-specific endpoint). AOT-clean apps
+    // either supply their own IRabbitMqEnvelopeMapper or preserve the
+    // closed EnvelopeMapper<IReadOnlyBasicProperties, IBasicProperties> via
+    // TrimmerRootDescriptor. See AOT guide.
+    [UnconditionalSuppressMessage("Trimming", "IL2026",
+        Justification = "Inherits EnvelopeMapper<,> reflective property mapping; AOT consumers supply their own mapper or preserve the closed type. See AOT guide.")]
+    [UnconditionalSuppressMessage("AOT", "IL3050",
+        Justification = "Inherits EnvelopeMapper<,> reflective property mapping; AOT consumers supply their own mapper or preserve the closed type. See AOT guide.")]
     public RabbitMqEnvelopeMapper(Endpoint endpoint, IWolverineRuntime runtime) : base(endpoint)
     {
         MapProperty(x => x.CorrelationId!, (e, p) => e.CorrelationId = p.CorrelationId,
@@ -52,6 +65,12 @@ public class RabbitMqEnvelopeMapper : EnvelopeMapper<IReadOnlyBasicProperties, I
             (e, props) => props.Type = e.MessageType);
     }
 
+    // writeIncomingHeaders below copies every incoming header with the exact same conversion as
+    // tryReadIncomingHeader (byte[] -> UTF8, else ToString), so the typed reserved-header readers
+    // can reuse those already-decoded values instead of re-reading and re-decoding the raw header
+    // dictionary per property (GH-3492, same seam as Kafka in GH-3490).
+    protected override bool preferCopiedIncomingHeaders => true;
+
     protected override void writeOutgoingHeader(IBasicProperties outgoing, string key, string value)
     {
         outgoing.Headers![key] = value;
@@ -68,7 +87,7 @@ public class RabbitMqEnvelopeMapper : EnvelopeMapper<IReadOnlyBasicProperties, I
 
         if (incoming.Headers.TryGetValue(key, out var raw))
         {
-            value = (raw is byte[] b ? Encoding.Default.GetString(b) : raw!.ToString())!;
+            value = (raw is byte[] b ? Encoding.UTF8.GetString(b) : raw!.ToString())!;
             return true;
         }
 
@@ -82,7 +101,7 @@ public class RabbitMqEnvelopeMapper : EnvelopeMapper<IReadOnlyBasicProperties, I
         foreach (var pair in incoming.Headers)
         {
             envelope.Headers[pair.Key] =
-                pair.Value is byte[] b ? Encoding.Default.GetString(b) : pair.Value?.ToString();
+                pair.Value is byte[] b ? Encoding.UTF8.GetString(b) : pair.Value?.ToString();
         }
     }
 }

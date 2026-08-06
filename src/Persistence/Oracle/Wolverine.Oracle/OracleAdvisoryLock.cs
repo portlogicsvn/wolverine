@@ -1,4 +1,5 @@
 using System.Data;
+using JasperFx.Events.Daemon;
 using JasperFx.Core;
 using Microsoft.Extensions.Logging;
 using Oracle.ManagedDataAccess.Client;
@@ -28,7 +29,49 @@ internal class OracleAdvisoryLock : IAdvisoryLock
 
     public bool HasLock(int lockId)
     {
-        return _locks.Contains(lockId);
+        if (!_locks.Contains(lockId)) return false;
+        if (!_heldLocks.TryGetValue(lockId, out var held)) return false;
+
+        // Oracle row-level FOR UPDATE locks are tied to the transaction
+        // that took them, which is in turn tied to the holding connection.
+        // If the connection died (network drop, RAC failover, manual KILL
+        // SESSION), the row lock evaporates server-side but our in-memory
+        // state still claims it. Ping the held connection so we can detect
+        // a broken backend and self-clean. See GH-2602.
+        try
+        {
+            using var cmd = held.conn.CreateCommand();
+            cmd.CommandText = "select 1 from dual";
+            cmd.CommandTimeout = 2;
+            cmd.ExecuteScalar();
+            return true;
+        }
+        catch (Exception e)
+        {
+            _logger.LogWarning(e,
+                "Lost advisory-lock connection for lock {LockId} in schema {Schema}; clearing held state",
+                lockId, _schemaName);
+
+            _locks.Remove(lockId);
+            _heldLocks.Remove(lockId);
+            try
+            {
+                held.tx.Dispose();
+            }
+            catch
+            {
+                // already broken
+            }
+            try
+            {
+                held.conn.Dispose();
+            }
+            catch
+            {
+                // already broken
+            }
+            return false;
+        }
     }
 
     public async Task<bool> TryAttainLockAsync(int lockId, CancellationToken token)
@@ -38,7 +81,7 @@ internal class OracleAdvisoryLock : IAdvisoryLock
             var conn = await _source.OpenConnectionAsync(token);
 
             // Ensure lock row exists
-            var ensureCmd = conn.CreateCommand(
+            await using var ensureCmd = conn.CreateCommand(
                 $"MERGE INTO {_schemaName}.{LockTable.TableName} t " +
                 "USING DUAL ON (t.lock_id = :lockId) " +
                 "WHEN NOT MATCHED THEN INSERT (lock_id) VALUES (:lockId)");
@@ -56,7 +99,7 @@ internal class OracleAdvisoryLock : IAdvisoryLock
             // Start a transaction to hold the row lock
             var tx = (OracleTransaction)await conn.BeginTransactionAsync(token);
 
-            var lockCmd = conn.CreateCommand(
+            await using var lockCmd = conn.CreateCommand(
                 $"SELECT lock_id FROM {_schemaName}.{LockTable.TableName} WHERE lock_id = :lockId FOR UPDATE NOWAIT");
             lockCmd.Transaction = tx;
             lockCmd.With("lockId", lockId);
@@ -94,7 +137,7 @@ internal class OracleAdvisoryLock : IAdvisoryLock
             _heldLocks.Remove(lockId);
             try
             {
-                var cancellation = new CancellationTokenSource();
+                using var cancellation = new CancellationTokenSource();
                 cancellation.CancelAfter(1.Seconds());
 
                 await held.tx.RollbackAsync(cancellation.Token);

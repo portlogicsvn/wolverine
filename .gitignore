@@ -241,3 +241,9 @@ JasperSamples
 /volume
 
 /src/Transports/Wolverine.AzureServiceBus.Tests/connection.txt
+
+# Planning artifacts (not for PR)
+.plans/
+
+.nuke/build.schema.json
+.claude/scheduled_tasks.lock

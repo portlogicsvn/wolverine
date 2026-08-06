@@ -20,7 +20,7 @@ public class HttpTransportConfigurationTests
                 opts.PublishAllMessages()
                     .ToHttpEndpoint("https://external-service.com/api");
             })
-            .StartAsync();
+            .StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var runtime = host.GetRuntime();
         var transport = runtime.Options.Transports.GetOrCreate<HttpTransport>();
@@ -39,7 +39,7 @@ public class HttpTransportConfigurationTests
                 opts.PublishAllMessages()
                     .ToHttpEndpoint("https://scheduler.com/api", supportsNativeScheduledSend: true);
             })
-            .StartAsync();
+            .StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var runtime = host.GetRuntime();
         var transport = runtime.Options.Transports.GetOrCreate<HttpTransport>();
@@ -57,7 +57,7 @@ public class HttpTransportConfigurationTests
                 opts.PublishAllMessages()
                     .ToHttpEndpoint("https://regular.com/api");
             })
-            .StartAsync();
+            .StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var runtime = host.GetRuntime();
         var transport = runtime.Options.Transports.GetOrCreate<HttpTransport>();
@@ -83,7 +83,7 @@ public class HttpTransportConfigurationTests
                         useCloudEvents: true, 
                         options: customOptions);
             })
-            .StartAsync();
+            .StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var runtime = host.GetRuntime();
         var transport = runtime.Options.Transports.GetOrCreate<HttpTransport>();
@@ -98,14 +98,13 @@ public class HttpTransportConfigurationTests
     public async Task to_http_endpoint_without_cloud_events_keeps_default_options()
     {
         #region sample_publishing_rules_for_http
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
                 opts.PublishAllMessages()
                     .ToHttpEndpoint("https://binary.com/api");
             })
-            .StartAsync();
+            .StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         #endregion
 
@@ -129,7 +128,7 @@ public class HttpTransportConfigurationTests
 
                 config.ShouldBeOfType<HttpTransportSubscriberConfiguration>();
             })
-            .StartAsync();
+            .StartAsync(cancellationToken: TestContext.Current.CancellationToken);
     }
 
     [Fact]
@@ -143,7 +142,7 @@ public class HttpTransportConfigurationTests
                     .SendInline()
                     .CustomizeOutgoing(e => e.CorrelationId = "test-correlation");
             })
-            .StartAsync();
+            .StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var runtime = host.GetRuntime();
         var transport = runtime.Options.Transports.GetOrCreate<HttpTransport>();

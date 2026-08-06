@@ -14,8 +14,6 @@ using Wolverine.Tracking;
 using Wolverine.Transports.Tcp;
 using Wolverine.Util;
 using Xunit;
-using Xunit.Abstractions;
-
 namespace Wolverine.RabbitMQ.Tests;
 
 public class exclusive_listeners : IAsyncLifetime
@@ -29,10 +27,9 @@ public class exclusive_listeners : IAsyncLifetime
         _output = output;
     }
 
-    public static async Task documentation_sample()
+    private static async Task documentation_sample()
     {
-        #region sample_utilizing_ListenWithStrictOrdering
-
+        #region sample_utilizing_listenwithstrictordering
         var host = await Host.CreateDefaultBuilder().UseWolverine(opts =>
         {
             opts.UseRabbitMq().EnableWolverineControlQueues();
@@ -59,7 +56,7 @@ public class exclusive_listeners : IAsyncLifetime
                 opts.ListenAtPort(PortFinder.GetAvailablePort()).ListenWithStrictOrdering().Named("one");
                 opts.ListenAtPort(PortFinder.GetAvailablePort()).ListenWithStrictOrdering().Named("two");
                 opts.ListenAtPort(PortFinder.GetAvailablePort()).Named("three");
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var runtime = host.GetRuntime();
         runtime.Endpoints.ActiveListeners().Where(x => x.Uri.Scheme != "stub" ).Select(x => x.Endpoint.EndpointName)
@@ -67,14 +64,14 @@ public class exclusive_listeners : IAsyncLifetime
             .ShouldHaveTheSameElementsAs("one", "three", "two");
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         await dropSchema();
 
         _originalHost = await startHostAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         _hosts.Reverse();
         foreach (var host in _hosts)

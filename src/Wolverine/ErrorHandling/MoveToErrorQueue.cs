@@ -30,8 +30,11 @@ internal class MoveToErrorQueue : IContinuation
         DateTimeOffset now, Activity? activity)
     {
         // TODO -- at some point, we need a more systematic way of doing this
-        var scheme = lifecycle.Envelope!.Destination!.Scheme;
-        if (runtime.Options.EnableAutomaticFailureAcks && scheme != TransportConstants.Local && scheme != "external-table")
+        // Defensive: a malformed system envelope (no Destination) shouldn't NRE here before
+        // EnableAutomaticFailureAcks even gets a chance to short-circuit. The envelope itself is
+        // always present (the block below already relies on it); only Destination can be null. GH-3013.
+        var scheme = lifecycle.Envelope!.Destination?.Scheme;
+        if (scheme is not null && runtime.Options.EnableAutomaticFailureAcks && scheme != TransportConstants.Local && scheme != "external-table")
         {
             await lifecycle.SendFailureAcknowledgementAsync(
                 $"Moved message {lifecycle.Envelope!.Id} to the Error Queue.\n{Exception}");
@@ -47,13 +50,19 @@ internal class MoveToErrorQueue : IContinuation
         }
 
         await lifecycle.MoveToDeadLetterQueueAsync(Exception);
-        
+
+        // Auto-publish Fault<T> if opted in. The publish enrols in the active
+        // outbox transaction when one is open on the inbound MessageContext;
+        // otherwise it is a best-effort post-DLQ-move publish. Never throws.
+        await runtime.PublishFaultIfEnabledAsync(lifecycle, Exception, FaultTrigger.MovedToErrorQueue, activity);
+
         await lifecycle.CompleteAsync();
 
         activity?.AddEvent(new ActivityEvent(WolverineTracing.MovedToErrorQueue));
 
-        runtime.MessageTracking.MessageFailed(lifecycle.Envelope, Exception);
-        runtime.MessageTracking.MovedToErrorQueue(lifecycle.Envelope, Exception);
+        var tracker = lifecycle.CompletionTrackerFor(runtime);
+        tracker.MessageFailed(lifecycle.Envelope, Exception);
+        tracker.MovedToErrorQueue(lifecycle.Envelope, Exception);
     }
 
     public override string ToString()

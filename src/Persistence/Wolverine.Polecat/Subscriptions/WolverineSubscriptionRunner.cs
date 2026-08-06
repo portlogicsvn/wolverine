@@ -17,19 +17,19 @@ internal class WolverineSubscriptionRunner : SubscriptionBase
         _subscription = subscription;
         _runtime = runtime;
         Name = subscription.SubscriptionName;
-        Version = subscription.SubscriptionVersion;
+        Version = subscription.Version;
         subscription.Filter(this);
         Options = subscription.Options;
     }
 
-    public override async Task<global::Polecat.Subscriptions.IChangeListener> ProcessEventsAsync(EventRange page, ISubscriptionController controller, IDocumentOperations operations,
+    public override async Task<global::Polecat.IChangeListener> ProcessEventsAsync(EventRange page, ISubscriptionController controller, IDocumentOperations operations,
         CancellationToken cancellationToken)
     {
         var context = new MessageContext(_runtime);
 
         // Use the session's tenant id for multi-tenant support
         var tenantId = operations.TenantId;
-        if (tenantId.IsNotEmpty() && tenantId != global::Polecat.Tenancy.DefaultTenantId)
+        if (tenantId.IsNotEmpty() && tenantId != JasperFx.StorageConstants.DefaultTenantId)
         {
             context.TenantId = tenantId;
         }

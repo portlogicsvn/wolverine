@@ -9,7 +9,7 @@ something happened. Just know that as far as Wolverine is concerned, those are r
 
 Here's a couple simple samples:
 
-<!-- snippet: sample_DebutAccount_command -->
+<!-- snippet: sample_debutaccount_command -->
 <a id='snippet-sample_debutaccount_command'></a>
 ```cs
 // A "command" message
@@ -18,13 +18,13 @@ public record DebitAccount(long AccountId, decimal Amount);
 // An "event" message
 public record AccountOverdrawn(long AccountId);
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/MessageBusBasics.cs#L76-L84' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_debutaccount_command' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/MessageBusBasics.cs#L72-L79' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_debutaccount_command' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 The next concept in Wolverine is a message handler, which is just a method that "knows" how to process an incoming message. Here's an extremely
 simple example:
 
-<!-- snippet: sample_DebitAccountHandler -->
+<!-- snippet: sample_debitaccounthandler -->
 <a id='snippet-sample_debitaccounthandler'></a>
 ```cs
 public static class DebitAccountHandler
@@ -35,7 +35,7 @@ public static class DebitAccountHandler
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/MessageBusBasics.cs#L64-L74' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_debitaccounthandler' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/MessageBusBasics.cs#L61-L70' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_debitaccounthandler' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Wolverine can act as a completely local mediator tool that allows your code to invoke the handler for a message at any time without having
@@ -50,7 +50,7 @@ public async Task invoke_debit_account(IMessageBus bus)
     await bus.InvokeAsync(new DebitAccount(2222, 250));
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/MessageBusBasics.cs#L37-L45' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_invoke_debit_account' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/MessageBusBasics.cs#L36-L43' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_invoke_debit_account' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 There's certainly some value in Wolverine just being a command bus running inside of a single process, Wolverine also allows you to both publish and process messages received through external infrastructure like [Rabbit MQ](https://www.rabbitmq.com/)
@@ -70,7 +70,7 @@ The diagram above should just say "Message Handler" as Wolverine makes no struct
 * *Message* -- Typically just a .NET class or C# record that can be easily serialized. See [messages and serialization](/guide/messages) for more information
 * *Envelope* -- Wolverine's [Envelope Wrapper](https://www.enterpriseintegrationpatterns.com/patterns/messaging/EnvelopeWrapper.html) model that wraps the raw messages with metadata 
 * *Message Handler* -- A method or function that "knows" how to process an incoming message. See [Message Handlers](/guide/handlers/) for more information
-* *Transport* -- This refers to the support within Wolverine for external messaging infrastructure tools like [Rabbit MQ](/guide/messaging/transports/rabbitmq/), [Amazon SQS](/guide/messaging/transports/sqs/), [Azure Service Bus](/guide/messaging/transports/azure-service-bus/), or Wolverine's built in [TCP transport](/guide/messaging/transports/tcp)
+* *Transport* -- This refers to the support within Wolverine for external messaging infrastructure tools like [Rabbit MQ](/guide/messaging/transports/rabbitmq/), [Amazon SQS](/guide/messaging/transports/sqs/), [Azure Service Bus](/guide/messaging/transports/azureservicebus/), or Wolverine's built in [TCP transport](/guide/messaging/transports/tcp)
 * *Endpoint* -- The configuration for a Wolverine connection to some sort of external resource like a Rabbit MQ exchange or an Amazon SQS queue. The [Async API](https://www.asyncapi.com/) specification refers to this as a *channel*, and Wolverine may very well change its nomenclature in the future to be consistent with Async API. 
 * *Sending Agent* -- You won't use this directly in your own code, but Wolverine's internal adapters to publish outgoing messages to transport endpoints
 * *Listening Agent* -- Again, an internal detail of Wolverine that receives messages from external transport endpoints, and mediates between the transports and executing the message handlers

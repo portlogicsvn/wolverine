@@ -20,10 +20,15 @@ public class agent_mechanics : MultiTenancyContext
     {
         await using (var conn = new NpgsqlConnection(Servers.PostgresConnectionString))
         {
-            await conn.OpenAsync();
-            await conn.CreateCommand($"delete from control.{DatabaseConstants.NodeAssignmentsTableName}")
-                .ExecuteNonQueryAsync();
-            await conn.CreateCommand($"delete from control.{DatabaseConstants.NodeTableName}").ExecuteNonQueryAsync();
+            await conn.OpenAsync(TestContext.Current.CancellationToken);
+           
+            var sql = $@"
+                DELETE FROM control.{DatabaseConstants.NodeAssignmentsTableName};
+                DELETE FROM control.{DatabaseConstants.NodeTableName};
+            ";
+            await using var command = conn.CreateCommand(sql);
+            await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+
             await conn.CloseAsync();
         }
 

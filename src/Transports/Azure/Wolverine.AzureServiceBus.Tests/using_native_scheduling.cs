@@ -8,10 +8,8 @@ namespace Wolverine.AzureServiceBus.Tests;
 
 public class using_native_scheduling : IAsyncLifetime
 {
-    public Task InitializeAsync() => Task.CompletedTask;
-
-    public Task DisposeAsync() => AzureServiceBusTesting.DeleteAllEmulatorObjectsAsync();
-
+    public async ValueTask InitializeAsync() =>await  ValueTask.CompletedTask;
+    public async ValueTask DisposeAsync() => await AzureServiceBusTesting.DeleteAllEmulatorObjectsAsync();
     [Fact]
     public async Task with_inline_endpoint()
     {
@@ -23,7 +21,7 @@ public class using_native_scheduling : IAsyncLifetime
 
                 opts.ListenToAzureServiceBusQueue("inline1").ProcessInline();
                 opts.PublishMessage<AsbMessage1>().ToAzureServiceBusQueue("inline1");
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var session = await host.TrackActivity()
             .IncludeExternalTransports()
@@ -33,7 +31,7 @@ public class using_native_scheduling : IAsyncLifetime
         session.Received.SingleMessage<AsbMessage1>()
             .Name.ShouldBe("later");
 
-        await host.StopAsync();
+        await host.StopAsync(TestContext.Current.CancellationToken);
     }
 
     [Fact]
@@ -47,7 +45,7 @@ public class using_native_scheduling : IAsyncLifetime
 
                 opts.ListenToAzureServiceBusQueue("inline1").ProcessInline();
                 opts.PublishAllMessages().ToAzureServiceBusQueue("inline1");
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var referenceTime = DateTimeOffset.UtcNow;
         var delay = TimeSpan.FromSeconds(1);
@@ -63,7 +61,7 @@ public class using_native_scheduling : IAsyncLifetime
         envelope.ShouldNotBeNull();
         envelope.ScheduledTime!.Value.ShouldBeInRange(referenceTime.Add(delay - margin), referenceTime.Add(delay + margin));
 
-        await host.StopAsync();
+        await host.StopAsync(TestContext.Current.CancellationToken);
     }
 
     [Fact]
@@ -77,7 +75,7 @@ public class using_native_scheduling : IAsyncLifetime
 
                 opts.ListenToAzureServiceBusQueue("inline1").ProcessInline();
                 opts.PublishAllMessages().ToAzureServiceBusQueue("inline1");
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var referenceTime = DateTimeOffset.UtcNow;
         var delay = TimeSpan.FromSeconds(1);
@@ -93,7 +91,7 @@ public class using_native_scheduling : IAsyncLifetime
         envelope.ShouldNotBeNull();
         envelope.ScheduledTime!.Value.ShouldBeInRange(referenceTime.Add(delay - margin), referenceTime.Add(delay + margin));
 
-        await host.StopAsync();
+        await host.StopAsync(TestContext.Current.CancellationToken);
     }
 
     [Fact]
@@ -109,7 +107,7 @@ public class using_native_scheduling : IAsyncLifetime
                 opts.ListenToAzureServiceBusSubscription("scheduled-sub")
                     .FromTopic("scheduled-topic")
                     .ProcessInline();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var session = await host.TrackActivity()
             .IncludeExternalTransports()
@@ -119,7 +117,7 @@ public class using_native_scheduling : IAsyncLifetime
         session.Received.SingleMessage<AsbMessage1>()
             .Name.ShouldBe("topic scheduled");
 
-        await host.StopAsync();
+        await host.StopAsync(TestContext.Current.CancellationToken);
     }
 
     [Fact]
@@ -133,7 +131,7 @@ public class using_native_scheduling : IAsyncLifetime
 
                 opts.ListenToAzureServiceBusQueue("buffered1").BufferedInMemory();
                 opts.PublishMessage<AsbMessage1>().ToAzureServiceBusQueue("buffered1");
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var session = await host.TrackActivity()
             .IncludeExternalTransports()
@@ -143,7 +141,7 @@ public class using_native_scheduling : IAsyncLifetime
         session.Received.SingleMessage<AsbMessage1>()
             .Name.ShouldBe("in a bit");
 
-        await host.StopAsync();
+        await host.StopAsync(TestContext.Current.CancellationToken);
     }
 }
 

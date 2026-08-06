@@ -10,9 +10,6 @@ using Wolverine.RabbitMQ;
 using Wolverine.Runtime;
 using Wolverine.Tracking;
 using Xunit;
-using Xunit.Abstractions;
-
-
 namespace BackPressureTests;
 
 public class MassSender(IHost sender)
@@ -23,6 +20,12 @@ public class MassSender(IHost sender)
     public void Cancel()
     {
         _cancellation.Cancel();
+    }
+
+    public void Dispose()
+    {
+        _cancellation.Cancel();
+        _cancellation.Dispose();
     }
     
     public void StartPublishing(int maximum = 5000, TimeSpan? time = null)
@@ -66,7 +69,7 @@ public class Harness : IAsyncLifetime, IWolverineActivator
         runtime.Observer = theObserver;
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _sender = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -96,7 +99,7 @@ public class Harness : IAsyncLifetime, IWolverineActivator
         _receiver.GetRuntime().Observer = theObserver;
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _sender.StopAsync();
         _sender.Dispose();

@@ -1,9 +1,10 @@
-using System.Collections;
-using System.Reflection;
 using JasperFx;
 using JasperFx.CodeGeneration;
 using JasperFx.Core.Reflection;
 using Microsoft.Extensions.Logging;
+using System.Collections;
+using System.Diagnostics.CodeAnalysis;
+using System.Reflection;
 using Wolverine.Configuration;
 using Wolverine.ErrorHandling;
 using Wolverine.Logging;
@@ -24,7 +25,7 @@ namespace Wolverine;
 /// </summary>
 public interface IHandledTypeRule
 {
-    bool TryFindHandledType(Type concreteType, out Type handlerType);
+    bool TryFindHandledType(Type concreteType, [NotNullWhen(true)] out Type? handlerType);
 }
 
 public sealed partial class WolverineOptions : IPolicies
@@ -107,6 +108,11 @@ public sealed partial class WolverineOptions : IPolicies
                 x.UseDurableOutbox();
             }
         });
+    }
+
+    void IPolicies.AlwaysMakeScheduledMessagesDurable()
+    {
+        Durability.AlwaysMakeScheduledMessagesDurable = true;
     }
 
     void IPolicies.AllListeners(Action<ListenerConfiguration> configure)
@@ -283,6 +289,22 @@ public sealed partial class WolverineOptions : IPolicies
     void IPolicies.PropagateGroupIdToPartitionKey()
     {
         MetadataRules.Add(new GroupIdToPartitionKeyRule());
+    }
+
+    void IPolicies.PropagateIncomingHeadersToOutgoing(params string[] headerNames)
+    {
+        if (headerNames == null || headerNames.Length == 0)
+            throw new ArgumentException("At least one header name is required", nameof(headerNames));
+
+        MetadataRules.Add(new PropagateHeadersRule(headerNames));
+    }
+
+    void IPolicies.PropagateIncomingHeaderToOutgoing(string headerName)
+    {
+        if (string.IsNullOrWhiteSpace(headerName))
+            throw new ArgumentException("A header name is required", nameof(headerName));
+
+        MetadataRules.Add(new PropagateOneHeaderRule(headerName));
     }
 
     internal MiddlewarePolicy FindOrCreateMiddlewarePolicy()

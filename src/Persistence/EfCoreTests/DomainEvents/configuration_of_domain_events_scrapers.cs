@@ -44,7 +44,7 @@ public class configuration_of_domain_events_scrapers : IAsyncDisposable
         NpgsqlConnection.ClearAllPools();
     }
 
-    public async Task startHostAsync(Action<WolverineOptions> configure)
+    private async Task startHostAsync(Action<WolverineOptions> configure)
     {
         theHost = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -102,6 +102,26 @@ public class configuration_of_domain_events_scrapers : IAsyncDisposable
         });
 
         tracked.MessageSucceeded.SingleMessage<Event1>().Color.ShouldBe("orange");
+    }
+
+    [Fact]
+    public async Task publish_all_domain_events_using_dbcontextoutbox()
+    {
+        await startHostAsync(_ => { });
+
+        await using var scope = theHost.Services.CreateAsyncScope();
+        var outbox = scope.ServiceProvider.GetRequiredService<IDbContextOutbox<CleanDbContext>>();
+        IDomainEvent[] events = [new Event1("red"), new Event2("green"), new Event3("blue")];
+
+        var tracked = await theHost.ExecuteAndWaitAsync(async _ =>
+        {
+            await outbox.PublishAllAsync(events);
+            await outbox.SaveChangesAndFlushMessagesAsync();
+        });
+
+        tracked.MessageSucceeded.SingleMessage<Event1>().Color.ShouldBe("red");
+        tracked.MessageSucceeded.SingleMessage<Event2>().Color.ShouldBe("green");
+        tracked.MessageSucceeded.SingleMessage<Event3>().Color.ShouldBe("blue");
     }
     
         
@@ -167,7 +187,7 @@ public class configuration_of_domain_events_scrapers : IAsyncDisposable
             
             var item = new Item { Id = itemId, Name = "Latte"};
             dbContext.Items.Add(item);
-            await dbContext.SaveChangesAsync();
+            await dbContext.SaveChangesAsync(TestContext.Current.CancellationToken);
         }
         
         var tracked = await theHost.InvokeMessageAndWaitAsync(new ApproveItem(itemId));
@@ -188,7 +208,7 @@ public class configuration_of_domain_events_scrapers : IAsyncDisposable
             
             var item = new Item { Id = itemId, Name = "Smoothie"};
             dbContext.Items.Add(item);
-            await dbContext.SaveChangesAsync();
+            await dbContext.SaveChangesAsync(TestContext.Current.CancellationToken);
         }
         
         var tracked = await theHost.InvokeMessageAndWaitAsync(new ApproveItem(itemId));

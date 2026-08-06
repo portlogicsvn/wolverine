@@ -1,5 +1,6 @@
 using IntegrationTests;
 using Marten;
+using JasperFx.Events;
 using Marten.Events;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -21,15 +22,21 @@ public class Bug_225_compound_handlers_and_marten_event_streams : PostgresqlCont
                 services.AddMarten(Servers.PostgresConnectionString)
                     .IntegrateWithWolverine();
             })
-            .UseWolverine(opts => { opts.Policies.AutoApplyTransactions(); })
-            .StartAsync();
+            .UseWolverine(opts => 
+            { 
+                opts.Policies.AutoApplyTransactions();
+                opts.Discovery.DisableConventionalDiscovery()
+                    .IncludeType<StoreSomething2CompoundHandler>();
+                opts.Durability.Mode = DurabilityMode.Solo;
+            })
+            .StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var id = Guid.NewGuid();
 
         await host.InvokeMessageAndWaitAsync(new StoreSomething2(id));
 
         using var session = host.Services.GetRequiredService<IDocumentStore>().LightweightSession();
-        var stream = await session.Events.FetchStreamAsync(id);
+        var stream = await session.Events.FetchStreamAsync(id, token: TestContext.Current.CancellationToken);
 
         stream.ShouldNotBeEmpty();
     }

@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using NSubstitute;
 using Wolverine.Configuration;
 using Wolverine.Runtime.Agents;
@@ -13,11 +14,26 @@ public class BackPressureAgentTests
     private readonly Endpoint theEndpoint = new TcpEndpoint(5555);
     private readonly IListeningAgent theListeningAgent = Substitute.For<IListeningAgent>();
     private readonly IWolverineObserver theObserver;
+    private readonly RecordingLogger theLogger = new();
 
     public BackPressureAgentTests()
     {
         theObserver = Substitute.For<IWolverineObserver>();
-        theBackPressureAgent = new BackPressureAgent(theListeningAgent, theEndpoint, theObserver);
+        theBackPressureAgent = new BackPressureAgent(theListeningAgent, theEndpoint, theObserver, theLogger);
+    }
+
+    private class RecordingLogger : ILogger
+    {
+        public readonly List<(LogLevel Level, string Message)> Entries = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            Entries.Add((logLevel, formatter(state, exception)));
+        }
     }
 
     [Fact]
@@ -92,6 +108,20 @@ public class BackPressureAgentTests
     }
 
     [Fact]
+    public async Task never_restart_a_paused_listener_even_when_fully_drained()
+    {
+        // GH-3832 — Paused is operator intent (or a circuit-breaker trip with its own Restarter).
+        // Back pressure relief must NOT resume it, no matter how empty the queue is.
+        theListeningAgent.Status.Returns(ListeningStatus.Paused);
+        theListeningAgent.QueueCount.Returns(0);
+
+        await theBackPressureAgent.CheckNowAsync();
+
+        await theListeningAgent.DidNotReceive().MarkAsTooBusyAndStopReceivingAsync();
+        await theListeningAgent.DidNotReceive().StartAsync();
+    }
+
+    [Fact]
     public async Task restart_when_too_busy_but_below_the_restart_threshold()
     {
         theListeningAgent.Status.Returns(ListeningStatus.TooBusy);
@@ -101,5 +131,38 @@ public class BackPressureAgentTests
 
         await theListeningAgent.DidNotReceive().MarkAsTooBusyAndStopReceivingAsync();
         await theListeningAgent.Received().StartAsync();
+    }
+
+    [Fact]
+    public async Task warns_periodically_while_latched_and_not_draining()
+    {
+        // GH CritterWatch#922 — a latched listener used to log exactly one line when it stopped and
+        // then nothing forever. Operators need a periodic sign of life carrying the numbers the
+        // resume decision is made from.
+        theListeningAgent.Status.Returns(ListeningStatus.TooBusy);
+        theListeningAgent.QueueCount.Returns(theEndpoint.BufferingLimits.Restart + 100);
+
+        for (var i = 0; i < BackPressureAgent.LatchedChecksPerReminder; i++)
+        {
+            await theBackPressureAgent.CheckNowAsync();
+        }
+
+        var warning = theLogger.Entries.ShouldHaveSingleItem();
+        warning.Level.ShouldBe(LogLevel.Warning);
+        warning.Message.ShouldContain("still latched by back pressure");
+
+        // and it repeats on the next full interval rather than spamming every check
+        for (var i = 0; i < BackPressureAgent.LatchedChecksPerReminder; i++)
+        {
+            await theBackPressureAgent.CheckNowAsync();
+        }
+
+        theLogger.Entries.Count.ShouldBe(2);
+
+        // recovering resets the cadence
+        theListeningAgent.QueueCount.Returns(theEndpoint.BufferingLimits.Restart);
+        await theBackPressureAgent.CheckNowAsync();
+        await theListeningAgent.Received().StartAsync();
+        theLogger.Entries.Count.ShouldBe(2);
     }
 }

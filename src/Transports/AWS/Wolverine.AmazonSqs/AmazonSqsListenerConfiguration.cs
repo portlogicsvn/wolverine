@@ -11,7 +11,9 @@ using Wolverine.Configuration;
 using Wolverine.ErrorHandling;
 using Wolverine.Runtime.Interop;
 using Wolverine.Runtime.Interop.MassTransit;
+using Wolverine.Newtonsoft;
 using Wolverine.Runtime.Serialization;
+using Wolverine.Transports;
 using Wolverine.Util;
 using JsonSerializer = System.Text.Json.JsonSerializer;
 
@@ -71,6 +73,29 @@ public class AmazonSqsListenerConfiguration : ListenerConfiguration<AmazonSqsLis
         {
             e.CircuitBreakerOptions = new CircuitBreakerOptions();
             configure?.Invoke(e.CircuitBreakerOptions);
+        });
+
+        return this;
+    }
+
+    /// <summary>
+    ///     How many completed messages this listener coalesces into a single SQS
+    ///     <c>DeleteMessageBatch</c> call, and how long a completion waits for that batch to fill.
+    ///     Deleting per message costs one HTTP round trip -- and one billable API call -- each,
+    ///     which is 10 deletes for every 10 message receive. Valid sizes are 1 through 10; pass 1
+    ///     to go back to a delete per message. Defaults are 10 and 50 milliseconds. See GH-3493.
+    /// </summary>
+    /// <param name="size">Messages per delete request, 1 to 10</param>
+    /// <param name="timeout">Maximum age of a pending delete batch. Defaults to 50 milliseconds</param>
+    public AmazonSqsListenerConfiguration DeleteMessageBatchSize(int size, TimeSpan? timeout = null)
+    {
+        add(e =>
+        {
+            e.DeleteMessageBatchSize = size;
+            if (timeout.HasValue)
+            {
+                e.DeleteMessageBatchTimeout = timeout.Value;
+            }
         });
 
         return this;
@@ -155,7 +180,7 @@ public class AmazonSqsListenerConfiguration : ListenerConfiguration<AmazonSqsLis
 
     public AmazonSqsListenerConfiguration UseMassTransitInterop(Action<IMassTransitInterop>? configure = null)
     {
-        add(e => e.Mapper = new MassTransitMapper((Endpoint as IMassTransitInteropEndpoint)!));
+        add(e => e.Mapper = new MassTransitMapper((Endpoint as IMassTransitInteropEndpoint)!, configure));
         return this;
     }
     
@@ -243,7 +268,7 @@ internal class NServiceBusEnvelopeMapper : ISqsEnvelopeMapper
 
         if (sqs.Headers.TryGetValue("NServiceBus.ReplyToAddress", out var replyQueue))
         {
-            envelope.ReplyUri = new Uri($"sqs://queue/{replyQueue}");
+            envelope.ReplyUri = new Uri($"sqs://{replyQueue}");
         }
 
         if (sqs.Headers.TryGetValue("NServiceBus.ContentType", out var contentType))
@@ -259,17 +284,10 @@ internal class NServiceBusEnvelopeMapper : ISqsEnvelopeMapper
             }
         }
 
-        if (sqs.Headers.TryGetValue("NServiceBus.EnclosedMessageTypes", out var messageTypeName))
+        if (sqs.Headers.TryGetValue(NServiceBusInterop.EnclosedMessageTypesHeader, out var enclosed)
+            && NServiceBusInterop.ResolveMessageType(enclosed) is string messageType)
         {
-            Type? messageType = Type.GetType(messageTypeName);
-            if (messageType != null)
-            {
-                envelope.MessageType = messageType.ToMessageTypeName();
-            }
-            else
-            {
-                envelope.MessageType = messageTypeName;
-            }
+            envelope.MessageType = messageType;
         }
     }
     

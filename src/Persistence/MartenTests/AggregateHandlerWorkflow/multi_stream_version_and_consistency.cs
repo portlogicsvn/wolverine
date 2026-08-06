@@ -3,7 +3,9 @@ using JasperFx;
 using JasperFx.CodeGeneration;
 using JasperFx.Resources;
 using Marten;
+using JasperFx.Events;
 using Marten.Events;
+using JasperFx.Events.Projections;
 using Marten.Events.Projections;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -21,11 +23,17 @@ public class multi_stream_version_and_consistency : PostgresqlContext, IAsyncLif
     private Guid fromAccountId;
     private Guid toAccountId;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         theHost = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery()
+                    .IncludeType(typeof(TransferFundsWithDualVersionHandler))
+                    .IncludeType(typeof(TransferWithConsistencyCheckHandler))
+                    .IncludeType(typeof(TransferWithConsistencyCheckNoConcurrentModificationHandler))
+                    .IncludeType(typeof(TransferFundsHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Services.AddMarten(m =>
                     {
                         m.Connection(Servers.PostgresConnectionString);
@@ -43,7 +51,7 @@ public class multi_stream_version_and_consistency : PostgresqlContext, IAsyncLif
         theStore = theHost.Services.GetRequiredService<IDocumentStore>();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await theHost.StopAsync();
         theHost.Dispose();
@@ -170,7 +178,6 @@ public record FundsDeposited(decimal Amount);
 #endregion
 
 #region Commands
-
 // Default version convention: only the first [WriteAggregate] picks up "Version"
 public record TransferFunds(Guid BankAccountId, Guid ToAccountId, decimal Amount, long Version);
 
@@ -189,7 +196,6 @@ public record TransferWithConsistencyCheckNoConcurrentModification(
 #endregion
 
 #region Handlers
-
 // Default behavior: first [WriteAggregate] picks up "Version", second does not
 public static class TransferFundsHandler
 {

@@ -1,4 +1,5 @@
 using IntegrationTests;
+using JasperFx.Events.Projections;
 using JasperFx.Events;
 using Microsoft.Extensions.DependencyInjection;
 using Polecat;
@@ -28,17 +29,17 @@ public class mixed_aggregate_handler_with_multiple_streams
                     m.Projections.Snapshot<XAccount>(SnapshotLifecycle.Inline);
                     m.Projections.Snapshot<Inventory>(SnapshotLifecycle.Inline);
                 }).IntegrateWithWolverine();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var store = host.Services.GetRequiredService<IDocumentStore>();
-        await ((DocumentStore)store).Database.ApplyAllConfiguredChangesToDatabaseAsync();
+        await ((DocumentStore)store).Database.ApplyAllConfiguredChangesToDatabaseAsync(ct: TestContext.Current.CancellationToken);
         await using var session = store.LightweightSession();
         var inventoryId = session.Events.StartStream<Inventory>(new InventoryStarted("XFX", 100, 10)).Id;
         var accountId = session.Events.StartStream<XAccount>(new XAccountOpened(2000)).Id;
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         var (tracked, account) = await host.InvokeMessageAndWaitAsync<XAccount>(new MakePurchase(accountId, inventoryId, 30));
-        account.Balance.ShouldBe(1700);
+        account!.Balance.ShouldBe(1700);
     }
 }
 
@@ -70,7 +71,7 @@ public record Drawdown(int Quantity);
 public class Inventory
 {
     public Guid Id { get; set; }
-    public string Name { get; set; }
+    public string Name { get; set; } = null!;
     public int Quantity { get; set; }
     public double UnitPrice { get; set; }
 
@@ -95,8 +96,8 @@ public static class MakePurchaseHandler
 
         [WriteAggregate] IEventStream<Inventory> inventory)
     {
-        if (command.Number > inventory.Aggregate.Quantity ||
-            (command.Number * inventory.Aggregate.UnitPrice) > account.Aggregate.Balance)
+        if (command.Number > inventory.Aggregate!.Quantity ||
+            (command.Number * inventory.Aggregate.UnitPrice) > account.Aggregate!.Balance)
         {
             return new UpdatedAggregate<XAccount>();
         }

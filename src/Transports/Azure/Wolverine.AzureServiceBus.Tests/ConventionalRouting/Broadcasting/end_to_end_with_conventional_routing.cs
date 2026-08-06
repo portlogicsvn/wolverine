@@ -7,15 +7,14 @@ using Xunit;
 
 namespace Wolverine.AzureServiceBus.Tests.ConventionalRouting.Broadcasting;
 
-[Trait("Category", "Flaky")]
 public class end_to_end_with_conventional_routing : IAsyncLifetime
 {
     private IHost _receiver = null!;
     private IHost _sender = null!;
 
-    public Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
-        _sender = WolverineHost.For(opts =>
+        _sender = await WolverineHost.ForAsync(opts =>
         {
             opts.UseAzureServiceBusTesting().UseTopicAndSubscriptionConventionalRouting(x =>
             {
@@ -28,10 +27,8 @@ public class end_to_end_with_conventional_routing : IAsyncLifetime
             opts.ServiceName = "Sender";
         });
 
-        _receiver = WolverineHost.For(opts =>
+        _receiver = await WolverineHost.ForAsync(opts =>
         {
-            #region sample_using_topic_and_subscription_conventional_routing_with_azure_service_bus
-
             opts.UseAzureServiceBusTesting()
                 .UseTopicAndSubscriptionConventionalRouting(convention =>
                 {
@@ -49,15 +46,11 @@ public class end_to_end_with_conventional_routing : IAsyncLifetime
                 .AutoProvision()
                 .AutoPurgeOnStartup();
 
-            #endregion
-
             opts.ServiceName = "Receiver";
         });
-
-        return Task.CompletedTask;
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         if (_sender != null) await _sender.StopAsync();
         if (_receiver != null) await _receiver.StopAsync();

@@ -6,8 +6,11 @@ namespace Wolverine.Tracking;
 
 public class EnvelopeRecord
 {
+    private static long _sequence;
+
     public EnvelopeRecord(MessageEventType eventType, Envelope? envelope, long sessionTime, Exception? exception)
     {
+        Sequence = Interlocked.Increment(ref _sequence);
         Envelope = envelope;
         SessionTime = sessionTime;
         Exception = exception;
@@ -43,6 +46,15 @@ public class EnvelopeRecord
     ///     A timestamp of the milliseconds since the tracked session was started before this event
     /// </summary>
     public long SessionTime { get; }
+
+    /// <summary>
+    ///     Globally monotonic ordinal assigned when this record was created. GH-3825: SessionTime is
+    ///     only millisecond resolution, so every record from one receive batch lands on the same value
+    ///     and sorting by it degenerates to the (unordered) enumeration of the envelope cache. This is
+    ///     the tiebreaker that makes AllRecordsInOrder() actually report activity in the order it
+    ///     happened.
+    /// </summary>
+    public long Sequence { get; }
 
     public Exception? Exception { get; }
     public MessageEventType MessageEventType { get; private set; }
@@ -90,6 +102,9 @@ public class EnvelopeRecord
 
             case MessageEventType.MovedToErrorQueue:
                 return $"{prefix}{message} was moved to the dead letter queue";
+
+            case MessageEventType.AutoFaultPublished:
+                return $"{prefix}Auto-published Fault for {message}";
         }
 
         var icon = IsComplete ? "+" : "-";

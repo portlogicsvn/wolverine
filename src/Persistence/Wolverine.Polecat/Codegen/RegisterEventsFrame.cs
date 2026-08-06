@@ -2,6 +2,7 @@ using System.Reflection;
 using JasperFx.CodeGeneration.Frames;
 using JasperFx.CodeGeneration.Model;
 using JasperFx.Core.Reflection;
+using JasperFx.Events;
 using Polecat.Events;
 
 namespace Wolverine.Polecat.Codegen;
@@ -19,6 +20,6 @@ internal class RegisterEventsFrame<T> : MethodCall where T : class
     {
         return responseType.CanBeCastTo<IEnumerable<object>>()
             ? ReflectionHelper.GetMethod<IEventStream<T>>(x => x.AppendMany(new List<object>()))!
-            : ReflectionHelper.GetMethod<IEventStream<T>>(x => x.AppendOne(null))!;
+            : ReflectionHelper.GetMethod<IEventStream<T>>(x => x.AppendOne(null!))!;
     }
 }

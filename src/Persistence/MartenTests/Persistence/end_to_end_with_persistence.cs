@@ -12,21 +12,23 @@ using Wolverine.Persistence.Durability;
 using Wolverine.Postgresql;
 using Wolverine.Tracking;
 using Wolverine.Transports.Tcp;
-using Xunit.Abstractions;
-
+using Xunit;
 namespace MartenTests.Persistence;
 
-public class end_to_end_with_persistence : PostgresqlContext, IDisposable, IAsyncLifetime
+public class end_to_end_with_persistence : PostgresqlContext, IAsyncLifetime
 {
     private readonly ITestOutputHelper _output;
-    private readonly IHost theReceiver;
-
-    private readonly IHost theSender;
+    private IHost theReceiver = null!;
+    private IHost theSender = null!;
 
     public end_to_end_with_persistence(ITestOutputHelper output)
     {
         _output = output;
-        theSender = WolverineHost.For(opts =>
+    }
+
+    public async ValueTask InitializeAsync()
+    {
+        theSender = await WolverineHost.ForAsync(opts =>
         {
             opts.Publish(x =>
             {
@@ -43,9 +45,14 @@ public class end_to_end_with_persistence : PostgresqlContext, IDisposable, IAsyn
             }).IntegrateWithWolverine();
 
             opts.ListenAtPort(2567);
+
+            opts.Discovery.DisableConventionalDiscovery()
+                .IncludeType(typeof(ItemCreatedHandler))
+                .IncludeType(typeof(QuestionHandler));
+            opts.Durability.Mode = DurabilityMode.Solo;
         });
 
-        theReceiver = WolverineHost.For(opts =>
+        theReceiver = await WolverineHost.ForAsync(opts =>
         {
             opts.PersistMessagesWithPostgresql(Servers.PostgresConnectionString, "receiver");
 
@@ -57,25 +64,21 @@ public class end_to_end_with_persistence : PostgresqlContext, IDisposable, IAsyn
                 x.Connection(Servers.PostgresConnectionString);
                 x.DatabaseSchemaName = "receiver";
             }).IntegrateWithWolverine();
-        });
-    }
 
-    public async Task InitializeAsync()
-    {
+            opts.Discovery.DisableConventionalDiscovery()
+                .IncludeType(typeof(ItemCreatedHandler));
+            opts.Durability.Mode = DurabilityMode.Solo;
+        });
+
         await theSender.ResetResourceState();
         await theReceiver.ResetResourceState();
     }
 
-    public Task DisposeAsync()
-    {
-        Dispose();
-        return Task.CompletedTask;
-    }
-
-    public void Dispose()
+    public ValueTask DisposeAsync()
     {
         theSender?.Dispose();
         theReceiver?.Dispose();
+        return ValueTask.CompletedTask;
     }
 
     [Fact]
@@ -116,11 +119,11 @@ public class end_to_end_with_persistence : PostgresqlContext, IDisposable, IAsyn
         var documentStore = theReceiver.Get<IDocumentStore>();
         await using (var session = documentStore.QuerySession())
         {
-            var item2 = await session.LoadAsync<ItemCreated>(item.Id);
+            var item2 = await session.LoadAsync<ItemCreated>(item.Id, TestContext.Current.CancellationToken);
             if (item2 == null)
             {
-                Thread.Sleep(500);
-                item2 = await session.LoadAsync<ItemCreated>(item.Id);
+                await Task.Delay(500, TestContext.Current.CancellationToken);
+                item2 = await session.LoadAsync<ItemCreated>(item.Id, TestContext.Current.CancellationToken);
             }
 
             item2!.Name.ShouldBe("Shoe");

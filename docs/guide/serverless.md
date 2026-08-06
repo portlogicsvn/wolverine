@@ -14,7 +14,7 @@ main suggestions about making Wolverine be more successful:
 
 1. Make any outgoing [message endpoints](/guide/runtime.html#endpoint-types) be *Inline* so that messages are sent immediately
 2. Utilize the new *Serverless* optimized mode
-3. Absolutely take advantage of [pre-generated types]() to cut down the all important cold start problem with serverless functions
+3. Absolutely take advantage of [pre-generated types](/guide/codegen.html#generating-code-ahead-of-time) to cut down the all important cold start problem with serverless functions
 
 ## Serverless Mode
 
@@ -48,7 +48,7 @@ using var host = await Host.CreateDefaultBuilder()
         opts.Durability.Mode = DurabilityMode.Serverless;
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/DurabilityModes.cs#L12-L33' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_configuring_the_serverless_mode' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/DurabilityModes.cs#L12-L32' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_configuring_the_serverless_mode' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Pre-Generate All Types
@@ -77,5 +77,5 @@ endpoints:
         .SendInline();
 })
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Bugs/Bug_189_fails_if_there_are_many_messages_in_queue_on_startup.cs#L20-L33' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_usage_of_send_inline' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/RabbitMQ/Wolverine.RabbitMQ.Tests/Bugs/Bug_189_fails_if_there_are_many_messages_in_queue_on_startup.cs#L21-L33' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_usage_of_send_inline' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->

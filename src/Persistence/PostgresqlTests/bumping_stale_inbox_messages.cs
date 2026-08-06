@@ -20,7 +20,7 @@ public class bumping_stale_inbox_messages : IAsyncLifetime
 {
     private IHost theHost = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         theHost = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -32,18 +32,19 @@ public class bumping_stale_inbox_messages : IAsyncLifetime
         await theHost.RebuildAllEnvelopeStorageAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await theHost.StopAsync();
+        theHost.Dispose();
     }
 
     [Fact]
     public async Task got_the_right_column()
     {
         using var conn = new NpgsqlConnection(Servers.PostgresConnectionString);
-        await conn.OpenAsync();
+        await conn.OpenAsync(TestContext.Current.CancellationToken);
 
-        var table = await new Table(new DbObjectName("stale_outbox", DatabaseConstants.IncomingTable)).FetchExistingAsync(conn);
+        var table = await new Table(new DbObjectName("stale_outbox", DatabaseConstants.IncomingTable)).FetchExistingAsync(conn, TestContext.Current.CancellationToken);
 
         table!.HasColumn(DatabaseConstants.Timestamp).ShouldBeTrue();
         
@@ -75,21 +76,21 @@ public class bumping_stale_inbox_messages : IAsyncLifetime
         await messageStore.Inbox.StoreIncomingAsync(envelope5);
         
         using var conn = new NpgsqlConnection(Servers.PostgresConnectionString);
-        await conn.OpenAsync();
+        await conn.OpenAsync(TestContext.Current.CancellationToken);
         await conn.CreateCommand("update stale_outbox.wolverine_incoming_envelopes set \"timestamp\" = :time where id = :id")
             .With("time", DateTimeOffset.UtcNow.Subtract(2.Hours()))
             .With("id", envelope1.Id)
-            .ExecuteNonQueryAsync();
+            .ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         
         await conn.CreateCommand("update stale_outbox.wolverine_incoming_envelopes set \"timestamp\" = :time where id = :id")
             .With("time", DateTimeOffset.UtcNow.Subtract(2.Hours()))
             .With("id", envelope3.Id)
-            .ExecuteNonQueryAsync();
+            .ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         
         await conn.CreateCommand("update stale_outbox.wolverine_incoming_envelopes set \"timestamp\" = :time where id = :id")
             .With("time", DateTimeOffset.UtcNow.Subtract(2.Hours()))
             .With("id", envelope5.Id)
-            .ExecuteNonQueryAsync();
+            .ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         
         var envelopesBefore = await messageStore.Admin.AllIncomingAsync();
         envelopesBefore.Count(x => x.OwnerId == 0).ShouldBe(0);

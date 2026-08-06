@@ -25,9 +25,9 @@ public class bootstrapping_specs : IntegrationContext
     }
 
     [Fact]
-    public void registers_the_supplemental_code_files()
+    public async Task registers_the_supplemental_code_files()
     {
-        with(_ => {});
+        await with(_ => {});
 
         var container = Host.Services.GetRequiredService<IServiceContainer>();
         container.DefaultFor<WolverineSupplementalCodeFiles>()!
@@ -40,17 +40,17 @@ public class bootstrapping_specs : IntegrationContext
     }
 
     [Fact]
-    public void can_apply_a_wrapper_to_all_chains()
+    public async Task can_apply_a_wrapper_to_all_chains()
     {
-        with(opts => opts.Policies.Add<WrapWithSimple>());
+        await with(opts => opts.Policies.Add<WrapWithSimple>());
 
         chainFor<MovieAdded>().Middleware.OfType<SimpleWrapper>().Any().ShouldBeTrue();
     }
 
     [Fact]
-    public void can_customize_source_code_generation()
+    public async Task can_customize_source_code_generation()
     {
-        with(opts =>
+        await with(opts =>
         {
             opts.CodeGeneration.Sources.Add(new SpecialServiceSource());
             opts.IncludeType<SpecialServiceUsingThing>();
@@ -65,14 +65,18 @@ public class bootstrapping_specs : IntegrationContext
     public async Task bootstrap_with_extension_finding_disabled()
     {
         #region sample_disabling_assembly_scanning
-
         using var host = await Microsoft.Extensions.Hosting.Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
                 opts.DisableConventionalDiscovery();
+
+                // With ExtensionDiscovery.ManualOnly, Wolverine does not auto-load the
+                // WolverineFx.RuntimeCompilation module, so a TypeLoadMode.Dynamic app must
+                // opt into runtime Roslyn compilation explicitly (or pre-generate with Static).
+                opts.UseRuntimeCompilation();
             }, ExtensionDiscovery.ManualOnly)
             
-            .StartAsync();
+            .StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         #endregion
 
@@ -119,7 +123,6 @@ public class bootstrapping_specs : IntegrationContext
     [Theory]
     [InlineData(typeof(IMessageBus))]
     [InlineData(typeof(IMessageContext))]
-    [InlineData(typeof(IMessageBus))]
     public void can_build_services(Type serviceType)
     {
         using var scope = Host.Services.CreateScope();

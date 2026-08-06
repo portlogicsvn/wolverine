@@ -45,7 +45,7 @@ public async Task post_json_happy_path()
     result.Sum.ShouldBe(7);
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/Wolverine.Http.Tests/posting_json.cs#L12-L31' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_post_json_happy_path' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/Wolverine.Http.Tests/posting_json.cs#L12-L30' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_post_json_happy_path' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Configuring System.Text.Json
@@ -77,7 +77,7 @@ app.MapWolverineEndpoints();
 
 return await app.RunJasperFxCommands(args);
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/Wolverine.Http.Tests/Samples/ConfiguringJson.cs#L10-L29' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_configuring_stj_for_wolverine' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/Wolverine.Http.Tests/Samples/ConfiguringJson.cs#L10-L28' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_configuring_stj_for_wolverine' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Using Newtonsoft.Json
@@ -88,8 +88,20 @@ to drop back to Newtonsoft.Json for various scenarios. This feature was added sp
 at the request of F# developers.
 :::
 
-To opt into using Newtonsoft.Json for the JSON serialization of *HTTP endpoints*, you have this option within the call
-to the `MapWolverineEndpoints()` configuration:
+::: tip
+As of **Wolverine 6.0**, Newtonsoft.Json support for Wolverine.Http lives in a separate `WolverineFx.Http.Newtonsoft` NuGet package. The core `WolverineFx.Http` package no longer depends on Newtonsoft.Json; install `WolverineFx.Http.Newtonsoft` alongside it to opt in. This mirrors the symmetric core extraction in `WolverineFx.Newtonsoft` (see [the migration guide](/guide/migration.html#wolverine-http-newtonsoft-moved-to-wolverinefx-http-newtonsoft-package-breaking)).
+:::
+
+To install:
+
+```bash
+dotnet add package WolverineFx.Http.Newtonsoft
+```
+
+The `WolverineFx.Http.Newtonsoft` package provides the same `UseNewtonsoftJsonForSerialization`
+API as Wolverine 5.x, now exposed as an extension method on `WolverineHttpOptions`. Add the
+`using Wolverine.Http.Newtonsoft;` directive to bring the extensions into scope, and register
+the package's services on the `IServiceCollection` alongside `AddWolverineHttp()`:
 
 <!-- snippet: sample_use_newtonsoft_for_http_serialization -->
 <a id='snippet-sample_use_newtonsoft_for_http_serialization'></a>
@@ -106,16 +118,22 @@ builder.Host.UseWolverine(opts =>
 });
 
 builder.Services.AddWolverineHttp();
+// As of Wolverine 6.0, Newtonsoft.Json HTTP support lives in the
+// separate WolverineFx.Http.Newtonsoft package — register its
+// services here, then opt in via UseNewtonsoftJsonForSerialization()
+// below.
+builder.Services.AddWolverineHttpNewtonsoft();
 
 await using var host = await AlbaHost.For(builder, app =>
 {
     app.MapWolverineEndpoints(opts =>
     {
         // Opt into using Newtonsoft.Json for JSON serialization just with Wolverine.HTTP routes
-        // Configuring the JSON serialization is optional
+        // Configuring the JSON serialization is optional. This extension method comes from
+        // the WolverineFx.Http.Newtonsoft package (using Wolverine.Http.Newtonsoft;).
         opts.UseNewtonsoftJsonForSerialization(settings => settings.TypeNameHandling = TypeNameHandling.All);
     });
 });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/Wolverine.Http.Tests/using_newtonsoft_for_serialization.cs#L18-L43' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_use_newtonsoft_for_http_serialization' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Http/Wolverine.Http.Tests/using_newtonsoft_for_serialization.cs#L19-L49' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_use_newtonsoft_for_http_serialization' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->

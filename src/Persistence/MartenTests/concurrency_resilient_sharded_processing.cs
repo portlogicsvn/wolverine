@@ -53,6 +53,7 @@ public class concurrency_resilient_sharded_processing
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Discovery.DisableConventionalDiscovery().IncludeType(typeof(LetterMessageHandler));
     
                 opts.Services.AddMarten(m =>
@@ -74,7 +75,7 @@ public class concurrency_resilient_sharded_processing
                         queue.BufferedInMemory();
                     });
                 });
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         // This is because of https://github.com/JasperFx/wolverine/issues/1835
         var agents = await new ExclusiveListenerFamily(host.GetRuntime()).AllKnownAgentsAsync();
@@ -99,6 +100,7 @@ public class concurrency_resilient_sharded_processing
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Discovery.DisableConventionalDiscovery().IncludeType(typeof(LetterMessageHandler));
                 
                 opts.Services.AddMarten(m =>
@@ -110,7 +112,6 @@ public class concurrency_resilient_sharded_processing
 
 
                 #region sample_inferred_message_group_id
-
                 // Telling Wolverine how to assign a GroupId to a message, that we'll use
                 // to predictably sort into "slots" in the processing
                 opts.MessagePartitioning
@@ -133,7 +134,7 @@ public class concurrency_resilient_sharded_processing
 
                 #endregion
                 
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         // Re-purposing the test a bit. Making sure we're constructing forwarding correctly
         var executor = host.GetRuntime().As<IExecutorFactory>().BuildFor(typeof(LogA), new StubEndpoint("Wrong", new StubTransport()));
@@ -154,6 +155,7 @@ public class concurrency_resilient_sharded_processing
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Discovery.DisableConventionalDiscovery().IncludeType(typeof(LetterMessageHandler));
                 
                 // Telling Wolverine how to assign a GroupId to a message, that we'll use
@@ -177,7 +179,7 @@ public class concurrency_resilient_sharded_processing
                         queue.UseDurableInbox();
                     });
                 });
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         // This is just pumping out a ton of messages of different types of ILetterMessage
         // that simulate getting a burst of messages that all append events to Marten streams
@@ -198,6 +200,7 @@ public class concurrency_resilient_sharded_processing
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Discovery.DisableConventionalDiscovery().IncludeType(typeof(LetterMessageHandler));
                 
                 // Telling Wolverine how to assign a GroupId to a message, that we'll use
@@ -223,7 +226,7 @@ public class concurrency_resilient_sharded_processing
                         
                         .UseDurableInbox();
                 });
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var tracked = await host.ExecuteAndWaitAsync(pumpOutMessages, 60000);
     }

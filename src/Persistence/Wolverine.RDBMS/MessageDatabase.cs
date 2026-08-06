@@ -1,4 +1,5 @@
 using System.Data;
+using JasperFx.Events.Daemon;
 using System.Data.Common;
 using JasperFx.Core;
 using JasperFx.Core.Reflection;
@@ -16,6 +17,7 @@ using Wolverine.RDBMS.Transport;
 using Wolverine.Runtime;
 using Wolverine.Runtime.Agents;
 using Wolverine.Transports;
+using Wolverine.RDBMS.DynamicListeners;
 using DbCommandBuilder = Weasel.Core.DbCommandBuilder;
 
 namespace Wolverine.RDBMS;
@@ -81,6 +83,31 @@ public abstract partial class MessageDatabase<T> : DatabaseBase<T>,
         }
 
         Uri = new Uri($"{PersistenceConstants.AgentScheme}://{parts.Where(x => x.IsNotEmpty()).Join("/")}");
+
+        // Dynamic-listener registry (GH-2685). Only the Main store hosts the registry —
+        // ancillary / tenant stores keep the no-op default and never see the
+        // wolverine_listeners table provisioned. Gated on the opt-in flag so existing
+        // apps see no schema migration churn on upgrade.
+        if (settings.EnableDynamicListeners && Role == MessageStoreRole.Main)
+        {
+            // ReSharper disable once VirtualMemberCallInConstructor
+            Listeners = BuildListenerStore();
+        }
+    }
+
+    /// <summary>
+    /// Factory hook for constructing the per-database <see cref="IListenerStore"/> when
+    /// <see cref="DurabilitySettings.EnableDynamicListeners"/> is set on a
+    /// <see cref="MessageStoreRole.Main"/> store. The default returns
+    /// <see cref="RdbmsListenerStore"/>, which is portable across providers that use
+    /// <c>@</c>-prefixed bind variables and <see cref="DbDataSource"/>-driven command
+    /// creation (Postgres, SqlServer, MySQL, SQLite). Oracle's
+    /// <c>OracleMessageStore</c> does not inherit from <see cref="MessageDatabase{T}"/>
+    /// and supplies its own listener-store implementation directly.
+    /// </summary>
+    protected virtual IListenerStore BuildListenerStore()
+    {
+        return new RdbmsListenerStore(_dataSource, QuotedSchemaName, IsUniqueConstraintViolation);
     }
 
     public MessageStoreRole Role { get; private set; }
@@ -92,7 +119,13 @@ public abstract partial class MessageDatabase<T> : DatabaseBase<T>,
 
     public IAgent BuildAgent(IWolverineRuntime runtime)
     {
-        return new DurabilityAgent(runtime, this);
+        return new DurabilityAgent(runtime, this)
+        {
+            // GH-3376: a tenant database's scheduled job polling belongs to this agent, which managed
+            // distribution assigns to exactly one node. Main / ancillary stores keep polling from the
+            // node-wide fan-out instead - see StartScheduledJobs() below.
+            AutoStartScheduledJobPolling = Role == MessageStoreRole.Tenant
+        };
     }
 
     public Uri Uri { get; protected set; } = new Uri("null://null");
@@ -127,6 +160,13 @@ public abstract partial class MessageDatabase<T> : DatabaseBase<T>,
 
     public INodeAgentPersistence Nodes { get; }
 
+    /// <summary>
+    /// Set by <see cref="Initialize"/> after <see cref="DurabilitySettings.EnableDynamicListeners"/>
+    /// is read off the runtime — defaults to <see cref="NullListenerStore.Instance"/>
+    /// when the flag is off so the listener-registry table is never provisioned.
+    /// </summary>
+    public IListenerStore Listeners { get; protected set; } = NullListenerStore.Instance;
+
     public IMessageInbox Inbox => this;
 
     public IMessageOutbox Outbox => this;
@@ -139,10 +179,16 @@ public abstract partial class MessageDatabase<T> : DatabaseBase<T>,
         {
             _schemaName = value;
 
-            IncomingFullName = $"{value}.{DatabaseConstants.IncomingTable}";
-            OutgoingFullName = $"{value}.{DatabaseConstants.OutgoingTable}";
+            IncomingFullName = $"{QuotedSchemaName}.{DatabaseConstants.IncomingTable}";
+            OutgoingFullName = $"{QuotedSchemaName}.{DatabaseConstants.OutgoingTable}";
         }
     }
+
+    /// <summary>
+    /// Returns the schema name properly quoted for use in SQL statements.
+    /// Override in derived classes for database-specific quoting (e.g., double quotes for PostgreSQL, square brackets for SQL Server).
+    /// </summary>
+    protected virtual string QuotedSchemaName => SchemaName;
 
     public Task EnqueueAsync(IDatabaseOperation operation)
     {
@@ -223,6 +269,13 @@ public abstract partial class MessageDatabase<T> : DatabaseBase<T>,
 
     public abstract DbCommandBuilder ToCommandBuilder();
 
+    /// <summary>
+    /// Default implementation returns null, meaning "this provider cannot bound the
+    /// expired-handled-envelope delete". PostgreSQL and SQL Server override this to enable
+    /// batched cleanup. See <see cref="IMessageDatabase.BatchedDeleteExpiredHandledEnvelopesSql"/>.
+    /// </summary>
+    public virtual string? BatchedDeleteExpiredHandledEnvelopesSql(int batchSize) => null;
+
     public abstract Task<bool> ExistsAsync(Envelope envelope, CancellationToken cancellation);
 
     public async Task ReleaseIncomingAsync(int ownerId, Uri receivedAt)
@@ -231,7 +284,7 @@ public abstract partial class MessageDatabase<T> : DatabaseBase<T>,
 
         var impacted = await _dataSource
             .CreateCommand(
-                $"update {SchemaName}.{DatabaseConstants.IncomingTable} set owner_id = 0 where owner_id = @owner and {DatabaseConstants.ReceivedAt} = @uri")
+                $"update {QuotedSchemaName}.{DatabaseConstants.IncomingTable} set owner_id = 0 where owner_id = @owner and {DatabaseConstants.ReceivedAt} = @uri")
             .With("owner", ownerId)
             .With("uri", receivedAt.ToString())
             .ExecuteNonQueryAsync(_cancellation);
@@ -261,7 +314,28 @@ public abstract partial class MessageDatabase<T> : DatabaseBase<T>,
     public IAgent StartScheduledJobs(IWolverineRuntime runtime)
     {
         var agent = new DurabilityAgent(runtime, this);
-        agent.StartScheduledJobPolling();
+
+        // GH-3376: this node-wide fan-out runs on every node for every known database, outside the
+        // agent distribution machinery. Starting a poller here meant every node polled every TENANT
+        // database every ScheduledJobPollingTime; the per-database advisory lock deduped the work but
+        // not the connection, so each losing node still opened a connection, began a transaction, and
+        // rolled back - parking `tenants x nodes` connections, and each added node multiplied the
+        // polling load instead of dividing it. Tenant polling now rides the distributed durability
+        // agent (BuildAgent above), which managed distribution assigns to exactly one node. That
+        // mirrors what the RavenDb and CosmosDb stores already do for the same reason (#2623).
+        //
+        // Main and ancillary stores deliberately keep polling here, on every node:
+        //  - There are a handful of them, and every node already holds connections to them anyway for
+        //    heartbeats, leader election, and the control queues, so scoping them saves nothing.
+        //  - Polling from here starts immediately at boot. Waiting for leader election and agent
+        //    assignment instead would delay scheduled messages by >10s on every startup.
+        //
+        // Hosts with durability agents turned off have no NodeAgentController and so never build a
+        // durability agent. For them this fan-out is the only scheduled message pump, whatever the role.
+        if (!runtime.Options.Durability.DurabilityAgentEnabled || Role != MessageStoreRole.Tenant)
+        {
+            agent.StartScheduledJobPolling();
+        }
 
         return agent;
     }

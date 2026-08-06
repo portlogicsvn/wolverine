@@ -16,10 +16,12 @@ public class Bug_756_composite_handler_on_saga
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery();
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Discovery.IncludeType<SagaExample>();
                 opts.Services.AddMarten(Servers.PostgresConnectionString).IntegrateWithWolverine();
 
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         await host.InvokeMessageAndWaitAsync(new DoSomething(Guid.NewGuid()));
     }

@@ -23,7 +23,7 @@ public class transactional_frame_end_to_end : PostgresqlContext
     [Fact]
     public async Task the_transactional_middleware_works()
     {
-        using var host = WolverineHost.For(opts =>
+        using var host = await WolverineHost.ForAsync(opts =>
         {
             opts.Services.AddMarten(o =>
             {
@@ -36,14 +36,14 @@ public class transactional_frame_end_to_end : PostgresqlContext
         await host.InvokeAsync(command);
 
         await using var query = host.DocumentStore().QuerySession();
-        (await query.LoadAsync<FakeDoc>(command.Id))
+        (await query.LoadAsync<FakeDoc>(command.Id, TestContext.Current.CancellationToken))
             .ShouldNotBeNull();
     }
     
     [Fact]
     public async Task the_transactional_middleware_works_with_document_operations()
     {
-        using var host = WolverineHost.For(opts =>
+        using var host = await WolverineHost.ForAsync(opts =>
         {
             opts.Services.AddMarten(o =>
             {
@@ -57,17 +57,18 @@ public class transactional_frame_end_to_end : PostgresqlContext
         await host.InvokeAsync(command);
 
         await using var query = host.DocumentStore().QuerySession();
-        (await query.LoadAsync<FakeDoc>(command.Id))
+        (await query.LoadAsync<FakeDoc>(command.Id, TestContext.Current.CancellationToken))
             .ShouldNotBeNull();
     }
 
-    public static async Task Using_CommandsAreTransactional()
+    private static async Task Using_CommandsAreTransactional()
     {
-        #region sample_Using_CommandsAreTransactional
-
+        #region sample_using_commandsaretransactional
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery().IncludeType(typeof(CreateDocCommand2Handler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 // And actually use the policy
                 opts.Policies.Add<CommandsAreTransactional>();
             }).StartAsync();
@@ -88,8 +89,7 @@ public class CreateDocCommand2
 
 
 
-#region sample_using_IDocumentOperations
-
+#region sample_using_idocumentoperations
 public class CreateDocCommand2Handler
 {
     [Transactional]
@@ -133,8 +133,7 @@ public class UsingDocumentSessionHandler
     }
 }
 
-#region sample_CommandsAreTransactional
-
+#region sample_commandsaretransactional
 public class CommandsAreTransactional : IHandlerPolicy
 {
     public void Apply(IReadOnlyList<HandlerChain> chains, GenerationRules rules, IServiceContainer container)

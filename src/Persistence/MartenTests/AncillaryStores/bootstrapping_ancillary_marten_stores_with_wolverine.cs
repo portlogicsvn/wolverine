@@ -22,8 +22,7 @@ using Wolverine.RDBMS;
 using Wolverine.RDBMS.MultiTenancy;
 using Wolverine.Runtime.Agents;
 using Wolverine.Tracking;
-using Xunit.Abstractions;
-
+using Xunit;
 namespace MartenTests.AncillaryStores;
 
 public class bootstrapping_ancillary_marten_stores_with_wolverine : IAsyncLifetime
@@ -40,7 +39,7 @@ public class bootstrapping_ancillary_marten_stores_with_wolverine : IAsyncLifeti
         _output = output;
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         await using var conn = new NpgsqlConnection(Servers.PostgresConnectionString);
         await conn.OpenAsync();
@@ -55,12 +54,10 @@ public class bootstrapping_ancillary_marten_stores_with_wolverine : IAsyncLifeti
         await dropSchemaOnDatabase(tenant3ConnectionString, "things");
 
         #region sample_bootstrapping_with_ancillary_marten_stores
-
         theHost = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
                 #region sample_using_message_storage_schema_name
-
                 // THIS IS IMPORTANT FOR MODULAR MONOLITH USAGE!
                 // This helps Wolverine out to always utilize the same envelope storage
                 // for all modules for more efficient usage of resources
@@ -100,7 +97,8 @@ public class bootstrapping_ancillary_marten_stores_with_wolverine : IAsyncLifeti
                 {
                     x.MainConnectionString = Servers.PostgresConnectionString;
                 });
-
+                opts.Discovery.DisableConventionalDiscovery()
+                    .IncludeType(typeof(PlayerMessageHandler));
                 opts.Services.AddResourceSetupOnStartup();
             }).StartAsync();
 
@@ -109,7 +107,7 @@ public class bootstrapping_ancillary_marten_stores_with_wolverine : IAsyncLifeti
         theFamily = theHost.GetRuntime().Stores;
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await theHost.StopAsync();
         theHost.Dispose();
@@ -215,20 +213,28 @@ public class bootstrapping_ancillary_marten_stores_with_wolverine : IAsyncLifeti
     {
         var agents = await theFamily.AllKnownAgentsAsync();
 
-        agents.ShouldContain(new Uri("wolverinedb://postgresql/localhost/postgres/wolverine"));
+        agents.ShouldContain(new Uri($"wolverinedb://postgresql/localhost/{Servers.PostgresDatabaseName}/wolverine"));
         agents.ShouldContain(new Uri("wolverinedb://postgresql/localhost/tenant3/wolverine"));
         agents.ShouldContain(new Uri("wolverinedb://postgresql/localhost/tenant2/wolverine"));
         agents.ShouldContain(new Uri("wolverinedb://postgresql/localhost/tenant1/wolverine"));
     }
 
+    // "default" resolves to the configured database inside the test body rather than in the
+    // theory data. The data must NOT depend on WOLVERINE_POSTGRES: a supervised run discovers
+    // tests in one worker process and executes them in another with a different per-lane
+    // database, and a theory argument computed from the environment gives the same test a
+    // different identity in each process — the executing worker then "finishes without
+    // reporting a result" for an identity it never had.
     [Theory]
-    [InlineData("wolverinedb://postgresql/localhost/postgres/wolverine")]
+    [InlineData("default")]
     [InlineData("wolverinedb://postgresql/localhost/tenant2/wolverine")]
     [InlineData("wolverinedb://postgresql/localhost/tenant1/wolverine")]
     [InlineData("wolverinedb://postgresql/localhost/tenant3/wolverine")]
     public async Task build_each_agent_smoke_test(string uriString)
     {
-        var uri = uriString.ToUri();
+        var uri = uriString == "default"
+            ? new Uri($"wolverinedb://postgresql/localhost/{Servers.PostgresDatabaseName}/wolverine")
+            : uriString.ToUri();
         var agent = await theFamily.BuildAgentAsync(uri, theHost.GetRuntime());
         agent.ShouldNotBeNull();
 
@@ -243,7 +249,7 @@ public class bootstrapping_ancillary_marten_stores_with_wolverine : IAsyncLifeti
 
         var store = theHost.DocumentStore<IPlayerStore>();
         using var session = store.QuerySession();
-        var player = await session.LoadAsync<Player>(message.Id);
+        var player = await session.LoadAsync<Player>(message.Id, TestContext.Current.CancellationToken);
 
         player.ShouldNotBeNull();
     }
@@ -251,8 +257,7 @@ public class bootstrapping_ancillary_marten_stores_with_wolverine : IAsyncLifeti
 
 public record PlayerMessage(string Id);
 
-#region sample_PlayerMessageHandler
-
+#region sample_playermessagehandler
 // This will use a Marten session from the
 // IPlayerStore rather than the main IDocumentStore
 [MartenStore(typeof(IPlayerStore))]
@@ -268,7 +273,6 @@ public static class PlayerMessageHandler
 #endregion
 
 #region sample_separate_marten_stores
-
 public interface IPlayerStore : IDocumentStore;
 
 public interface IThingStore : IDocumentStore;

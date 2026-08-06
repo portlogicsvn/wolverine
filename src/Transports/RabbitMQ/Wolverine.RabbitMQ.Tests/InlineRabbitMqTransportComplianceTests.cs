@@ -10,7 +10,7 @@ public class InlineRabbitMqTransportFixture : TransportComplianceFixture, IAsync
     {
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         var queueName = RabbitTesting.NextQueueName() + "_inline";
         OutboundAddress = $"rabbitmq://queue/{queueName}".ToUri();
@@ -34,10 +34,6 @@ public class InlineRabbitMqTransportFixture : TransportComplianceFixture, IAsync
         });
     }
 
-    public new async Task DisposeAsync()
-    {
-        await base.DisposeAsync();
-    }
 }
 
 public class InlineRabbitMqTransportComplianceTests : TransportCompliance<InlineRabbitMqTransportFixture>;

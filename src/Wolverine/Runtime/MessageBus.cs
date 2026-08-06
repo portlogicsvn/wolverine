@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using JasperFx.Core;
+using JasperFx.Core.Reflection;
 using JasperFx.MultiTenancy;
 using Wolverine.Persistence.Durability;
 using Wolverine.Runtime.Routing;
@@ -14,6 +15,14 @@ public partial class MessageBus : IMessageBus, IMessageContext
     
     // ReSharper disable once InconsistentNaming
     protected readonly List<Envelope> _outstanding = new();
+
+    // Protects _outstanding from concurrent mutation. The Marten async daemon's
+    // multi-stream projection runner can call PublishAsync on the same MessageContext
+    // from many slices in parallel (Block parallelism = 10). Without this lock,
+    // concurrent List<Envelope>.Add silently corrupts the list and drops messages.
+    // GH-2529.
+    // ReSharper disable once InconsistentNaming
+    protected readonly object _outstandingLock = new();
     private string? _tenantId;
 
     public MessageBus(IWolverineRuntime runtime) : this(runtime, Activity.Current?.RootId ?? Guid.NewGuid().ToString())
@@ -57,7 +66,17 @@ public partial class MessageBus : IMessageBus, IMessageContext
     public IWolverineRuntime Runtime { get; }
     public IMessageStore Storage { get; internal set; }
 
-    public IEnumerable<Envelope> Outstanding => _outstanding;
+    /// <summary>
+    /// Snapshot of envelopes published in this context that have not yet been flushed.
+    /// Returns a copy to avoid concurrent-enumeration issues — see <see cref="_outstandingLock"/>.
+    /// </summary>
+    public IEnumerable<Envelope> Outstanding
+    {
+        get
+        {
+            lock (_outstandingLock) return _outstanding.ToArray();
+        }
+    }
 
     public IEnvelopeTransaction? Transaction { get; protected set; }
     public Guid ConversationId { get; protected set; }
@@ -172,6 +191,71 @@ public partial class MessageBus : IMessageBus, IMessageContext
         return Runtime.FindInvoker(message.GetType()).InvokeAsync<T>(message, this, cancellation, timeout, new DeliveryOptions{TenantId = tenantId});
     }
 
+    public IAsyncEnumerable<TResponse> StreamAsync<TResponse>(object message, CancellationToken cancellation = default)
+    {
+        if (message == null)
+        {
+            throw new ArgumentNullException(nameof(message));
+        }
+
+        Runtime.AssertHasStarted();
+
+        return Runtime.FindInvoker(message.GetType()).StreamAsync<TResponse>(message, this, cancellation);
+    }
+
+    public IAsyncEnumerable<TResponse> StreamAsync<TResponse>(object message, DeliveryOptions options, CancellationToken cancellation = default)
+    {
+        if (message == null)
+        {
+            throw new ArgumentNullException(nameof(message));
+        }
+
+        Runtime.AssertHasStarted();
+
+        return Runtime.FindInvoker(message.GetType()).StreamAsync<TResponse>(message, this, cancellation, options);
+    }
+
+    public Task<TResponse> StreamAsync<TRequest, TResponse>(IAsyncEnumerable<TRequest> messages,
+        CancellationToken cancellation = default, TimeSpan? timeout = default)
+    {
+        if (messages == null)
+        {
+            throw new ArgumentNullException(nameof(messages));
+        }
+
+        Runtime.AssertHasStarted();
+
+        return findStreamInvoker<TRequest>().InvokeAsync<TResponse>(messages, this, cancellation, timeout);
+    }
+
+    public Task<TResponse> StreamAsync<TRequest, TResponse>(IAsyncEnumerable<TRequest> messages,
+        DeliveryOptions options, CancellationToken cancellation = default, TimeSpan? timeout = default)
+    {
+        if (messages == null)
+        {
+            throw new ArgumentNullException(nameof(messages));
+        }
+
+        Runtime.AssertHasStarted();
+
+        return findStreamInvoker<TRequest>().InvokeAsync<TResponse>(messages, this, cancellation, timeout, options);
+    }
+
+    private IMessageInvoker findStreamInvoker<TRequest>()
+    {
+        // The concrete runtime type of an IAsyncEnumerable<TRequest> instance is a compiler-generated
+        // iterator, so dispatch must key off the declared stream type rather than message.GetType()
+        var messageType = typeof(IAsyncEnumerable<TRequest>);
+        if (!Runtime.Options.HandlerGraph.CanHandle(messageType))
+        {
+            throw new NotSupportedException(
+                $"StreamAsync is only supported for locally-handled message streams, and no handler accepts {messageType.FullNameInCode()} as its message type. " +
+                $"Define a handler like 'Task<TResponse> Handle(IAsyncEnumerable<{typeof(TRequest).FullNameInCode()}> messages, CancellationToken token)'.");
+        }
+
+        return Runtime.FindInvoker(messageType);
+    }
+
     public IReadOnlyList<Envelope> PreviewSubscriptions(object message)
     {
         return Runtime.RoutingFor(message.GetType()).RouteForPublish(message, null);
@@ -198,6 +282,7 @@ public partial class MessageBus : IMessageBus, IMessageContext
 
         Runtime.AssertHasStarted();
         assertNotMediatorOnly();
+        options = applyTenantContext(options);
 
         // Cannot trust the T here. Can be "object"
         var outgoing = Runtime.RoutingFor(message.GetType()).RouteForSend(message, options);
@@ -222,6 +307,7 @@ public partial class MessageBus : IMessageBus, IMessageContext
 
         Runtime.AssertHasStarted();
         assertNotMediatorOnly();
+        options = applyTenantContext(options);
 
         // You can't trust the T here.
         var outgoing = Runtime.RoutingFor(message.GetType()).RouteForPublish(message, options);
@@ -246,6 +332,7 @@ public partial class MessageBus : IMessageBus, IMessageContext
 
         Runtime.AssertHasStarted();
         assertNotMediatorOnly();
+        options = applyTenantContext(options);
 
         var outgoing = Runtime.RoutingFor(message.GetType()).RouteToTopic(message, topicName, options);
         return PersistOrSendAsync(outgoing);
@@ -267,14 +354,17 @@ public partial class MessageBus : IMessageBus, IMessageContext
 
         if (Transaction is not null)
         {
-            _outstanding.Fill(envelope);
+            lock (_outstandingLock)
+            {
+                _outstanding.Fill(envelope);
+            }
 
-            await envelope.PersistAsync(Transaction);
+            await envelope.PersistAsync(Transaction).ConfigureAwait(false);
 
             return;
         }
 
-        await envelope.StoreAndForwardAsync();
+        await envelope.StoreAndForwardAsync().ConfigureAwait(false);
     }
 
     public void EnlistInOutbox(IEnvelopeTransaction transaction)
@@ -302,8 +392,22 @@ public partial class MessageBus : IMessageBus, IMessageContext
 
     internal virtual void TrackEnvelopeCorrelation(Envelope outbound, Activity? activity)
     {
-        outbound.Source = Runtime.Options.ServiceName;
-        outbound.CorrelationId = CorrelationId;
+        // A CustomizeOutgoingMessagesOfType<T> rule (or any other DeliveryOptions
+        // override) may have already stamped a per-message Source — for example,
+        // when InteropWithCloudEvents() is in play and the producer needs to set
+        // a spec-valid CloudEvents `source` URI per message. Don't clobber it.
+        if (outbound.Source.IsEmpty())
+        {
+            outbound.Source = Runtime.Options.ServiceName;
+        }
+
+        // DeliveryOptions.Override may have already stamped a per-message
+        // CorrelationId (e.g. from a Marten projection's RaiseSideEffects
+        // call passing MessageMetadata) — don't clobber it. See GH-2545.
+        if (outbound.CorrelationId.IsEmpty())
+        {
+            outbound.CorrelationId = CorrelationId;
+        }
         outbound.ConversationId = outbound.Id; // the message chain originates here
         outbound.TenantId ??= TenantId; // don't override a tenant id that's specifically set on the envelope itself
 
@@ -364,18 +468,37 @@ public partial class MessageBus : IMessageBus, IMessageContext
                 }
             }
 
-            await Transaction.PersistAsync(envelopes);
+            await Transaction.PersistAsync(envelopes).ConfigureAwait(false);
 
-            _outstanding.Fill(outgoing);
+            lock (_outstandingLock)
+            {
+                _outstanding.Fill(outgoing);
+            }
         }
         else
         {
-            foreach (var outgoingEnvelope in outgoing) await outgoingEnvelope.StoreAndForwardAsync();
+            foreach (var outgoingEnvelope in outgoing) await outgoingEnvelope.StoreAndForwardAsync().ConfigureAwait(false);
         }
     }
 
     private bool isDurable(Envelope envelope)
     {
         return envelope.Sender?.IsDurable ?? Runtime.Endpoints.GetOrBuildSendingAgent(envelope.Destination!).IsDurable;
+    }
+
+    private DeliveryOptions? applyTenantContext(DeliveryOptions? options)
+    {
+        if (TenantId.IsEmpty())
+        {
+            return options;
+        }
+
+        if (options == null)
+        {
+            return new DeliveryOptions { TenantId = TenantId };
+        }
+
+        options.TenantId ??= TenantId;
+        return options;
     }
 }

@@ -41,7 +41,7 @@ public class MySqlTransport : BrokerTransport<MySqlQueue>
 
     public override string SanitizeIdentifier(string identifier)
     {
-        return identifier.Replace('-', '_').ToLower();
+        return identifier.Replace('-', '_').ToLowerInvariant();
     }
 
     protected override MySqlQueue findEndpointByUri(Uri uri)
@@ -104,7 +104,7 @@ public class MySqlTransport : BrokerTransport<MySqlQueue>
         await using var conn = await dataSource!.OpenConnectionAsync();
         try
         {
-            var cmd = conn.CreateCommand();
+            await using var cmd = conn.CreateCommand();
             cmd.CommandText = "SELECT UTC_TIMESTAMP(6)";
             var raw = (DateTime)(await cmd.ExecuteScalarAsync())!;
             return new DateTimeOffset(raw, TimeSpan.Zero);

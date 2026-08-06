@@ -19,7 +19,7 @@ builder.Host.UseWolverine(opts =>
 {
     // Setting up Sql Server-backed message storage
     // This requires a reference to Wolverine.SqlServer
-    opts.PersistMessagesWithSqlServer(connectionString, "wolverine");
+    opts.PersistMessagesWithSqlServer(connectionString!, "wolverine");
 
     // Set up Entity Framework Core as the support
     // for Wolverine's transactional middleware
@@ -30,8 +30,40 @@ builder.Host.UseWolverine(opts =>
     opts.Policies.UseDurableLocalQueues();
 });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/EFCoreSample/ItemService/Program.cs#L36-L53' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_registering_efcore_middleware' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/EFCoreSample/ItemService/Program.cs#L50-L66' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_registering_efcore_middleware' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
+
+## Aspire Integration
+
+The recommended way to integrate Wolverine with .NET Aspire for SQL Server is to read the connection string injected by Aspire via `IConfiguration.GetConnectionString()`.
+
+**AppHost** (`Aspire.Hosting.SqlServer` NuGet):
+```csharp
+var sqlserver = builder.AddSqlServer("sqlserver")
+    .AddDatabase("wolverine");
+
+builder.AddProject<Projects.MyWorker>("worker")
+    .WithReference(sqlserver)
+    .WaitFor(sqlserver);
+```
+
+**Service project:**
+```csharp
+var builder = Host.CreateApplicationBuilder(args);
+
+// Aspire injects ConnectionStrings__wolverine automatically via WithReference()
+var connectionString = builder.Configuration.GetConnectionString("wolverine")!;
+
+builder.UseWolverine(opts =>
+{
+    opts.PersistMessagesWithSqlServer(connectionString);
+    opts.Policies.UseDurableLocalQueues();
+});
+
+await builder.Build().RunAsync();
+```
+
+`WaitFor(sqlserver)` in the AppHost ensures SQL Server is healthy before your service starts, so Wolverine's schema setup runs against an available database.
 
 ## Sql Server Messaging Transport
 
@@ -51,7 +83,7 @@ var builder = Host.CreateApplicationBuilder();
 builder.UseWolverine(opts =>
 {
     var connectionString = builder.Configuration.GetConnectionString("sqlserver");
-    opts.UseSqlServerPersistenceAndTransport(connectionString, "myapp")
+    opts.UseSqlServerPersistenceAndTransport(connectionString!, "myapp")
 
         // Tell Wolverine to build out all necessary queue or scheduled message
         // tables on demand as needed
@@ -74,13 +106,16 @@ builder.UseWolverine(opts =>
 
         // Optionally specify how many messages to
         // fetch into the listener at any one time
-        .MaximumMessagesToReceive(50);
+        .MaximumMessagesToReceive(50)
+
+        // Override how often to poll for new messages when the queue is idle.
+        .PollingInterval(1.Seconds());
 });
 
 using var host = builder.Build();
 await host.StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/SqlServerTests/Transport/DocumentationSamples.cs#L12-L48' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_sql_server_transport' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/SqlServerTests/Transport/DocumentationSamples.cs#L13-L51' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_sql_server_transport' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 The Sql Server transport is strictly queue-based at this point. The queues are configured as durable by default, meaning
@@ -91,7 +126,7 @@ that they are utilizing the transactional inbox and outbox. The Sql Server queue
 ```cs
 opts.ListenToSqlServerQueue("sender").BufferedInMemory();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/SqlServerTests/Transport/compliance_tests.cs#L67-L71' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_setting_sql_server_queue_to_buffered' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/SqlServerTests/Transport/compliance_tests.cs#L67-L70' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_setting_sql_server_queue_to_buffered' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Using this option just means that the Sql Server queues can be used for both sending or receiving with no integration
@@ -109,6 +144,43 @@ opts.ListenToSqlServerQueue("inbound").PollingInterval(2.Seconds());
 ```
 
 When not set, the queue falls back to the global `DurabilitySettings.ScheduledJobPollingTime`.
+
+### Optimizing Queue Throughput <Badge type="tip" text="6.16" />
+
+By default the Sql Server queue and scheduled-message tables use a clustered primary key on the
+message `id` (a random `Guid`). That layout is simple and safe, but on busy queues with non-trivial
+depth it has two costs: inserts land on random pages (causing page splits and fragmentation), and
+the dequeue query (`SELECT TOP(n) ... ORDER BY timestamp`) has no supporting index, so each poll
+scans and sorts the whole table.
+
+You can opt into a higher-throughput storage layout that mirrors the design used by mature SQL-based
+queues (including Wolverine's own NServiceBus interop transport): the tables are **clustered on a
+monotonic `seq` identity column** so dequeues are an ordered clustered-index seek and the matching
+deletes remove physically contiguous rows, while the message `id` keeps a unique non-clustered index
+so duplicate sends still fail fast for idempotency. A filtered index also speeds up the expiry sweep.
+
+```cs
+opts.UseSqlServerPersistenceAndTransport(connectionString)
+    // Use the clustered-identity queue table layout for much higher dequeue
+    // throughput and far more consistent tail latency on deep queues
+    .OptimizeQueueThroughput();
+```
+
+In Wolverine's own benchmarks this raised batched-drain throughput by well over an order of magnitude
+and turned worst-case deep-queue dequeue latency from hundreds of milliseconds into single-digit
+milliseconds.
+
+::: warning
+This setting changes the physical schema of the queue tables. Enabling it on an **existing** database
+causes a one-time table rebuild the next time the schema is applied (drop the clustered primary key,
+add the `seq` identity column, and build the new clustered/unique indexes). Queue tables are normally
+transient, so this is usually cheap, but you should enable it during a maintenance window — ideally
+with the queues drained. New applications can simply turn it on from the start.
+
+This applies to Wolverine's native Sql Server queue tables only. The NServiceBus interoperability
+transport already uses the equivalent clustered layout (it must match the NServiceBus on-disk schema),
+so no opt-in is needed there.
+:::
 
 If you want to use Sql Server as a queueing mechanism between multiple applications, you'll need:
 
@@ -154,8 +226,257 @@ _listener = await Host.CreateDefaultBuilder()
             .IncludeType<FooBarHandler>();
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/SqlServerTests/Transport/with_multiple_hosts.cs#L21-L57' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_sql_server_as_queue_between_two_apps' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/SqlServerTests/Transport/with_multiple_hosts.cs#L21-L56' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_sql_server_as_queue_between_two_apps' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
+
+### Global Partitioning <Badge type="tip" text="6.24" />
+
+Sql Server queues can be used as the external transport for
+[global partitioned messaging](/guide/messaging/partitioning#global-partitioning). This gives you
+cluster-wide sequential processing by group id with **no extra infrastructure** — the shards are
+just more tables in the database you already have.
+
+Use `UseShardedSqlServerQueues()` inside a `GlobalPartitioned()` configuration:
+
+```cs
+using var host = await Host.CreateDefaultBuilder()
+    .UseWolverine(opts =>
+    {
+        opts.UseSqlServerPersistenceAndTransport(connectionString)
+            .AutoProvision();
+
+        opts.MessagePartitioning.ByMessage<IOrderMessage>(x => x.OrderId.ToString());
+
+        opts.MessagePartitioning.GlobalPartitioned(topology =>
+        {
+            // Creates Sql Server queues named "orders1" through "orders4"
+            // with matching companion local queues for sequential processing
+            topology.UseShardedSqlServerQueues("orders", 4);
+            topology.MessagesImplementing<IOrderMessage>();
+        });
+    }).StartAsync();
+```
+
+That creates queues named `orders1` through `orders4` — each backed by its own
+`wolverine_queue_orders{n}` / `wolverine_queue_orders{n}_scheduled` table pair — with companion
+local queues `global-orders1` through `global-orders4`. Each shard queue is marked exclusive, so
+only one node in the cluster listens to it at a time.
+
+If you only want the *publishing* half — sharded queues with no companion local queues, so every
+message really does round-trip through the database — use the `MessagePartitioningRules` variant
+instead:
+
+```cs
+opts.MessagePartitioning.PublishToShardedSqlServerQueues("orders", 4, topology =>
+{
+    topology.MessagesImplementing<IOrderMessage>();
+    topology.MaxDegreeOfParallelism = PartitionSlots.Five;
+});
+```
+
+**Sharded queues opt into the [high-throughput table layout](#optimizing-queue-throughput) by
+default**, because ordered per-slot processing is exactly the case the `seq`-clustered layout was
+designed for. That opt-in is per queue, so it does *not* change the layout of any other queue in the
+transport, and it does not flip the transport-wide `OptimizeQueueThroughput()` setting. Turn it off
+for the shard queues if you need them to match the default layout:
+
+```cs
+topology.UseShardedSqlServerQueues("orders", 4, t => t.OptimizeThroughput = false);
+```
+
+An individual non-sharded queue can also opt in or out directly through
+`SqlServerQueue.OptimizeThroughput`, which falls back to the transport-wide setting when it is not
+set explicitly.
+
+::: warning Multi-tenancy
+Under [database-per-tenant storage](#multi-tenancy-1) the shard queue tables are provisioned in
+**every** tenant database and slot routing is unchanged — a group id maps to the same slot number
+regardless of tenant.
+:::
+
+### Resetting in Tests
+
+`RebuildAsync()` / `ClearAllAsync()` on the message store clear envelope storage only — they leave
+this transport's queue and scheduled-message tables alone. To wipe both in an integration test
+harness, call [`IHost.ClearAllWolverineStorageAsync()`](/guide/testing.html#resetting-all-wolverine-storage-in-tests),
+which leaves the queue tables built but empty across every tenant database.
+
+## NServiceBus Interoperability <Badge type="tip" text="6.0" />
+
+Wolverine can exchange messages with an [NServiceBus](https://particular.net/nservicebus) endpoint that uses the
+[SQL Server transport](https://docs.particular.net/transports/sql/) by reading and writing the NServiceBus queue
+tables directly. This is Particular's documented
+[native integration](https://docs.particular.net/transports/sql/native-integration) contract: one table per queue,
+a JSON `Headers` column, and a raw `Body` column.
+
+The transport reuses Wolverine's own SQL Server message store for the durable inbox/outbox; only the *queue* tables
+belong to NServiceBus. Because NServiceBus normally owns and provisions its own tables, `AutoProvision` is **off by
+default** for these endpoints.
+
+Start with the message contracts shared by both applications. In a real system these usually live in a
+small contracts assembly referenced by both the Wolverine and NServiceBus hosts:
+
+```cs
+// Shared between the Wolverine and NServiceBus applications.
+public interface IOrderContract
+{
+    Guid Id { get; set; }
+}
+
+public class OrderPlaced : IOrderContract
+{
+    public Guid Id { get; set; }
+}
+
+public class OrderConfirmed
+{
+    public Guid Id { get; set; }
+}
+```
+
+Configure the Wolverine application to read and write the NServiceBus queue tables:
+
+```cs
+using Wolverine;
+using Wolverine.SqlServer;
+using Wolverine.SqlServer.Transport.NServiceBus;
+
+builder.UseWolverine(opts =>
+{
+    // Wolverine's durable inbox/outbox lives in SQL Server
+    opts.PersistMessagesWithSqlServer(connectionString, "wolverine");
+
+    // Opt into the NServiceBus SQL Server interop transport. Pass autoProvision: true only
+    // if you want Wolverine to create the queue tables itself (NServiceBus usually owns them).
+    opts.UseNServiceBusSqlServerInterop(autoProvision: false);
+
+    // Send Wolverine messages to the "nsb" NServiceBus endpoint table
+    opts.PublishMessage<OrderPlaced>().ToNServiceBusSqlServerQueue("nsb");
+
+    // Listen for messages NServiceBus sends to Wolverine's own "wolverine" table,
+    // and use it as the reply address Wolverine stamps onto outgoing messages
+    opts.ListenToNServiceBusSqlServerQueue("wolverine").UseForReplies();
+
+    // Let NServiceBus send interface-typed messages that Wolverine binds to concrete types
+    opts.Policies.RegisterInteropMessageAssembly(typeof(IOrderContract).Assembly);
+});
+```
+
+The NServiceBus application is configured normally with its own SQL Server transport pointed at the same
+database. NServiceBus owns and provisions the queue tables; Wolverine just reads and writes them:
+
+```cs
+using NServiceBus;
+
+var endpointConfiguration = new EndpointConfiguration("nsb");
+endpointConfiguration.UseSerialization<NewtonsoftJsonSerializer>();
+
+var transport = new SqlServerTransport(connectionString)
+{
+    TransportTransactionMode = TransportTransactionMode.SendsAtomicWithReceive
+};
+endpointConfiguration.UseTransport(transport);
+
+// NServiceBus creates its queue tables on startup
+endpointConfiguration.EnableInstallers();
+```
+
+An NServiceBus handler receives the Wolverine-produced message like any other NServiceBus message and can
+reply straight back to Wolverine's listening table:
+
+```cs
+public class OrderPlacedHandler : IHandleMessages<OrderPlaced>
+{
+    public Task Handle(OrderPlaced message, IMessageHandlerContext context)
+    {
+        return context.Reply(new OrderConfirmed { Id = message.Id });
+    }
+}
+```
+
+Wolverine translates between its `Envelope` and the NServiceBus wire format with the standard NServiceBus headers
+(`NServiceBus.EnclosedMessageTypes`, `MessageId`, `ConversationId`, `CorrelationId`, `ReplyToAddress`, `ContentType`,
+and `TimeSent`). Message-type identity is mapped two ways: outgoing messages carry their concrete type plus their
+implemented interfaces so an NServiceBus handler registered against a shared interface still binds, and incoming
+`EnclosedMessageTypes` are resolved against the assemblies you register with `RegisterInteropMessageAssembly`.
+
+::: tip
+The `Body` written by NServiceBus' JSON serializer begins with a UTF-8 byte order mark. Wolverine strips it on
+receive so the payload deserializes cleanly with either the default `System.Text.Json` or a Newtonsoft serializer.
+:::
+
+### Multi-Tenancy
+
+NServiceBus implements multi-tenancy as a *persistence* concern rather than a transport one: the SQL Server
+transport queue tables live in a single shared database, and the tenant identity travels as a user-defined
+**message header** (the Particular [SQL persistence multi-tenancy sample](https://docs.particular.net/persistence/sql/multi-tenant)
+uses `tenant_id`). A receiving NServiceBus endpoint reads that header in its `MultiTenantConnectionBuilder`
+to open the correct tenant database.
+
+Wolverine maps that header to and from its own `Envelope.TenantId` so the two systems stay tenant-aware across
+the boundary. Opt in per endpoint with `MapTenantIdToHeader` on the sending side and `MapTenantIdFromHeader`
+on the listening side, passing the header name your NServiceBus endpoint is configured with (defaults to
+`tenant_id`):
+
+```cs
+builder.UseWolverine(opts =>
+{
+    opts.PersistMessagesWithSqlServer(connectionString, "wolverine");
+    opts.UseNServiceBusSqlServerInterop();
+
+    // Stamp Wolverine's Envelope.TenantId onto the NServiceBus "tenant_id" header
+    opts.PublishMessage<OrderPlaced>().ToNServiceBusSqlServerQueue("nsb")
+        .MapTenantIdToHeader();
+
+    // Surface the NServiceBus "tenant_id" header back as Envelope.TenantId
+    opts.ListenToNServiceBusSqlServerQueue("wolverine")
+        .MapTenantIdFromHeader()
+        .UseForReplies();
+});
+```
+
+Now when Wolverine sends with a tenant id (for example `bus.PublishAsync(message, new DeliveryOptions { TenantId = "tenant-green" })`),
+the NServiceBus endpoint receives the `tenant_id` header and resolves the matching tenant database; and any
+message NServiceBus sends with that header arrives at Wolverine with `Envelope.TenantId` already populated.
+The default (non-)tenant is never written as a header, so single-tenant traffic is unaffected.
+
+A full, runnable bidirectional example (both frameworks hosted side by side, including the multi-tenant case)
+is maintained in Wolverine's interop test suite. See the [interop tutorial](/tutorials/interop) for the bigger picture.
+
+#### Dedicated interop database under multi-tenanted storage <Badge type="tip" text="6.16" />
+
+The NServiceBus header-based tenancy above is about NServiceBus' *own* persistence. A different situation arises
+when **Wolverine's** message storage is multi-tenanted with [a separate database per tenant](#multi-tenancy): there,
+the NServiceBus interop queue tables still live on the **one shared database** NServiceBus reads from — they must
+*not* be replicated into each tenant database.
+
+By default the interop transport binds to Wolverine's `Main` SQL Server message store. To pin it instead to a single,
+dedicated database that is fully decoupled from the tenanted storage, pass an explicit `connectionString` to
+`UseNServiceBusSqlServerInterop`:
+
+```cs
+builder.UseWolverine(opts =>
+{
+    // Wolverine's message storage is multi-tenanted: a database per tenant
+    opts.PersistMessagesWithSqlServer(mainConnectionString)
+        .UseMasterTableTenancy(tenants =>
+        {
+            tenants.Register("tenant_one", tenantOneConnectionString);
+            tenants.Register("tenant_two", tenantTwoConnectionString);
+        });
+
+    // ...but the NServiceBus interop queues live on ONE shared database. Pin the transport to it
+    // so Wolverine never tries to create the queue tables per tenant database.
+    opts.UseNServiceBusSqlServerInterop(autoProvision: true, connectionString: nsbSharedConnectionString);
+
+    opts.PublishMessage<OrderPlaced>().ToNServiceBusSqlServerQueue("nsb");
+});
+```
+
+With the explicit connection string set, the interop queue tables are created, sent to, and listened on against
+that one database only — regardless of which tenant a message is sent under. (This is independent of the per-message
+`tenant_id` header mapping above, which you can still apply if the receiving NServiceBus endpoint is itself
+tenant-partitioned.)
 
 ## Lightweight Saga Usage <Badge type="tip" text="3.0" />
 
@@ -189,15 +510,15 @@ builder.UseWolverine(opts =>
 {
     // First, you do have to have a "main" PostgreSQL database for messaging persistence
     // that will store information about running nodes, agents, and non-tenanted operations
-    opts.PersistMessagesWithSqlServer(configuration.GetConnectionString("main"))
+    opts.PersistMessagesWithSqlServer(configuration.GetConnectionString("main")!)
 
         // Add known tenants at bootstrapping time
         .RegisterStaticTenants(tenants =>
         {
             // Add connection strings for the expected tenant ids
-            tenants.Register("tenant1", configuration.GetConnectionString("tenant1"));
-            tenants.Register("tenant2", configuration.GetConnectionString("tenant2"));
-            tenants.Register("tenant3", configuration.GetConnectionString("tenant3"));
+            tenants.Register("tenant1", configuration.GetConnectionString("tenant1")!);
+            tenants.Register("tenant2", configuration.GetConnectionString("tenant2")!);
+            tenants.Register("tenant3", configuration.GetConnectionString("tenant3")!);
         });
     
     // Just to show that you *can* use more than one DbContext
@@ -213,7 +534,7 @@ builder.UseWolverine(opts =>
     }, AutoCreate.CreateOrUpdate);
 });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/EfCoreTests.MultiTenancy/MultiTenancyDocumentationSamples.cs#L56-L90' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_static_tenant_registry_with_sqlserver' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/EfCoreTests.MultiTenancy/MultiTenancyDocumentationSamples.cs#L55-L88' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_static_tenant_registry_with_sqlserver' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ::: warning
@@ -237,7 +558,7 @@ builder.UseWolverine(opts =>
 {
     // You need a main database no matter what that will hold information about the Wolverine system itself
     // and..
-    opts.PersistMessagesWithSqlServer(configuration.GetConnectionString("wolverine"))
+    opts.PersistMessagesWithSqlServer(configuration.GetConnectionString("wolverine")!)
 
         // ...also a table holding the tenant id to connection string information
         .UseMasterTableTenancy(seed =>
@@ -245,13 +566,13 @@ builder.UseWolverine(opts =>
             // These registrations are 100% just to seed data for local development
             // Maybe you want to omit this during production?
             // Or do something programmatic by looping through data in the IConfiguration?
-            seed.Register("tenant1", configuration.GetConnectionString("tenant1"));
-            seed.Register("tenant2", configuration.GetConnectionString("tenant2"));
-            seed.Register("tenant3", configuration.GetConnectionString("tenant3"));
+            seed.Register("tenant1", configuration.GetConnectionString("tenant1")!);
+            seed.Register("tenant2", configuration.GetConnectionString("tenant2")!);
+            seed.Register("tenant3", configuration.GetConnectionString("tenant3")!);
         });
 });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/EfCoreTests.MultiTenancy/MultiTenancyDocumentationSamples.cs#L124-L147' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_sqlserver_backed_master_table_tenancy' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/EfCoreTests.MultiTenancy/MultiTenancyDocumentationSamples.cs#L121-L143' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_sqlserver_backed_master_table_tenancy' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ::: info
@@ -263,10 +584,10 @@ Here's some more important background on the multi-tenancy support:
 
 * Wolverine is spinning up a completely separate "durability agent" across the application to recover stranded messages in
   the transactional inbox and outbox, and that's done automatically for you
-* The lightweight saga support for PostgreSQL absolutely works with this model of multi-tenancy
+* The lightweight saga support for Sql Server absolutely works with this model of multi-tenancy
 * Wolverine is able to manage all of its database tables including the tenant table itself (`wolverine_tenants`) across both the
   main database and all the tenant databases including schema migrations
-* Wolverine's transactional middleware is aware of the multi-tenancy and can connect to the correct database based on the `IMesageContext.TenantId`
+* Wolverine's transactional middleware is aware of the multi-tenancy and can connect to the correct database based on the `IMessageContext.TenantId`
   or utilize the tenant id detection in Wolverine.HTTP as well
 * You can "plug in" a custom implementation of `ITenantSource<string>` to manage tenant id to connection string assignments in whatever way works for your deployed system
 

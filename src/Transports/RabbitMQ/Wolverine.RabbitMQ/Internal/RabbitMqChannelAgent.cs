@@ -1,16 +1,18 @@
 using Microsoft.Extensions.Logging;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
+using Wolverine.Transports;
 
 namespace Wolverine.RabbitMQ.Internal;
 
 /// <summary>
 /// Base class for Rabbit MQ listeners and senders
 /// </summary>
-internal abstract class RabbitMqChannelAgent : IAsyncDisposable
+internal abstract class RabbitMqChannelAgent : IAsyncDisposable, IReportConnectionState
 {
     private readonly ConnectionMonitor _monitor;
-    protected readonly SemaphoreSlim Locker = new(1, 1);
+    private readonly SemaphoreSlim Locker = new(1, 1);
+    private bool _disposed;
 
     protected RabbitMqChannelAgent(ConnectionMonitor monitor,
         ILogger logger)
@@ -25,31 +27,77 @@ internal abstract class RabbitMqChannelAgent : IAsyncDisposable
     internal AgentState State { get; private set; } = AgentState.Disconnected;
     internal bool IsConnected => State == AgentState.Connected;
 
+    // Surfaces the channel agent's connection state to EndpointHealthSnapshot so external monitors can see a
+    // dead-but-Accepting listener (or a disconnected sender) directly rather than inferring it from staleness.
+    public TransportConnectionState ConnectionState =>
+        State == AgentState.Connected ? TransportConnectionState.Connected : TransportConnectionState.Disconnected;
+
     internal IChannel? Channel { get; set; }
+
+    /// <summary>
+    /// True once DisposeAsync has run. Callers of <see cref="EnsureInitiated"/> need this to tell the two
+    /// ways it can return without a channel apart: disposal is a legitimate outcome that should be handled
+    /// quietly, whereas a swallowed channel-creation failure is not.
+    /// </summary>
+    internal bool IsDisposed => _disposed;
 
     public virtual async ValueTask DisposeAsync()
     {
+        if (_disposed)
+            return;
+        _disposed = true;
+
         _monitor.Remove(this);
         await teardownChannel();
+
+        // Intentionally NOT calling Locker.Dispose() — rapid pause/restart cycles
+        // can have an in-flight WaitAsync/Release race with disposal, which would
+        // throw ObjectDisposedException. The kernel handle is reclaimed by the
+        // SemaphoreSlim finalizer. See #3132.
     }
 
+    /// <summary>
+    /// Best-effort: brings <see cref="Channel"/> up if it is missing or dead. This method deliberately does
+    /// NOT guarantee a channel on return -- it returns without one when the agent has been disposed, and it
+    /// logs-and-swallows a failure to open one. Callers must therefore null-check <see cref="Channel"/>
+    /// rather than assume success; see GH-3842, where a `Channel!` in RabbitMqListener.CreateAsync turned
+    /// both of those outcomes into a bare NullReferenceException six frames away in queue declaration.
+    /// </summary>
     internal async Task EnsureInitiated()
     {
-        if (Channel is not null)
-        {
+        if (_disposed)
             return;
-        }
+
+        // A non-null but closed channel is a dead channel. Treating "channel exists"
+        // as "channel healthy" would latch the agent permanently after a channel-only
+        // shutdown that didn't surface as a callback exception (see #3171), so we
+        // re-build whenever the channel is missing or no longer open.
+        if (Channel is { IsOpen: true })
+            return;
 
         await Locker.WaitAsync();
-        
-        if (Channel is not null)
-        {
-            Locker.Release();
-            return;
-        }
-
         try
         {
+            if (_disposed)
+                return;
+
+            if (Channel is { IsOpen: true })
+                return;
+
+            // Drop a stale, closed channel before opening a fresh one. teardownChannel()
+            // unsubscribes the handlers and nulls Channel so startNewChannel() has a clean slate.
+            if (Channel is not null)
+            {
+                try
+                {
+                    await teardownChannel();
+                }
+                catch (Exception e)
+                {
+                    Logger.LogError(e, "Error tearing down a stale Rabbit MQ channel for {Endpoint}", this);
+                }
+            }
+
             await startNewChannel();
             State = AgentState.Connected;
         }
@@ -63,51 +111,87 @@ internal abstract class RabbitMqChannelAgent : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Per-agent override of the transport-wide consumer dispatch concurrency. Only listeners
+    /// consume, so senders leave this null (GH-3492).
+    /// </summary>
+    protected virtual ushort? ConsumerDispatchConcurrency => null;
+
     protected async Task startNewChannel()
     {
-        Channel = await _monitor.CreateChannelAsync();
+        Channel = await _monitor.CreateChannelAsync(ConsumerDispatchConcurrency);
 
-        Channel.CallbackExceptionAsync += (sender, args) =>
-        {
-            Logger.LogError(args.Exception, "Callback error in Rabbit Mq agent. Attempting to restart the channel");
-
-            // Try to restart the connection
-#pragma warning disable VSTHRD110
-            Task.Run(async () =>
-#pragma warning restore VSTHRD110
-            {
-                await Locker.WaitAsync();
-                try
-                {
-                    _monitor.Remove(this);
-                    try
-                    {
-                        await teardownChannel();
-                    }
-                    catch (Exception e)
-                    {
-                        Logger.LogError(e, "Error when trying to tear down a blocked channel");
-                    }
-
-                    Channel = null;
-                    await EnsureInitiated();
-                    Logger.LogInformation("Restarted the Rabbit MQ channel");
-                }
-                finally
-                {
-                    Locker.Release();
-                }
-            });
-            
-            return Task.CompletedTask;
-        };
-
-        Channel.ChannelShutdownAsync += ChannelOnModelShutdown;
+        Channel.CallbackExceptionAsync += HandleChannelExceptionAsync;
+        Channel.ChannelShutdownAsync += HandleChannelShutdownAsync;
 
         Logger.LogInformation("Opened a new channel for Wolverine endpoint {Endpoint}", this);
     }
 
-    private Task ChannelOnModelShutdown(object? sender, ShutdownEventArgs e)
+    private Task HandleChannelExceptionAsync(object? sender, CallbackExceptionEventArgs args)
+    {
+        Logger.LogError(args.Exception, "Callback error in Rabbit Mq agent. Attempting to restart the channel");
+
+        // Try to restart the connection
+#pragma warning disable VSTHRD110
+        Task.Run(async () =>
+#pragma warning restore VSTHRD110
+        {
+            try
+            {
+                await restartAfterCallbackExceptionAsync();
+
+                Logger.LogInformation("Restarted the Rabbit MQ channel");
+            }
+            catch (Exception e)
+            {
+                // The broker is likely unavailable (e.g. a broker roll). Leave this agent registered
+                // with the ConnectionMonitor and marked Disconnected so RecoverySucceededAsync rebuilds
+                // it once the connection returns. Previously the agent was removed from the monitor
+                // before the restart attempt, so a failure here orphaned it permanently: the connection
+                // recovery loop iterates the monitor's tracked agents, so a removed listener is never
+                // rebuilt and its queue is left with zero consumers on an otherwise-healthy process.
+                State = AgentState.Disconnected;
+                Logger.LogWarning(e,
+                    "Could not eagerly restart the Rabbit MQ channel; leaving it for connection recovery");
+            }
+        });
+
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Eagerly rebuild this agent after a channel callback exception. The base behavior is
+    /// sender-shaped: a fresh channel is all a sender needs. Agents that own broker-side state
+    /// on the channel — a listener's consumer, above all — must override this, because a bare
+    /// channel swap would leave them "Connected" on an open channel with nothing consuming.
+    /// </summary>
+    protected virtual async Task restartAfterCallbackExceptionAsync()
+    {
+        await Locker.WaitAsync();
+        try
+        {
+            try
+            {
+                await teardownChannel();
+            }
+            catch (Exception e)
+            {
+                Logger.LogError(e, "Error when trying to tear down a blocked channel");
+            }
+
+            Channel = null;
+
+            // EnsureInitiated cannot be used here as Locker(SemaphoreSlim) is not re-entrant
+            await startNewChannel();
+            State = AgentState.Connected;
+        }
+        finally
+        {
+            Locker.Release();
+        }
+    }
+
+    private Task HandleChannelShutdownAsync(object? sender, ShutdownEventArgs e)
     {
         State = AgentState.Disconnected;
 
@@ -118,8 +202,31 @@ internal abstract class RabbitMqChannelAgent : IAsyncDisposable
             Logger.LogError(e.Exception,
                 "Unexpected channel shutdown for Rabbit MQ. Wolverine will attempt to restart...");
         }
+        else
+        {
+            Logger.LogWarning(
+                "Unexpected channel shutdown for Rabbit MQ ({Endpoint}). Wolverine will attempt to restart...", this);
+        }
+
+        HandleUnexpectedChannelShutdown();
 
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// True when the underlying RabbitMQ connection is still alive. A channel-only shutdown
+    /// (see #3171) leaves this true; a full connection drop sets it false and is recovered
+    /// separately through <see cref="ConnectionMonitor"/>.
+    /// </summary>
+    protected bool ConnectionIsLive => _monitor.IsConnected;
+
+    /// <summary>
+    /// Hook for derived agents to eagerly recover from an unexpected channel-only shutdown.
+    /// Senders heal lazily on the next send through <see cref="EnsureInitiated"/>; listeners sit
+    /// blocked on the broker and won't self-pull, so they override this to re-declare/re-consume.
+    /// </summary>
+    protected virtual void HandleUnexpectedChannelShutdown()
+    {
     }
 
     internal virtual Task ReconnectedAsync()
@@ -132,7 +239,8 @@ internal abstract class RabbitMqChannelAgent : IAsyncDisposable
     {
         if (Channel != null)
         {
-            Channel.ChannelShutdownAsync -= ChannelOnModelShutdown;
+            Channel.ChannelShutdownAsync -= HandleChannelShutdownAsync;
+            Channel.CallbackExceptionAsync -= HandleChannelExceptionAsync;
             await Channel.CloseAsync();
             await Channel.AbortAsync();
             Channel.Dispose();

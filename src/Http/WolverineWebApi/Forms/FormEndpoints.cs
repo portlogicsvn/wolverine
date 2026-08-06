@@ -111,6 +111,10 @@ public static class FromFormEndpoints{
     {
         return $"{form.Name}|{form.Files?.Count}";
     }
+
+    [WolverinePost("/form/multipart-consumes")]
+    [Consumes("multipart/form-data")]
+    public static string MultipartConsumes([FromForm] string value) => value ?? "";
 }
 
 public class FormWithFile
@@ -174,7 +178,6 @@ public class AsParametersQuery{
 #endregion
 
 #region sample_using_as_parameter_for_services_and_body
-
 public class AsParameterBody
 {
     public string Name { get; set; } = null!;
@@ -211,7 +214,6 @@ public static class AsParametersEndpoints2{
 #endregion
 
 #region sample_as_parameter_record
-
 public record AsParameterRecord(
     [FromRoute] string Id,
     [FromQuery] int Number,
@@ -227,8 +229,7 @@ public static class AsParameterRecordEndpoint
 #endregion
 
 
-#region sample_using_fluent_validation_with_AsParameters
-
+#region sample_using_fluent_validation_with_asparameters
 public static class ValidatedAsParametersEndpoint
 {
     [WolverineGet("/asparameters/validated")]
@@ -256,8 +257,7 @@ public class ValidatedQuery
 
 #endregion
 
-#region sample_using_fluent_validation_with_AsParameters_and_FromBody
-
+#region sample_using_fluent_validation_with_asparameters_and_frombody
 public static class ValidatedAsParametersWithFromBodyEndpoint
 {
     [WolverinePost("/asparameters/validated_with_from_body")]

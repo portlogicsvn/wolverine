@@ -10,9 +10,13 @@ using Wolverine.Transports.Sending;
 
 namespace Wolverine.AzureServiceBus.Internal;
 
-public class BatchedAzureServiceBusListener : IListener, ISupportDeadLetterQueue
+public class BatchedAzureServiceBusListener : IListener, ISupportDeadLetterQueue, IReportConnectionState
 {
     private readonly CancellationTokenSource _cancellation = new();
+
+    // GH-3237: derived only from real receive-loop failures (degrade-only). A successful receive clears back
+    // to Unknown — never Connected, because the SDK cannot prove the AMQP link is up without traffic.
+    private volatile TransportConnectionState _connectionState = TransportConnectionState.Unknown;
     private readonly RetryBlock<AzureServiceBusEnvelope> _complete;
     private readonly RetryBlock<AzureServiceBusEnvelope> _deadLetter;
     private readonly RetryBlock<Envelope> _defer;
@@ -40,8 +44,20 @@ public class BatchedAzureServiceBusListener : IListener, ISupportDeadLetterQueue
         _complete = new RetryBlock<AzureServiceBusEnvelope>((e, _) => { return e.CompleteAsync(_cancellation.Token); },
             _logger, _cancellation.Token);
 
-        _defer = new RetryBlock<Envelope>(async (envelope, _) => { await _requeue.SendAsync(envelope); }, logger,
-            _cancellation.Token);
+        _defer = new RetryBlock<Envelope>(async (envelope, _) =>
+        {
+            // GH-3494 (AO8): settle the original before re-sending the copy, exactly like the
+            // inline listener already does. Leaving it unsettled meant the message stayed locked
+            // until the lock expired and Azure Service Bus redelivered it -- so every deferral
+            // produced a duplicate on top of the copy this block sends.
+            if (envelope is AzureServiceBusEnvelope e && !e.IsCompleted)
+            {
+                await e.CompleteAsync(_cancellation.Token);
+                e.IsCompleted = true;
+            }
+
+            await _requeue.SendAsync(envelope);
+        }, logger, _cancellation.Token);
 
         _deadLetter =
             new RetryBlock<AzureServiceBusEnvelope>(
@@ -51,6 +67,8 @@ public class BatchedAzureServiceBusListener : IListener, ISupportDeadLetterQueue
     }
 
     public IHandlerPipeline? Pipeline => _wolverineReceiver.Pipeline;
+
+    public TransportConnectionState ConnectionState => _connectionState;
 
     public ValueTask CompleteAsync(Envelope envelope)
     {
@@ -79,22 +97,22 @@ public class BatchedAzureServiceBusListener : IListener, ISupportDeadLetterQueue
         return false;
     }
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
-        _cancellation.Cancel();
+        await _cancellation.CancelAsync();
+        _cancellation.Dispose();
         _task.SafeDispose();
         _complete.SafeDispose();
         _defer.SafeDispose();
         _deadLetter.SafeDispose();
-        return new ValueTask();
     }
 
     public Uri Address => _endpoint.Uri;
 
-    public ValueTask StopAsync()
+    public async ValueTask StopAsync()
     {
-        _cancellation.Cancel();
-        return new ValueTask(_receiver.CloseAsync());
+        await _cancellation.CancelAsync();
+        await _receiver.CloseAsync();
     }
 
     public async Task MoveToErrorsAsync(Envelope envelope, Exception exception)
@@ -122,6 +140,12 @@ public class BatchedAzureServiceBusListener : IListener, ISupportDeadLetterQueue
                         _endpoint.MaximumWaitTime, _cancellation.Token);
 
                 failedCount = 0;
+
+                if (_connectionState != TransportConnectionState.Unknown)
+                {
+                    // The receive succeeded, so any previously derived trouble state is stale
+                    _connectionState = TransportConnectionState.Unknown;
+                }
 
                 if (messages.Any())
                 {
@@ -160,6 +184,11 @@ public class BatchedAzureServiceBusListener : IListener, ISupportDeadLetterQueue
                 {
                     break;
                 }
+
+                // The receive attempt genuinely failed and this loop is about to back off and retry, so
+                // Reconnecting is the honest floor even for exception types the mapper doesn't recognize
+                _connectionState = AzureServiceBusConnectionStateMapper.StateForError(e)
+                                   ?? TransportConnectionState.Reconnecting;
 
                 failedCount++;
                 var pauseTime = failedCount > 5 ? 1.Seconds() : (failedCount * 100).Milliseconds();

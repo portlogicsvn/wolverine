@@ -6,7 +6,7 @@ using Wolverine.Logging;
 
 namespace Wolverine.Transports.Sending;
 
-public class BatchedSender : ISender, ISenderRequiresCallback
+public class BatchedSender : ISender, ISenderRequiresCallback, IConditionalNativeScheduling
 {
     private readonly CancellationToken _cancellation;
     private readonly ILogger _logger;
@@ -27,8 +27,17 @@ public class BatchedSender : ISender, ISenderRequiresCallback
         var transforming =
             sender.PushUpstream<Envelope[]>(envelopes => new OutgoingMessageBatch(Destination, envelopes));
 
-        var batching = transforming.BatchUpstream(250.Milliseconds(), batchSize:destination.MessageBatchSize);
-        _serializing = batching.PushUpstream<Envelope>(Environment.ProcessorCount, e =>
+        var batching = transforming.BatchUpstream(destination.MessageBatchTimeout, batchSize:destination.MessageBatchSize);
+
+        // GH-3825: this stage MUST stay single threaded. It is the only thing between
+        // SendAsync() and the outgoing batch, so any parallelism here hands envelopes to the
+        // batching block in serialization-completion order rather than enqueue order -- which
+        // silently destroys the FIFO guarantee that Azure Service Bus sessions, SQS FIFO groups,
+        // and global partitioning all rest on. This was an ordered ActionBlock (MaxDegreeOfParallelism
+        // defaults to 1) before the switch from TPL Dataflow to Channels; the rewrite raised it to
+        // Environment.ProcessorCount and lost the guarantee along the way. Everything downstream is
+        // already serial by default (Endpoint.MessageBatchMaxDegreeOfParallelism is 1).
+        _serializing = batching.PushUpstream<Envelope>(1, e =>
         {
             try
             {
@@ -70,6 +79,12 @@ public class BatchedSender : ISender, ISenderRequiresCallback
     }
 
     public bool SupportsNativeScheduledSend { get; set; }
+
+    bool IConditionalNativeScheduling.CanScheduleNatively(Envelope envelope, DateTimeOffset utcNow)
+    {
+        return _protocol is not IConditionalNativeScheduling conditional ||
+               conditional.CanScheduleNatively(envelope, utcNow);
+    }
 
     public ValueTask SendAsync(Envelope message)
     {

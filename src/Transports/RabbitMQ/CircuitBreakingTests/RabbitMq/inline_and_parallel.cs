@@ -2,24 +2,21 @@ using JasperFx.Core;
 using Wolverine;
 using Wolverine.ErrorHandling;
 using Wolverine.RabbitMQ;
-using Xunit.Abstractions;
-
+using Xunit;
 namespace CircuitBreakingTests.RabbitMq;
 
-public class inline_and_parallel : CircuitBreakerIntegrationContext
+public class inline_and_parallel(ITestOutputHelper output)
+    : CircuitBreakerIntegrationContext(output)
 {
-    public inline_and_parallel(ITestOutputHelper output) : base(output)
-    {
-    }
-
     protected override void configureListener(WolverineOptions opts)
     {
         // Requeue failed messages.
-        opts.Policies.OnException<BadImageFormatException>().Or<DivideByZeroException>()
+        opts.Policies.OnException<BadImageFormatException>()
+            .Or<DivideByZeroException>()
             .Requeue();
 
-        opts.PublishAllMessages().ToRabbitQueue("circuit3");
-        opts.ListenToRabbitQueue("circuit3").CircuitBreaker(cb =>
+        opts.PublishAllMessages().ToRabbitQueue(_queueName);
+        opts.ListenToRabbitQueue(_queueName).CircuitBreaker(cb =>
         {
             cb.MinimumThreshold = 250;
             cb.PauseTime = 10.Seconds();

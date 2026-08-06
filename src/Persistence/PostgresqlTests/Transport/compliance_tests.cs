@@ -15,7 +15,7 @@ public class PostgresqlTransportDurableFixture : TransportComplianceFixture, IAs
     {
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         await SenderIs(opts =>
         {
@@ -40,10 +40,6 @@ public class PostgresqlTransportDurableFixture : TransportComplianceFixture, IAs
         });
     }
 
-    public new async Task DisposeAsync()
-    {
-        await base.DisposeAsync();
-    }
 }
 
 [Collection("marten")]
@@ -55,7 +51,7 @@ public class PostgresqlTransportBufferedFixture : TransportComplianceFixture, IA
     {
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         await SenderIs(opts =>
         {
@@ -63,7 +59,6 @@ public class PostgresqlTransportBufferedFixture : TransportComplianceFixture, IA
                 .AutoProvision().AutoPurgeOnStartup().DisableInboxAndOutboxOnAll();
 
             #region sample_setting_postgres_queue_to_buffered
-
             opts.ListenToPostgresqlQueue("sender").BufferedInMemory();
 
             #endregion
@@ -89,10 +84,6 @@ public class PostgresqlTransportBufferedFixture : TransportComplianceFixture, IA
         });
     }
 
-    public new async Task DisposeAsync()
-    {
-        await base.DisposeAsync();
-    }
 }
 
 [Collection("sqlserver")]

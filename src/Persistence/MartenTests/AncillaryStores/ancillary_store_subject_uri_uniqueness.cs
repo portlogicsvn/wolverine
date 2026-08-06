@@ -20,9 +20,9 @@ namespace MartenTests.AncillaryStores;
 /// </summary>
 public class ancillary_store_subject_uri_uniqueness : IAsyncLifetime
 {
-    private IHost theHost;
+    private IHost theHost = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         theHost = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -31,25 +31,27 @@ public class ancillary_store_subject_uri_uniqueness : IAsyncLifetime
                 opts.Services.AddMarten(Servers.PostgresConnectionString)
                     .IntegrateWithWolverine();
 
-                // Ancillary store 1 – same database, different schema
+                // Ancillary store 1 - same database, different schema
                 opts.Services.AddMartenStore<IPlayerStore>(m =>
                 {
                     m.Connection(Servers.PostgresConnectionString);
                     m.DatabaseSchemaName = "players";
                 }).IntegrateWithWolverine();
 
-                // Ancillary store 2 – same database, different schema
+                // Ancillary store 2 - same database, different schema
                 opts.Services.AddMartenStore<IThingStore>(m =>
                 {
                     m.Connection(Servers.PostgresConnectionString);
                     m.DatabaseSchemaName = "things";
                 }).IntegrateWithWolverine();
 
+                opts.Discovery.DisableConventionalDiscovery();
                 opts.Durability.Mode = DurabilityMode.Solo;
+
             }).StartAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await theHost.StopAsync();
         theHost.Dispose();

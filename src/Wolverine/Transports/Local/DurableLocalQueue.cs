@@ -28,8 +28,17 @@ internal class DurableLocalQueue : ISendingAgent, IListenerCircuit, ILocalQueue
     {
         Uri = endpoint.Uri;
         _settings = runtime.DurabilitySettings;
-        _inbox = runtime.Storage.Inbox;
-        _messageLogger = runtime.MessageTracking;
+
+        // When ancillary stores exist, wrap the inbox so that envelopes whose
+        // Store property has already been stamped (by ApplyAncillaryStoreFrame
+        // during handler execution) are persisted in the correct database.
+        // Without this, all local-queue messages land in the main store's inbox
+        // regardless of the handler's ancillary store association.
+        _inbox = runtime.Stores != null && runtime.Stores.HasAnyAncillaryStores()
+            ? new DelegatingMessageInbox(runtime.Storage.Inbox, runtime.Stores)
+            : runtime.Storage.Inbox;
+
+        _messageLogger = runtime.MessageTrackingFor(endpoint);
         _serializer = endpoint.DefaultSerializer ??
                       throw new ArgumentOutOfRangeException(nameof(endpoint),
                           "No default serializer for this Endpoint");
@@ -87,6 +96,10 @@ internal class DurableLocalQueue : ISendingAgent, IListenerCircuit, ILocalQueue
     public async ValueTask PauseAsync(TimeSpan pauseTime)
     {
         Latched = true;
+        // GH-3832 — remember that this latch is a timed pause so Status reports Paused rather than
+        // the TooBusy that a back-pressure latch reports. This one is released by the Restarter
+        // installed at the end of this method; TooBusy is released by the queue draining.
+        _paused = true;
 
         if (_receiver != null)
         {
@@ -106,17 +119,27 @@ internal class DurableLocalQueue : ISendingAgent, IListenerCircuit, ILocalQueue
         CircuitBreaker?.Reset();
 
         _runtime.Tracker.Publish(
-            new ListenerState(Endpoint.Uri, Endpoint.EndpointName, ListeningStatus.Stopped));
+            new ListenerState(Endpoint.Uri, Endpoint.EndpointName, ListeningStatus.Paused));
 
         _logger.LogInformation("Pausing message listening at {Uri}", Endpoint.Uri);
 
         _restarter = new Restarter(this, pauseTime);
     }
 
+    public async ValueTask PauseWithDrainAsync(TimeSpan pauseTime)
+    {
+        // DurableLocalQueue.PauseAsync already fully drains. The behavioral split
+        // between PauseAsync and PauseWithDrainAsync is important for BufferedReceiver
+        // (which skips the drain in PauseAsync to avoid deadlocking when called from
+        // within the handler pipeline). For the durable local queue, both are identical.
+        await PauseAsync(pauseTime);
+    }
+
     public ValueTask StartAsync()
     {
         _receiver = new DurableReceiver(Endpoint, _runtime, Pipeline);
         Latched = false;
+        _paused = false;
         _runtime.Tracker.Publish(new ListenerState(_receiver.Uri, Endpoint.EndpointName,
             ListeningStatus.Accepting));
         _restarter?.Dispose();
@@ -124,7 +147,13 @@ internal class DurableLocalQueue : ISendingAgent, IListenerCircuit, ILocalQueue
         return ValueTask.CompletedTask;
     }
 
-    ListeningStatus IListenerCircuit.Status => Latched ? ListeningStatus.TooBusy : ListeningStatus.Accepting;
+    private bool _paused;
+
+    // GH-3832 — a timed pause must not read as the back-pressure TooBusy latch;
+    // LatchReceiver() (agent-restriction latch) deliberately keeps the TooBusy mapping for now.
+    ListeningStatus IListenerCircuit.Status => _paused
+        ? ListeningStatus.Paused
+        : Latched ? ListeningStatus.TooBusy : ListeningStatus.Accepting;
 
     public Uri Uri { get; }
 
@@ -150,9 +179,13 @@ internal class DurableLocalQueue : ISendingAgent, IListenerCircuit, ILocalQueue
 
     async ValueTask IReceiver.DrainAsync()
     {
-        _receiver!.Latch();
+        var receiver = _receiver;
+
+        receiver?.Latch();
         await _storeAndEnqueue.DrainAsync();
-        await _receiver!.DrainAsync();
+
+        if (receiver != null)
+            await receiver.DrainAsync();
     }
 
     void ILocalReceiver.Enqueue(Envelope envelope)
@@ -211,11 +244,40 @@ internal class DurableLocalQueue : ISendingAgent, IListenerCircuit, ILocalQueue
 
     public DateTimeOffset LastMessageSentAt => DateTimeOffset.UtcNow;
 
+    /// <summary>
+    /// If the handler for this message type targets an ancillary store on a
+    /// different database, set envelope.Store so that the DelegatingMessageInbox
+    /// persists it in the correct store for transactional atomicity. The
+    /// receiving handler's store association wins over the publishing context's
+    /// store: a message published from a main-store handler can be persisted
+    /// transactionally by an ancillary-store handler. Without overriding here,
+    /// a publisher-stamped envelope.Store (the main store) would carry through
+    /// the inbox and cause FlushOutgoingMessagesOnCommit to point at the
+    /// publisher's inbox table while the receiving Marten/Polecat session was
+    /// connected to the ancillary database. See GH-2669.
+    /// </summary>
+    private void assignAncillaryStoreIfNeeded(Envelope envelope)
+    {
+        if (_runtime.Stores == null) return;
+        var store = _runtime.Stores.TryFindAncillaryStoreForMessageType(envelope.MessageType);
+        if (store != null)
+        {
+            envelope.Store = store;
+        }
+    }
+
     private async Task storeAndEnqueueAsync(Envelope envelope)
     {
+        var isLatched = Latched;
+
         try
         {
-            envelope.OwnerId = _settings.AssignedNodeNumber;
+            // Use AnyNode when latched so the durability agent can recover the message.
+            envelope.OwnerId = isLatched
+                ? TransportConstants.AnyNode
+                : _settings.AssignedNodeNumber;
+
+            assignAncillaryStoreIfNeeded(envelope);
             await _inbox.StoreIncomingAsync(envelope);
             envelope.WasPersistedInInbox = true;
         }
@@ -225,7 +287,7 @@ internal class DurableLocalQueue : ISendingAgent, IListenerCircuit, ILocalQueue
             return;
         }
 
-        if (Latched)
+        if (isLatched)
         {
             return;
         }

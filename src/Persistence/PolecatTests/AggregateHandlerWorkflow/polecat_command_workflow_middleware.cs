@@ -1,4 +1,5 @@
 using IntegrationTests;
+using JasperFx.Events.Projections;
 using JasperFx;
 using JasperFx.CodeGeneration;
 using JasperFx.Events;
@@ -17,15 +18,15 @@ using Wolverine.Tracking;
 
 namespace PolecatTests.AggregateHandlerWorkflow;
 
-public class polecat_command_workflow_middleware : IDisposable
+public class polecat_command_workflow_middleware : IAsyncLifetime, IDisposable
 {
-    private readonly IHost theHost;
-    private readonly IDocumentStore theStore;
+    private IHost theHost = null!;
+    private IDocumentStore theStore = null!;
     private Guid theStreamId;
 
-    public polecat_command_workflow_middleware()
+    public async ValueTask InitializeAsync()
     {
-        theHost = WolverineHost.For(opts =>
+        theHost = await WolverineHost.ForAsync(opts =>
         {
             opts.Services.AddPolecat(m =>
                 {
@@ -42,8 +43,10 @@ public class polecat_command_workflow_middleware : IDisposable
         });
 
         theStore = theHost.Services.GetRequiredService<IDocumentStore>();
-        ((DocumentStore)theStore).Database.ApplyAllConfiguredChangesToDatabaseAsync().GetAwaiter().GetResult();
+        await ((DocumentStore)theStore).Database.ApplyAllConfiguredChangesToDatabaseAsync();
     }
+
+    ValueTask IAsyncDisposable.DisposeAsync() => ValueTask.CompletedTask;
 
     public void Dispose()
     {
@@ -62,7 +65,9 @@ public class polecat_command_workflow_middleware : IDisposable
     internal async Task<LetterAggregate> LoadAggregate()
     {
         await using var session = theStore.LightweightSession();
-        return await session.LoadAsync<LetterAggregate>(theStreamId);
+        var aggregate = await session.LoadAsync<LetterAggregate>(theStreamId);
+        aggregate.ShouldNotBeNull();
+        return aggregate;
     }
 
     internal async Task OnAggregate(Action<LetterAggregate> assertions)
@@ -219,7 +224,7 @@ public class LetterAggregate
 public static class SpecialLetterHandler
 {
     [ScheduleRetry(typeof(ConcurrencyException), 1, 2, 5)]
-    [AggregateHandler(ConcurrencyStyle.Exclusive)]
+    [AggregateHandler(global::Wolverine.Polecat.ConcurrencyStyle.Exclusive)]
     public static IEnumerable<object> Handle(IncrementAB command, LetterAggregate aggregate)
     {
         command.LetterAggregateId.ShouldBe(aggregate.Id);
@@ -231,7 +236,7 @@ public static class SpecialLetterHandler
 public class LetterAggregateHandler
 {
     // No event returned
-    public AEvent Handle(IncrementNone command, LetterAggregate aggregate)
+    public AEvent? Handle(IncrementNone command, LetterAggregate aggregate)
     {
         return null;
     }
@@ -287,13 +292,13 @@ public class LetterAggregateHandler
 
     public void Handle(IncrementC command, IEventStream<LetterAggregate> stream)
     {
-        command.LetterAggregateId.ShouldBe(stream.Aggregate.Id);
+        command.LetterAggregateId.ShouldBe(stream.Aggregate!.Id);
         stream.AppendOne(new CEvent());
     }
 
     public Task Handle(IncrementD command, IEventStream<LetterAggregate> stream)
     {
-        command.LetterAggregateId.ShouldBe(stream.Aggregate.Id);
+        command.LetterAggregateId.ShouldBe(stream.Aggregate!.Id);
         stream.AppendOne(new DEvent());
         return Task.CompletedTask;
     }

@@ -6,6 +6,7 @@ using JasperFx.Events;
 using JasperFx.Resources;
 using Marten;
 using Marten.Events;
+using JasperFx.Events.Projections;
 using Marten.Events.Projections;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -22,7 +23,7 @@ public class aggregate_handler_workflow: PostgresqlContext, IAsyncLifetime
     private IDocumentStore theStore = null!;
     private Guid theStreamId;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         theHost = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -32,18 +33,30 @@ public class aggregate_handler_workflow: PostgresqlContext, IAsyncLifetime
                         m.Connection(Servers.PostgresConnectionString);
                         m.Projections.Snapshot<LetterAggregate>(SnapshotLifecycle.Inline);
 
+                        // These handlers intentionally mutate the FetchForWriting aggregate in place
+                        // (e.g. to compute the returned Response). Marten 9 defaults
+                        // UseIdentityMapForAggregates = true, which reuses that mutated instance as the
+                        // inline projection's apply baseline — double-counting the events. Opt back into
+                        // the Marten 8 round-trip behavior for this store so the snapshot rebuilds purely
+                        // from events. See JasperFx/wolverine#2857 and JasperFx/marten#4509.
+                        m.Events.UseIdentityMapForAggregates = false;
+
                         m.DisableNpgsqlLogging = true;
                     })
                     .UseLightweightSessions()
                     .IntegrateWithWolverine();
 
+                opts.Discovery.DisableConventionalDiscovery()
+                    .IncludeType(typeof(RaiseIfValidatedHandler))
+                    .IncludeType(typeof(ResponseHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Services.AddResourceSetupOnStartup();
             }).StartAsync();
 
         theStore = theHost.Services.GetRequiredService<IDocumentStore>();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await theHost.StopAsync();
         theHost.Dispose();
@@ -93,10 +106,28 @@ public class aggregate_handler_workflow: PostgresqlContext, IAsyncLifetime
         // Do this first to force the compilation
         var handler = theHost.GetRuntime().Handlers.HandlerFor<RaiseABC>();
         var chain = theHost.GetRuntime().Handlers.ChainFor<RaiseABC>();
-        
+
         chain!.AuditedMembers.Single().MemberName.ShouldBe(nameof(RaiseABC.LetterAggregateId));
 
         chain.SourceCode!.ShouldContain("System.Diagnostics.Activity.Current?.SetTag(\"letter.aggregate.id\", raiseABC.LetterAggregateId);");
+    }
+
+    [Fact]
+    public void generates_wolverine_stream_id_otel_tag()
+    {
+        var handler = theHost.GetRuntime().Handlers.HandlerFor<RaiseABC>();
+        var chain = theHost.GetRuntime().Handlers.ChainFor<RaiseABC>();
+
+        chain!.SourceCode!.ShouldContain($"SetTag(\"{Wolverine.Runtime.WolverineTracing.StreamId}\"");
+    }
+
+    [Fact]
+    public void generates_wolverine_stream_type_otel_tag()
+    {
+        var handler = theHost.GetRuntime().Handlers.HandlerFor<RaiseABC>();
+        var chain = theHost.GetRuntime().Handlers.ChainFor<RaiseABC>();
+
+        chain!.SourceCode!.ShouldContain($"SetTag(\"{Wolverine.Runtime.WolverineTracing.StreamType}\", \"{typeof(LetterAggregate).FullName}\"");
     }
 
     [Fact]
@@ -218,7 +249,7 @@ public class aggregate_handler_workflow: PostgresqlContext, IAsyncLifetime
         using (var session = theStore.LightweightSession())
         {
             session.Events.StartStream<Aggregate>(streamId, new AEvent(), new BEvent());
-            await session.SaveChangesAsync();
+            await session.SaveChangesAsync(TestContext.Current.CancellationToken);
         }
 
         var tracked = await theHost.SendMessageAndWaitAsync(new Event3(streamId));
@@ -228,7 +259,7 @@ public class aggregate_handler_workflow: PostgresqlContext, IAsyncLifetime
 
         using (var session = theStore.LightweightSession())
         {
-            var events = await session.Events.FetchStreamAsync(streamId);
+            var events = await session.Events.FetchStreamAsync(streamId, token: TestContext.Current.CancellationToken);
             events.OfType<IEvent<OutgoingMessages>>().Any().ShouldBeFalse();
         }
     }
@@ -240,7 +271,7 @@ public class aggregate_handler_workflow: PostgresqlContext, IAsyncLifetime
         using (var session = theStore.LightweightSession())
         {
             session.Events.StartStream<Aggregate>(streamId, new AEvent(), new BEvent());
-            await session.SaveChangesAsync();
+            await session.SaveChangesAsync(TestContext.Current.CancellationToken);
         }
 
         var (tracked, updated) 
@@ -261,7 +292,7 @@ public class aggregate_handler_workflow: PostgresqlContext, IAsyncLifetime
         {
             session.Events.StartStream<Aggregate>(streamId, new AEvent(), new CEvent());
             session.Events.StartStream<Aggregate>(streamId2, new CEvent(), new CEvent());
-            await session.SaveChangesAsync();
+            await session.SaveChangesAsync(TestContext.Current.CancellationToken);
         }
         
         await theHost.InvokeMessageAndWaitAsync(new RaiseIfValidated(streamId));
@@ -270,11 +301,11 @@ public class aggregate_handler_workflow: PostgresqlContext, IAsyncLifetime
         using (var session = theStore.LightweightSession())
         {
             // Should not apply anything new if there is a value for ACount
-            var existing1 = await session.LoadAsync<LetterAggregate>(streamId);
+            var existing1 = await session.LoadAsync<LetterAggregate>(streamId, TestContext.Current.CancellationToken);
             existing1!.BCount.ShouldBe(0);
 
             // Should apply anything new if there was no value for ACount
-            var existing2 = await session.LoadAsync<LetterAggregate>(streamId2);
+            var existing2 = await session.LoadAsync<LetterAggregate>(streamId2, TestContext.Current.CancellationToken);
             existing2!.BCount.ShouldBe(1);
         }
     }
@@ -415,7 +446,6 @@ public record RaiseAABCC(Guid LetterAggregateId);
 public record RaiseBBCCC(Guid LetterAggregateId);
 
 #region sample_passing_aggregate_into_validate_method
-
 public record RaiseIfValidated(Guid LetterAggregateId);
 
 public static class RaiseIfValidatedHandler

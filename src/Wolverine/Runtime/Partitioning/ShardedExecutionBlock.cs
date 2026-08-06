@@ -11,6 +11,11 @@ internal class ShardedExecutionBlock : BlockBase<Envelope>
     private readonly Block<Envelope>[] _slots;
 
     public ShardedExecutionBlock(int numberOfSlots, MessagePartitioningRules rules, Func<Envelope, CancellationToken, Task> processAsync)
+        : this(numberOfSlots, rules, Block<Envelope>.DefaultBoundedCapacity, processAsync)
+    {
+    }
+
+    public ShardedExecutionBlock(int numberOfSlots, MessagePartitioningRules rules, int boundedCapacity, Func<Envelope, CancellationToken, Task> processAsync)
     {
         _numberOfSlots = numberOfSlots;
         _rules = rules;
@@ -18,7 +23,7 @@ internal class ShardedExecutionBlock : BlockBase<Envelope>
         _slots = new Block<Envelope>[_numberOfSlots];
         for (int i = 0; i < _numberOfSlots; i++)
         {
-            _slots[i] = new Block<Envelope>(processAsync);
+            _slots[i] = new Block<Envelope>(1, boundedCapacity, processAsync);
         }
     }
 
@@ -72,6 +77,22 @@ internal class ShardedExecutionBlock : BlockBase<Envelope>
     }
 
     public override uint Count => (uint)_slots.Sum(x => x.Count);
+
+    /// <summary>
+    /// Propagates to every slot block. Without this, a slot's escaping exception falls to the
+    /// JasperFx Block default sink (stderr) — invisible to anyone reading structured logs.
+    /// </summary>
+    public override Action<Envelope, Exception> OnError
+    {
+        get => _slots[0].OnError;
+        set
+        {
+            foreach (var slot in _slots)
+            {
+                slot.OnError = value;
+            }
+        }
+    }
 
     public override ValueTask PostAsync(Envelope item)
     {

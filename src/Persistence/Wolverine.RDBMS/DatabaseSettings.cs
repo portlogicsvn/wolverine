@@ -12,6 +12,21 @@ public class DatabaseSettings
 
     public string? ConnectionString { get; set; }
     public string? SchemaName { get; set; }
+
+    /// <summary>
+    /// Returns the schema name properly quoted for use in SQL statements.
+    /// Uses ANSI SQL double quotes which work for PostgreSQL and SQL Server (with QUOTED_IDENTIFIER ON).
+    /// </summary>
+    public string QuotedSchemaName
+    {
+        get
+        {
+            if (string.IsNullOrEmpty(SchemaName)) return SchemaName ?? string.Empty;
+            // Escape any internal double quotes by doubling them
+            var escaped = SchemaName.Replace("\"", "\"\"");
+            return $"\"{escaped}\"";
+        }
+    }
     public AutoCreate AutoCreate { get; set; } = JasperFx.AutoCreate.CreateOrUpdate;
 
     /// <summary>
@@ -30,6 +45,16 @@ public class DatabaseSettings
     public bool CommandQueuesEnabled { get; set; } = true;
 
     public int ScheduledJobLockId { get; set; } = 20000;
+
+    /// <summary>
+    /// Advisory lock identifier used to serialize Wolverine schema migrations across
+    /// concurrent processes. Prevents race conditions like duplicate CREATE SCHEMA
+    /// failures when many test hosts or service instances boot at once.
+    /// Defaults to 4006. Set this to Marten's <c>StoreOptions.ApplyChangesLockId</c>
+    /// (default 4004) when using <c>IntegrateWithWolverine</c> if you want both
+    /// frameworks' migrations to serialize against the same lock.
+    /// </summary>
+    public int MigrationLockId { get; set; } = 4006;
     
     /// <summary>
     /// Default databases by tenant and connection string to use for seeding

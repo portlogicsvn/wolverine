@@ -1,12 +1,12 @@
 ﻿using System.Collections.Immutable;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using ImTools;
 using JasperFx;
 using JasperFx.CodeGeneration;
 using JasperFx.Core;
 using JasperFx.Core.Reflection;
-using JasperFx.RuntimeCompiler;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -38,8 +38,6 @@ public partial class HandlerGraph : ICodeFileCollectionWithServices, IWithFailur
 
     internal readonly HandlerDiscovery Discovery = new();
 
-    private IWolverineTypeLoader? _typeLoader;
-
     private ImHashMap<Type, HandlerChain> _chains = ImHashMap<Type, HandlerChain>.Empty;
 
     private ImHashMap<Type, IMessageHandler?> _handlers = ImHashMap<Type, IMessageHandler?>.Empty;
@@ -65,21 +63,6 @@ public partial class HandlerGraph : ICodeFileCollectionWithServices, IWithFailur
         RegisterMessageType(typeof(Acknowledgement));
         RegisterMessageType(typeof(FailureAcknowledgement));
     }
-
-    /// <summary>
-    /// Set a source-generated type loader to bypass runtime assembly scanning.
-    /// When set, Compile() will use the loader's pre-discovered types instead
-    /// of running HandlerDiscovery.FindCalls().
-    /// </summary>
-    internal void UseTypeLoader(IWolverineTypeLoader typeLoader)
-    {
-        _typeLoader = typeLoader;
-    }
-
-    /// <summary>
-    /// Returns the currently configured type loader, if any.
-    /// </summary>
-    internal IWolverineTypeLoader? TypeLoader => _typeLoader;
 
     public Dictionary<Type, Type> MappedGenericMessageTypes { get; } = new();
 
@@ -272,30 +255,32 @@ public partial class HandlerGraph : ICodeFileCollectionWithServices, IWithFailur
         {
             handler = chain.Handler;
         }
-        else if (!chain.HasDefaultNonStickyHandlers())
-        {
-            throw new NoHandlerForEndpointException(messageType);
-        }
         else
         {
+            // SagaChain.DetermineFrames clears Handlers during codegen, so the
+            // HasDefaultNonStickyHandlers check has to happen inside the lock
             lock (_compilingLock)
             {
-                // TODO -- put this logic in JasperFx
-                var logger = Container?.Services.GetService<ILoggerFactory>()?.CreateLogger<HandlerGraph>() ?? new Logger<HandlerGraph>(new LoggerFactory([new DebugLoggerProvider()]));
-                
-                logger.LogDebug("Starting to compile chain {MessageType}", chain.MessageType.NameInCode());
-
-                if (chain.Handler == null)
-                {
-                    chain.InitializeSynchronously(Rules, this, Container!.Services);
-                    handler = chain.CreateHandler(Container!);
-                }
-                else
+                if (chain.Handler != null)
                 {
                     handler = chain.Handler;
                 }
+                else if (!chain.HasDefaultNonStickyHandlers())
+                {
+                    throw new NoHandlerForEndpointException(messageType);
+                }
+                else
+                {
+                    // TODO -- put this logic in JasperFx
+                    var logger = Container?.Services.GetService<ILoggerFactory>()?.CreateLogger<HandlerGraph>() ?? new Logger<HandlerGraph>(new LoggerFactory([new DebugLoggerProvider()]));
 
-                logger.LogDebug("Finished building the chain {MessageType}", chain.MessageType.NameInCode());
+                    logger.LogDebug("Starting to compile chain {MessageType}", chain.MessageType.NameInCode());
+
+                    chain.InitializeSynchronously(Rules, this, Container!.Services);
+                    handler = chain.CreateHandler(Container!);
+
+                    logger.LogDebug("Finished building the chain {MessageType}", chain.MessageType.NameInCode());
+                }
             }
         }
 
@@ -307,6 +292,13 @@ public partial class HandlerGraph : ICodeFileCollectionWithServices, IWithFailur
         return handler;
     }
 
+    // Closes FanoutMessageHandler<> over the runtime-resolved messageType
+    // and Activator.CreateInstance's the result. Per-message-type lazy-init
+    // (cached in _handlers ImHashMap after first call). Same chunk J
+    // (RoutingFor) pattern: AOT-clean apps in TypeLoadMode.Static pre-
+    // populate _handlers at HandlerGraph.Compile time so the steady-state
+    // hot path is pure cache lookups. The pre-population work is tracked in
+    // #2769 (CloseAndBuildAs elimination).
     private IMessageHandler getOrBuildFanoutHandler(Type messageType, HandlerChain chain)
     {
         if (_handlers.TryFind(messageType, out var cached) && cached != null)
@@ -321,13 +313,37 @@ public partial class HandlerGraph : ICodeFileCollectionWithServices, IWithFailur
             .Distinct()
             .ToArray();
 
-        var handlerType = typeof(FanoutMessageHandler<>).MakeGenericType(messageType);
-        var handler = (IMessageHandler)Activator.CreateInstance(handlerType, localUris, chain)!;
+        var handler = BuildFanoutHandler(messageType, chain, localUris);
 
         _handlers = _handlers.AddOrUpdate(messageType, handler);
         return handler;
     }
 
+    // Closes FanoutMessageHandler<> over the runtime-resolved messageType and
+    // Activator.CreateInstance's the result. Used both for sticky-handler fanout
+    // (getOrBuildFanoutHandler, cached in _handlers) and for relaying an externally-
+    // arriving element type to its direct + batch local queues (NOT cached — the
+    // _handlers[messageType] slot belongs to the direct handler). AOT-clean apps in
+    // TypeLoadMode.Static pre-populate handlers at Compile time. See #2769.
+    [UnconditionalSuppressMessage("AOT", "IL3050",
+        Justification = "FanoutMessageHandler<> closed over runtime messageType; AOT consumers pre-populate handlers via TypeLoadMode.Static. See AOT guide / #2769.")]
+    internal IMessageHandler BuildFanoutHandler(Type messageType, HandlerChain chain, Uri[] localQueueUris)
+    {
+        var handlerType = typeof(FanoutMessageHandler<>).MakeGenericType(messageType);
+        return (IMessageHandler)Activator.CreateInstance(handlerType, localQueueUris, chain)!;
+    }
+
+    // Compile is the bootstrap-time handler-graph build. The remaining IL2026
+    // here comes from registerMessageTypes' MakeGenericType / GetInterfaces walks
+    // (pre-population work tracked in #2769) and from the opt-in
+    // Forwarders.FindForwards path that runs only when
+    // options.AutomaticForwarderDiscoveryEnabled is true (the 6.0 explicit
+    // RegisterMessageForwarder API replaced the unconditional scan — see #2757).
+    // Suppress at the Compile boundary: a single annotation here keeps
+    // WolverineRuntime.StartAsync (the public bootstrap entry point) free of
+    // the cascade.
+    [UnconditionalSuppressMessage("Trimming", "IL2026",
+        Justification = "Bootstrap-time handler-graph build; per-message-type cache population (#2769) plus opt-in Forwarders.FindForwards assembly scan (#2757). See AOT guide.")]
     internal void Compile(WolverineOptions options, IServiceContainer container)
     {
         if (_hasCompiled)
@@ -341,14 +357,7 @@ public partial class HandlerGraph : ICodeFileCollectionWithServices, IWithFailur
 
         Rules = options.CodeGeneration;
 
-        if (_typeLoader != null)
-        {
-            compileWithTypeLoader(options, logger);
-        }
-        else
-        {
-            compileWithRuntimeScanning(options, logger);
-        }
+        compileWithRuntimeScanning(options, logger);
 
         Group(options);
 
@@ -377,8 +386,11 @@ public partial class HandlerGraph : ICodeFileCollectionWithServices, IWithFailur
         {
             foreach (var chain in @group)
             {
+                // Both halves have to be sanitized into legal C# identifiers -- the message type may well be
+                // an array (batched messages are handled as T[]), which would otherwise emit brackets into
+                // the generated class name and blow up compilation. See GH-3399.
                 chain.TypeName =
-                    $"{chain.MessageType.ToSuffixedTypeName("")}_{chain.HandlerCalls().First().HandlerType.ToSuffixedTypeName("Handler")}";
+                    $"{HandlerChain.GeneratedTypeNameFor(chain.MessageType, "")}_{HandlerChain.GeneratedTypeNameFor(chain.HandlerCalls().First().HandlerType, "Handler")}";
             }
         }
 
@@ -386,8 +398,24 @@ public partial class HandlerGraph : ICodeFileCollectionWithServices, IWithFailur
 
         Container = container;
 
+        // 6.0 forwarder registration: drain the explicit
+        // WolverineOptions.RegisterMessageForwarder<TFrom, TTo>() registrations
+        // first (AOT-clean — no reflective assembly walk), then optionally
+        // run the legacy Forwarders.FindForwards(ApplicationAssembly) scan
+        // when the user opted in via UseAutomaticForwarderDiscovery(). The
+        // pre-6.0 unconditional scan is gone — see #2757 and
+        // docs/guide/migration.md.
         var forwarders = new Forwarders();
-        forwarders.FindForwards(options.ApplicationAssembly!);
+        foreach (var pair in options.ExplicitMessageForwarders)
+        {
+            forwarders.Relationships[pair.Key] = pair.Value;
+        }
+
+        if (options.AutomaticForwarderDiscoveryEnabled && options.ApplicationAssembly is not null)
+        {
+            forwarders.FindForwards(options.ApplicationAssembly);
+        }
+
         AddForwarders(forwarders);
 
         foreach (var configuration in _configurations) configuration();
@@ -397,57 +425,51 @@ public partial class HandlerGraph : ICodeFileCollectionWithServices, IWithFailur
         tryApplyLocalQueueConfiguration(options);
 
         options.MessagePartitioning.MaybeInferGrouping(this);
-    }
 
-    private void compileWithTypeLoader(WolverineOptions options, ILogger logger)
-    {
-        logger.LogInformation(
-            "Using source-generated type loader for handler discovery, bypassing runtime assembly scanning");
+        // Pre-populate the per-message-type cascading-async-enumerable cache on
+        // MessageContext so the reflective lazy-init in
+        // MessageContext.ResolveTypedAsyncEnumerableCascader never fires at
+        // steady state. AOT pillar follow-up #2769 (Option A).
+        var allMessageTypes = AllMessageTypes().ToArray();
+        MessageContext.PrepopulateCascadeCache(allMessageTypes);
 
-        var handlerTypes = _typeLoader!.DiscoveredHandlerTypes;
-
-        // Still use Discovery's method filtering on the pre-discovered types,
-        // but skip the expensive assembly scanning to find those types
-        var methods = new List<(Type, System.Reflection.MethodInfo)>();
-        foreach (var handlerType in handlerTypes)
-        {
-            var typeMethods = handlerType
-                .GetMethods(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
-                .Where(x => x.DeclaringType != typeof(object))
-                .Where(m => Discovery.MethodIncludes.Matches(m) && !Discovery.MethodExcludes.Matches(m))
-                .Select(m => (handlerType, m));
-
-            methods.AddRange(typeMethods);
-        }
-
-        var calls = methods.Select(x => new HandlerCall(x.Item1, x.Item2));
-
-        if (methods.Count == 0)
-        {
-            logger.LogWarning(
-                "Source-generated type loader found no handler methods. If this is unexpected, verify the source generator is correctly discovering handler types");
-        }
-        else
-        {
-            AddRange(calls);
-        }
-
-        // Also pre-register message types from the loader
-        foreach (var (messageType, alias) in _typeLoader.DiscoveredMessageTypes)
-        {
-            RegisterMessageType(messageType);
-        }
+        // Same Option A pre-population for the IntrinsicSerializer<T> cache so
+        // ISerializable message types skip the first-occurrence CloseAndBuildAs.
+        Wolverine.Runtime.Serialization.IntrinsicSerializer.Instance.Prepopulate(allMessageTypes);
     }
 
     private void compileWithRuntimeScanning(WolverineOptions options, ILogger logger)
     {
-        foreach (var assembly in Discovery.Assemblies)
-        {
-            logger.LogInformation("Searching assembly {Assembly} for Wolverine message handlers",
-                assembly.GetName());
-        }
+        (Type, MethodInfo)[] methods;
 
-        var methods = Discovery.FindCalls(options);
+        // Cold-start fast path (Wolverine#1577 Tier 1): in TypeLoadMode.Static, or when the
+        // user opts in via UseStaticRegistries(), consume the pre-generated HandlerRegistry
+        // instead of scanning assemblies. Never applies during `codegen write` itself — that
+        // must run a fresh scan to regenerate the registry accurately.
+        if (shouldConsumeStaticRegistry(options) &&
+            Discovery.TryLoadStaticHandlerRegistry(options, out var registryTypes))
+        {
+            logger.LogInformation(
+                "Using pre-generated Wolverine HandlerRegistry ({Count} handler types); skipping assembly scan",
+                registryTypes.Count);
+            methods = Discovery.FindCallsFromTypes(registryTypes, options);
+        }
+        else
+        {
+            if (shouldConsumeStaticRegistry(options))
+            {
+                logger.LogWarning(
+                    "Static TypeLoadMode is active but no pre-generated HandlerRegistry was found — falling back to a runtime assembly scan. Run 'dotnet run -- codegen write' to eliminate handler discovery scanning.");
+            }
+
+            foreach (var assembly in Discovery.Assemblies)
+            {
+                logger.LogInformation("Searching assembly {Assembly} for Wolverine message handlers",
+                    assembly.GetName());
+            }
+
+            methods = Discovery.FindCalls(options);
+        }
 
         var calls = methods.Select(x => new HandlerCall(x.Item1, x.Item2));
 
@@ -462,6 +484,18 @@ public partial class HandlerGraph : ICodeFileCollectionWithServices, IWithFailur
         }
     }
 
+    private static bool shouldConsumeStaticRegistry(WolverineOptions options)
+    {
+        // Regenerating the registry during `codegen write` must always do a fresh scan,
+        // otherwise a stale registry would perpetuate itself and miss new handlers.
+        if (DynamicCodeBuilder.WithinCodegenCommand)
+        {
+            return false;
+        }
+
+        return options.CodeGeneration.TypeLoadMode == TypeLoadMode.Static || options.UseStaticHandlerRegistry;
+    }
+
     private void tryApplyLocalQueueConfiguration(WolverineOptions options)
     {
         var local = options.Transports.GetOrCreate<LocalTransport>();
@@ -471,6 +505,19 @@ public partial class HandlerGraph : ICodeFileCollectionWithServices, IWithFailur
         }
     }
 
+    // Walks chain.MessageType.GetInterfaces() to find interop interfaces,
+    // then closes generic-handler types over those interface message types
+    // via MakeGenericType. Bootstrap-time helper; AOT consumers preserve
+    // interop-interface types via opts.AddMessageInterfaceAssembly(...) +
+    // appropriate trim descriptors.
+    [UnconditionalSuppressMessage("Trimming", "IL2055",
+        Justification = "Closed generic message-handler type for interop interface; bootstrap-time only. See AOT guide.")]
+    [UnconditionalSuppressMessage("Trimming", "IL2067",
+        Justification = "_messageTypes values originate from user-registered message types via RegisterMessageType / HandlerDiscovery. The TypeExtensions.Closes lambda inspects each type's generic-interface graph for MappedGenericMessageTypes keys; user message types are statically rooted via HandlerDiscovery and preserved.")]
+    [UnconditionalSuppressMessage("Trimming", "IL2075",
+        Justification = "MessageType.GetInterfaces walk at bootstrap; user message types statically rooted via HandlerDiscovery. See AOT guide.")]
+    [UnconditionalSuppressMessage("AOT", "IL3050",
+        Justification = "MakeGenericType over runtime interface type; AOT consumers preserve interop-interface message types via opts.AddMessageInterfaceAssembly. See AOT guide.")]
     private void registerMessageTypes()
     {
         lock (_messageTypesLock)
@@ -578,6 +625,15 @@ public partial class HandlerGraph : ICodeFileCollectionWithServices, IWithFailur
         return new HandlerChain(options, group, this);
     }
 
+    // typeof(ForwardingHandler<,>).CloseAndBuildAs<MessageHandler>(this, source, destination)
+    // closes the forwarding-handler generic over (source, destination) message
+    // types. AddForwarders runs at bootstrap from HandlerGraph.Compile (or via
+    // the IForwardsTo<> assembly scan whose elimination is tracked in #2757).
+    // Same chunk D / I / J / K CloseAndBuildAs pattern.
+    [UnconditionalSuppressMessage("Trimming", "IL2026",
+        Justification = "ForwardingHandler<,> closed over runtime (source, destination) message types at bootstrap; user types statically rooted. See AOT guide / #2757.")]
+    [UnconditionalSuppressMessage("AOT", "IL3050",
+        Justification = "ForwardingHandler<,> closed over runtime (source, destination) message types at bootstrap; user types statically rooted. See AOT guide / #2757.")]
     internal void AddForwarders(Forwarders forwarders)
     {
         foreach (var pair in forwarders.Relationships)
@@ -621,18 +677,13 @@ public partial class HandlerGraph : ICodeFileCollectionWithServices, IWithFailur
     
     public void RegisterMessageType(Type messageType, string messageAlias)
     {
-        if (_messageTypes.TryFind(messageAlias, out var type))
-        {
-            throw new InvalidOperationException($"Cannot register type {type} with alias {messageAlias} because alias is already used");
-        }
-
-        if (_replyTypes.Contains(messageType))
-        {
-            return;
-        }
-
         lock (_messageTypesLock)
         {
+            if (_messageTypes.TryFind(messageAlias, out var type))
+            {
+                throw new InvalidOperationException($"Cannot register type {type} with alias {messageAlias} because alias is already used");
+            }
+
             _messageTypes = _messageTypes.AddOrUpdate(messageAlias, messageType);
             _replyTypes = _replyTypes.Add(messageType);
         }

@@ -1,4 +1,6 @@
 using System.Data.Common;
+using JasperFx.Events.Daemon;
+using System.Diagnostics.CodeAnalysis;
 using ImTools;
 using JasperFx;
 using JasperFx.Core;
@@ -14,6 +16,7 @@ using Weasel.Oracle.Tables;
 using Wolverine.Logging;
 using Wolverine.Oracle.Sagas;
 using Wolverine.Oracle.Schema;
+using Wolverine.Oracle.Transport;
 using Wolverine.Persistence;
 using Wolverine.Persistence.Durability;
 using Wolverine.Persistence.Durability.ScheduledMessageManagement;
@@ -52,6 +55,15 @@ internal partial class OracleMessageStore : IMessageDatabase, IMessageInbox, IMe
     {
     }
 
+    // typeof(OracleSagaSchema<,>).CloseAndBuildAs<IDatabaseSagaSchema>(...) at L74
+    // closes the saga schema generic over (sagaType, idType) at startup. Same
+    // chunk D / I / J / K / AE / AF / AG / AH CloseAndBuildAs pattern: AOT-clean
+    // apps preserve saga state types via TrimmerRootDescriptor. Cross-link to
+    // #2769.
+    [UnconditionalSuppressMessage("Trimming", "IL2026",
+        Justification = "OracleSagaSchema<,> closed over runtime saga / id types at startup; AOT consumers preserve via TrimmerRootDescriptor. See AOT guide / #2769.")]
+    [UnconditionalSuppressMessage("AOT", "IL3050",
+        Justification = "OracleSagaSchema<,> closed over runtime saga / id types at startup; AOT consumers preserve via TrimmerRootDescriptor. See AOT guide / #2769.")]
     public OracleMessageStore(DatabaseSettings databaseSettings, DurabilitySettings durability,
         OracleDataSource dataSource, ILogger logger, IEnumerable<SagaTableDefinition> sagaTypes)
     {
@@ -78,6 +90,14 @@ internal partial class OracleMessageStore : IMessageDatabase, IMessageInbox, IMe
         if (Role == MessageStoreRole.Main)
         {
             _nodes = new OracleNodePersistence(_settings, this, _dataSource);
+
+            // Dynamic-listener registry (GH-2685). Only the Main store hosts the
+            // registry; gated on the opt-in flag so existing apps see no schema
+            // migration churn on upgrade.
+            if (durability.EnableDynamicListeners)
+            {
+                Listeners = new OracleListenerStore(_dataSource, _schemaName);
+            }
         }
 
         var descriptor = Describe();
@@ -91,12 +111,18 @@ internal partial class OracleMessageStore : IMessageDatabase, IMessageInbox, IMe
 
         if (Role == MessageStoreRole.Main)
         {
-            Uri = new Uri("wolverine://messages/main");
+            // Diagnostic identity only — the agent Uri below always carries the registered
+            // wolverinedb scheme so the NodeAgentController can dispatch the durability agent.
+            SubjectUri = new Uri("wolverine://messages/main");
         }
-        else
-        {
-            Uri = new Uri($"messagedb://{parts.Join("/")}");
-        }
+
+        // GH-3589: the durability agent family (MessageStoreCollection) registers under the
+        // "wolverinedb" scheme (PersistenceConstants.AgentScheme), and a message store's Uri IS
+        // its agent Uri. A "wolverine://messages/main" or "messagedb://..." scheme leaves the
+        // NodeAgentController unable to resolve a family ("Unrecognized agent scheme 'wolverine'"),
+        // so the Oracle durability agent never starts. Mirror MessageDatabase / RavenDb / CosmosDb
+        // and always build the Uri from the registered scheme regardless of role.
+        Uri = new Uri($"{PersistenceConstants.AgentScheme}://{parts.Where(x => x.IsNotEmpty()).Join("/")}");
 
         Name = Uri.ToString();
     }
@@ -108,10 +134,22 @@ internal partial class OracleMessageStore : IMessageDatabase, IMessageInbox, IMe
     public MessageStoreRole Role { get; set; }
     public List<string> TenantIds { get; } = new();
     public Uri Uri { get; internal set; }
+
+    /// <summary>
+    /// Stable diagnostic identity for this store (e.g. "wolverine://messages/main"), kept
+    /// separate from <see cref="Uri"/>, which must carry the registered agent scheme. See GH-3589.
+    /// </summary>
+    public Uri SubjectUri { get; set; } = new Uri("wolverine://messages");
     public bool HasDisposed => _hasDisposed;
     public IMessageInbox Inbox => this;
     public IMessageOutbox Outbox => this;
     public INodeAgentPersistence Nodes => _nodes!;
+
+    // Real Oracle-backed listener store wired in once the schema bits land.
+    // Default no-op keeps the Wolverine boot path clean while
+    // EnableDynamicListeners is false (no schema, no behavior).
+    public IListenerStore Listeners { get; protected set; } = NullListenerStore.Instance;
+
     public IMessageStoreAdmin Admin => this;
     public IDeadLetters DeadLetters => this;
     public string Name { get; set; }
@@ -129,18 +167,50 @@ internal partial class OracleMessageStore : IMessageDatabase, IMessageInbox, IMe
 
     public void Initialize(IWolverineRuntime runtime)
     {
-        // No-op; initialization happens in MigrateAsync
+        // Mirror MessageDatabase.Initialize — when this is the main store and the host is
+        // running in Balanced durability mode, stand up the control transport and publish
+        // its endpoint as the NodeControlEndpoint so inter-node agent commands can flow
+        // without an external message broker. Without this, WolverineNode.For throws
+        // ArgumentOutOfRangeException("ControlEndpoint cannot be null for this usage") at
+        // startup.
+        //
+        // Oracle uses its own OracleControlTransport rather than the shared
+        // DatabaseControlTransport because the shared implementation assumes @-prefixed
+        // placeholders and Guid values that map directly to a DbParameter — both of which
+        // Oracle rejects (placeholders are :-prefixed and the id columns are RAW(16) so
+        // Guids must be passed as byte[]). See #2622.
+        if (Role == MessageStoreRole.Main
+            && runtime.Options.Transports.NodeControlEndpoint == null
+            && runtime.Options.Durability.Mode == DurabilityMode.Balanced)
+        {
+            var transport = new OracleControlTransport(this, runtime.Options);
+            runtime.Options.Transports.Add(transport);
+            runtime.Options.Transports.NodeControlEndpoint = transport.ControlEndpoint;
+        }
     }
 
     public IAgent BuildAgent(IWolverineRuntime runtime)
     {
-        return new DurabilityAgent(runtime, this);
+        return new DurabilityAgent(runtime, this)
+        {
+            // GH-3376: a tenant database's polling rides the distributed agent, one node per database
+            AutoStartScheduledJobPolling = Role == MessageStoreRole.Tenant
+        };
     }
 
     public IAgent StartScheduledJobs(IWolverineRuntime runtime)
     {
         var agent = new DurabilityAgent(runtime, this);
-        agent.StartScheduledJobPolling();
+
+        // GH-3376: see MessageDatabase.StartScheduledJobs - this node-wide fan-out would otherwise poll
+        // every tenant database from every node. Main / ancillary stores keep polling here (every node
+        // already connects to them, and this starts at boot rather than after agent assignment), as do
+        // hosts running without durability agents, where this is the only pump.
+        if (!runtime.Options.Durability.DurabilityAgentEnabled || Role != MessageStoreRole.Tenant)
+        {
+            agent.StartScheduledJobPolling();
+        }
+
         return agent;
     }
 
@@ -153,7 +223,7 @@ internal partial class OracleMessageStore : IMessageDatabase, IMessageInbox, IMe
             ServerName = builder.DataSource ?? string.Empty,
             DatabaseName = _schemaName,
             Subject = GetType().FullNameInCode(),
-            SubjectUri = Uri
+            SubjectUri = SubjectUri
         };
 
         descriptor.TenantIds.AddRange(TenantIds);
@@ -169,7 +239,9 @@ internal partial class OracleMessageStore : IMessageDatabase, IMessageInbox, IMe
     public void PromoteToMain(IWolverineRuntime runtime)
     {
         Role = MessageStoreRole.Main;
-        Uri = new Uri("wolverine://messages/main");
+        // Only the diagnostic identity changes on promotion — Uri keeps its registered
+        // wolverinedb agent scheme so the durability agent stays dispatchable. See GH-3589.
+        SubjectUri = new Uri("wolverine://messages/main");
         _nodes ??= new OracleNodePersistence(_settings, this, _dataSource);
     }
 
@@ -212,9 +284,9 @@ internal partial class OracleMessageStore : IMessageDatabase, IMessageInbox, IMe
             nodeTable.AddColumn("description", "VARCHAR2(4000)").NotNull();
             nodeTable.AddColumn("uri", "VARCHAR2(500)").NotNull();
             nodeTable.AddColumn<DateTimeOffset>("started")
-                .DefaultValueByExpression("SYS_EXTRACT_UTC(SYSTIMESTAMP)").NotNull();
+                .DefaultValueByExpression("SYSTIMESTAMP AT TIME ZONE ''UTC''").NotNull();
             nodeTable.AddColumn<DateTimeOffset>("health_check").NotNull()
-                .DefaultValueByExpression("SYS_EXTRACT_UTC(SYSTIMESTAMP)");
+                .DefaultValueByExpression("SYSTIMESTAMP AT TIME ZONE ''UTC''");
             nodeTable.AddColumn("version", "VARCHAR2(4000)");
             nodeTable.AddColumn("capabilities", "VARCHAR2(4000)").AllowNulls();
 
@@ -225,7 +297,7 @@ internal partial class OracleMessageStore : IMessageDatabase, IMessageInbox, IMe
             assignmentTable.AddColumn<Guid>("node_id")
                 .ForeignKeyTo(nodeTable.Identifier, "id", onDelete: CascadeAction.Cascade);
             assignmentTable.AddColumn<DateTimeOffset>("started")
-                .DefaultValueByExpression("SYS_EXTRACT_UTC(SYSTIMESTAMP)").NotNull();
+                .DefaultValueByExpression("SYSTIMESTAMP AT TIME ZONE ''UTC''").NotNull();
 
             yield return assignmentTable;
 
@@ -237,7 +309,7 @@ internal partial class OracleMessageStore : IMessageDatabase, IMessageInbox, IMe
                 queueTable.AddColumn<Guid>("node_id").NotNull();
                 queueTable.AddColumn(DatabaseConstants.Body, "BLOB").NotNull();
                 queueTable.AddColumn<DateTimeOffset>("posted").NotNull()
-                    .DefaultValueByExpression("SYS_EXTRACT_UTC(SYSTIMESTAMP)");
+                    .DefaultValueByExpression("SYSTIMESTAMP AT TIME ZONE ''UTC''");
                 queueTable.AddColumn<DateTimeOffset>("expires");
 
                 yield return queueTable;
@@ -257,7 +329,7 @@ internal partial class OracleMessageStore : IMessageDatabase, IMessageInbox, IMe
             eventTable.AddColumn<int>("node_number").NotNull();
             eventTable.AddColumn("event_name", "VARCHAR2(500)").NotNull();
             eventTable.AddColumn<DateTimeOffset>("timestamp")
-                .DefaultValueByExpression("SYS_EXTRACT_UTC(SYSTIMESTAMP)").NotNull();
+                .DefaultValueByExpression("SYSTIMESTAMP AT TIME ZONE ''UTC''").NotNull();
             eventTable.AddColumn("description", "VARCHAR2(500)").AllowNulls();
             yield return eventTable;
 
@@ -267,6 +339,16 @@ internal partial class OracleMessageStore : IMessageDatabase, IMessageInbox, IMe
             restrictionTable.AddColumn("type", "VARCHAR2(4000)").NotNull();
             restrictionTable.AddColumn<int>("node").NotNull().DefaultValue(0);
             yield return restrictionTable;
+
+            // Dynamic listener registry (GH-2685). Provisioned only when the opt-in
+            // flag is set so existing apps see no migration churn. Oracle uses
+            // VARCHAR2(500) for uri to match the node-table convention.
+            if (_durability.EnableDynamicListeners)
+            {
+                var listenerTable = new Table(new OracleObjectName(SchemaName, DatabaseConstants.ListenersTableName.ToUpperInvariant()));
+                listenerTable.AddColumn("uri", "VARCHAR2(500)").AsPrimaryKey();
+                yield return listenerTable;
+            }
         }
 
         foreach (var table in _otherTables)
@@ -305,10 +387,12 @@ internal partial class OracleMessageStore : IMessageDatabase, IMessageInbox, IMe
     // IMessageDatabase - extra methods
     public Weasel.Core.DbCommandBuilder ToCommandBuilder()
     {
-        // The IMessageDatabase interface requires DbCommandBuilder, but we create an OracleCommandBuilder
-        // internally. Return a DbCommandBuilder that uses Oracle's OracleCommand as the underlying command.
+        // OracleDbCommandBuilder is a DbCommandBuilder, so it satisfies IMessageDatabase, but it emits
+        // Oracle's ':' bind markers instead of the generic '@', types parameters through OracleProvider
+        // (Guid as RAW(16), bool as NUMBER(1)), and -- because ODP.NET cannot execute several statements
+        // from one command -- splits at each StartNewCommand() boundary into one command per statement.
         // Our dead letter methods use ToOracleCommandBuilder() instead.
-        return new Weasel.Core.DbCommandBuilder(CreateConnection());
+        return new Weasel.Oracle.OracleDbCommandBuilder();
     }
 
     internal Weasel.Oracle.CommandBuilder ToOracleCommandBuilder()
@@ -316,9 +400,16 @@ internal partial class OracleMessageStore : IMessageDatabase, IMessageInbox, IMe
         return new Weasel.Oracle.CommandBuilder();
     }
 
+    // Oracle falls back to an unbounded delete for expired handled envelope cleanup
+    public string? BatchedDeleteExpiredHandledEnvelopesSql(int batchSize) => null;
+
     public Task EnqueueAsync(IDatabaseOperation operation)
     {
-        // For Oracle, we execute operations directly since we can't batch
+        // NOTE: this silently drops the operation. OracleMessageStore implements IMessageDatabase
+        // directly rather than deriving from MessageDatabase, so it has no DatabaseBatcher to hand
+        // the operation to. The durability agent does not use this path -- it builds its own
+        // DatabaseOperationBatch -- and the one caller that does, OracleNodePersistence.LogRecordsAsync,
+        // works around it by inserting directly. Tracked separately; see the comment there.
         return Task.CompletedTask;
     }
 
@@ -358,7 +449,7 @@ internal partial class OracleMessageStore : IMessageDatabase, IMessageInbox, IMe
         await using var conn = CreateConnection();
         await conn.OpenAsync(token);
 
-        var cmd = conn.CreateCommand("");
+        await using var cmd = conn.CreateCommand("");
         if (table.MessageTypeColumnName.IsEmpty())
         {
             cmd.CommandText =
@@ -387,7 +478,7 @@ internal partial class OracleMessageStore : IMessageDatabase, IMessageInbox, IMe
         if (definition.TimestampColumnName.IsNotEmpty())
         {
             table.AddColumn<DateTimeOffset>(definition.TimestampColumnName)
-                .DefaultValueByExpression("SYS_EXTRACT_UTC(SYSTIMESTAMP)");
+                .DefaultValueByExpression("SYSTIMESTAMP AT TIME ZONE ''UTC''");
         }
 
         if (definition.MessageTypeColumnName.IsNotEmpty())
@@ -439,7 +530,7 @@ internal partial class OracleMessageStore : IMessageDatabase, IMessageInbox, IMe
 
         try
         {
-            var cmd = conn.CreateCommand(
+            await using var cmd = conn.CreateCommand(
                 $"SELECT connection_string FROM {SchemaName}.{DatabaseConstants.TenantsTableName} WHERE tenant_id = :id");
             cmd.With("id", tenantId);
             await using var reader = await cmd.ExecuteReaderAsync(_cancellation);
@@ -473,7 +564,7 @@ internal partial class OracleMessageStore : IMessageDatabase, IMessageInbox, IMe
 
         try
         {
-            var cmd = conn.CreateCommand(
+            await using var cmd = conn.CreateCommand(
                 $"SELECT tenant_id, connection_string FROM {SchemaName}.{DatabaseConstants.TenantsTableName} WHERE disabled = 0");
             await using var reader = await cmd.ExecuteReaderAsync(_cancellation);
 
@@ -504,12 +595,12 @@ internal partial class OracleMessageStore : IMessageDatabase, IMessageInbox, IMe
         {
             foreach (var assignment in tenantConnectionStrings.AllActiveByTenant())
             {
-                var deleteCmd = conn.CreateCommand(
+                await using var deleteCmd = conn.CreateCommand(
                     $"DELETE FROM {SchemaName}.{DatabaseConstants.TenantsTableName} WHERE tenant_id = :tid");
                 deleteCmd.With("tid", assignment.TenantId);
                 await deleteCmd.ExecuteNonQueryAsync(_cancellation);
 
-                var insertCmd = conn.CreateCommand(
+                await using var insertCmd = conn.CreateCommand(
                     $"INSERT INTO {SchemaName}.{DatabaseConstants.TenantsTableName} (tenant_id, connection_string) VALUES (:tid, :cs)");
                 insertCmd.With("tid", assignment.TenantId);
                 insertCmd.With("cs", assignment.Value);
@@ -529,7 +620,7 @@ internal partial class OracleMessageStore : IMessageDatabase, IMessageInbox, IMe
         try
         {
             // Oracle MERGE for upsert
-            var cmd = conn.CreateCommand(
+            await using var cmd = conn.CreateCommand(
                 $"MERGE INTO {SchemaName}.{DatabaseConstants.TenantsTableName} t USING (SELECT :id AS tenant_id FROM DUAL) s ON (t.tenant_id = s.tenant_id) WHEN MATCHED THEN UPDATE SET connection_string = :conn, disabled = 0 WHEN NOT MATCHED THEN INSERT (tenant_id, connection_string, disabled) VALUES (:id, :conn, 0)");
             cmd.With("id", tenantId);
             cmd.With("conn", connectionString);
@@ -547,7 +638,7 @@ internal partial class OracleMessageStore : IMessageDatabase, IMessageInbox, IMe
         await conn.OpenAsync(_cancellation);
         try
         {
-            var cmd = conn.CreateCommand(
+            await using var cmd = conn.CreateCommand(
                 $"UPDATE {SchemaName}.{DatabaseConstants.TenantsTableName} SET disabled = :disabled WHERE tenant_id = :id");
             cmd.With("id", tenantId);
             cmd.With("disabled", disabled ? 1 : 0);
@@ -565,7 +656,7 @@ internal partial class OracleMessageStore : IMessageDatabase, IMessageInbox, IMe
         await conn.OpenAsync(_cancellation);
         try
         {
-            var cmd = conn.CreateCommand(
+            await using var cmd = conn.CreateCommand(
                 $"DELETE FROM {SchemaName}.{DatabaseConstants.TenantsTableName} WHERE tenant_id = :id");
             cmd.With("id", tenantId);
             await cmd.ExecuteNonQueryAsync(_cancellation);

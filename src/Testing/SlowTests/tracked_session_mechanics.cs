@@ -27,13 +27,13 @@ public class tracked_session_mechanics
                 opts.Discovery.DisableConventionalDiscovery();
                 opts.PublishAllMessages().ToPort(port2);
                 opts.ListenAtPort(port1);
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
         
         using var receiver = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
                 opts.ListenAtPort(port2);
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         await Should.ThrowAsync<WolverineRequestReplyException>(async () =>
         {
@@ -51,7 +51,7 @@ public class tracked_session_mechanics
             .UseWolverine(opts =>
             {
 
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         // Should finish cleanly
         var tracked = await host.SendMessageAndWaitAsync(new TriggerScheduledMessage("Chiefs"));
@@ -69,14 +69,13 @@ public class tracked_session_mechanics
     public async Task deal_with_locally_scheduled_execution()
     {
         #region sample_dealing_with_locally_scheduled_messages
-
         // In this case we're just executing everything in memory
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
                 opts.PersistMessagesWithPostgresql(Servers.PostgresConnectionString, "wolverine");
                 opts.Policies.UseDurableInboxOnAllListeners();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         // Should finish cleanly
         var tracked = await host.SendMessageAndWaitAsync(new TriggerScheduledMessage("Chiefs"));
@@ -96,7 +95,6 @@ public class tracked_session_mechanics
     public async Task handle_scheduled_delivery_to_external_transport()
     {
         #region sample_handling_scheduled_delivery_to_external_transport
-
         var port1 = PortFinder.GetAvailablePort();
         var port2 = PortFinder.GetAvailablePort();
 
@@ -105,13 +103,13 @@ public class tracked_session_mechanics
             {
                 opts.PublishMessage<ScheduledMessage>().ToPort(port2);
                 opts.ListenAtPort(port1);
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
         
         using var receiver = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
                 opts.ListenAtPort(port2);
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
         
         // Should finish cleanly
         var tracked = await sender
@@ -151,7 +149,6 @@ public static class RequestResponseHandler
     public static ResponseForRequest? Handle(RequestResponse msg) => msg.WillReturn ? new(msg.Text) : null;
 
     #region sample_handlers_for_trigger_scheduled_message
-
     public static DeliveryMessage<ScheduledMessage> Handle(TriggerScheduledMessage message)
     {
         // This causes a message to be scheduled for delivery in 5 minutes from now

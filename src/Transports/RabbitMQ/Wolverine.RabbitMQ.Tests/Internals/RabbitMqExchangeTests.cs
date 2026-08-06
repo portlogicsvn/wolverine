@@ -51,12 +51,27 @@ public class configuration_model_specs
 
         await exchange.DeclareAsync(channel, NullLogger.Instance);
 
-        await channel.Received().ExchangeDeclareAsync("foo", "fanout", false, true, (IDictionary<string, object?>)exchange.Arguments);
+        await channel.Received().ExchangeDeclareAsync("foo", "fanout", false, true, (IDictionary<string, object?>)exchange.Arguments, cancellationToken: Arg.Any<CancellationToken>());
 
         exchange.HasDeclared.ShouldBeTrue();
     }
 
+    [Fact]
+    public async Task exchange_declare_passive()
+    {
+        var channel = Substitute.For<IChannel>();
+        var exchange = new RabbitMqExchange("foo", new RabbitMqTransport())
+        {
+            DeclarePassive = true,
+        };
 
+        await exchange.DeclareAsync(channel, NullLogger.Instance);
+
+        await channel.Received().ExchangeDeclarePassiveAsync("foo", Arg.Any<CancellationToken>());
+
+        exchange.HasDeclared.ShouldBeTrue();
+    }
+    
     [Fact]
     public async Task exchange_declare_headers()
     {
@@ -70,7 +85,7 @@ public class configuration_model_specs
 
         await exchange.DeclareAsync(channel, NullLogger.Instance);
 
-        await channel.Received().ExchangeDeclareAsync("foo", "headers", false, true, (IDictionary<string, object?>)exchange.Arguments);
+        await channel.Received().ExchangeDeclareAsync("foo", "headers", false, true, (IDictionary<string, object?>)exchange.Arguments, cancellationToken: Arg.Any<CancellationToken>());
 
         exchange.HasDeclared.ShouldBeTrue();
     }

@@ -12,9 +12,10 @@ public class BufferedComplianceFixture : TransportComplianceFixture, IAsyncLifet
 {
     public BufferedComplianceFixture() : base(new Uri("asb://queue/buffered-receiver"), 120)
     {
+        MustReset = false;
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         var queueName = Guid.NewGuid().ToString();
         OutboundAddress = new Uri("asb://queue/" + queueName);
@@ -34,19 +35,15 @@ public class BufferedComplianceFixture : TransportComplianceFixture, IAsyncLifet
         });
     }
 
-    public new Task DisposeAsync()
-    {
-        return Task.CompletedTask;
-    }
-
     protected override Task AfterDisposeAsync()
     {
         return AzureServiceBusTesting.DeleteAllEmulatorObjectsAsync();
     }
 }
 
-[Trait("Category", "Flaky")]
-public class BufferedSendingAndReceivingCompliance : TransportCompliance<BufferedComplianceFixture>
+public class BufferedSendingAndReceivingCompliance(BufferedComplianceFixture fixture)
+    : TransportCompliance<BufferedComplianceFixture>(fixture),
+        IClassFixture<BufferedComplianceFixture>
 {
     [Fact]
     public virtual async Task dlq_mechanics()
@@ -63,9 +60,8 @@ public class BufferedSendingAndReceivingCompliance : TransportCompliance<Buffere
         var queue = transport.Queues[AzureServiceBusTransport.DeadLetterQueueName];
         await queue.InitializeAsync(NullLogger.Instance);
 
-        var messageReceiver = transport.BusClient.CreateReceiver(AzureServiceBusTransport.DeadLetterQueueName);
-        var queued = await messageReceiver.ReceiveMessageAsync();
+        await using var messageReceiver = transport.BusClient.CreateReceiver(AzureServiceBusTransport.DeadLetterQueueName);
+        var queued = await messageReceiver.ReceiveMessageAsync(cancellationToken: TestContext.Current.CancellationToken);
         queued.ShouldNotBeNull();
-
     }
 }

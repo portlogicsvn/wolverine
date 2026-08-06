@@ -11,14 +11,13 @@ public class using_custom_side_effect
     public async Task use_custom_side_effect()
     {
         var host = await Host.CreateDefaultBuilder()
-            .UseWolverine().StartAsync();
+            .UseWolverine().StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         await host.InvokeMessageAndWaitAsync(new RecordText(Guid.NewGuid(), "some text"));
     }
 }
 
-#region sample_RecordTextHandler
-
+#region sample_recordtexthandler
 // An options class
 public class PathSettings
 {
@@ -40,8 +39,7 @@ public class RecordTextHandler
 
 #endregion
 
-#region sample_WriteFile
-
+#region sample_writefile
 // ISideEffect is a Wolverine marker interface
 public class WriteFile : ISideEffect
 {

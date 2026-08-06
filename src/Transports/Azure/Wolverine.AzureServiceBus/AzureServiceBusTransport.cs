@@ -3,6 +3,7 @@ using Azure.Core;
 using Azure.Messaging.ServiceBus;
 using Azure.Messaging.ServiceBus.Administration;
 using JasperFx.Core;
+using JasperFx.Descriptors;
 using Microsoft.Extensions.Logging;
 using Wolverine.AzureServiceBus.Internal;
 using Wolverine.Configuration;
@@ -21,7 +22,7 @@ public partial class AzureServiceBusTransport : BrokerTransport<AzureServiceBusE
     private readonly Lazy<ServiceBusAdministrationClient> _managementClient;
 
     public readonly List<AzureServiceBusSubscription> Subscriptions = new();
-    private string _hostName = null!;
+    private string? _hostName;
     public const string DeadLetterQueueName = DeadLetterQueueConstants.DefaultQueueName;
 
     public AzureServiceBusTransport() : this(ProtocolName)
@@ -40,6 +41,14 @@ public partial class AzureServiceBusTransport : BrokerTransport<AzureServiceBusE
 
         IdentifierDelimiter = ".";
     }
+
+    /// <summary>
+    /// CAUTION!!! If set to true, Wolverine will delete *every* queue and topic in the connected
+    /// Azure Service Bus namespace at application start up before provisioning any objects. This is
+    /// opt in, and is only intended for local development or testing against the Azure Service Bus
+    /// emulator. See <see cref="AzureServiceBusConfiguration.DeleteAllExistingObjectsOnStartup"/>
+    /// </summary>
+    public bool DeleteAllExistingObjectsOnStartup { get; set; }
 
     public async Task DeleteAllObjectsAsync()
     {
@@ -71,10 +80,43 @@ public partial class AzureServiceBusTransport : BrokerTransport<AzureServiceBusE
         }
     }
 
+    /// <summary>
+    /// Azure Service Bus accepts only letters, numbers, periods, hyphens and underscores in an entity
+    /// name segment (plus '/' as the segment separator for hierarchical paths). Anything else comes
+    /// back from the management API as a 400 with SubCode=40000 at provisioning time, which
+    /// <see cref="BrokerTransport{TEndpoint}.InitializeAsync"/> then retries twenty times over two
+    /// minutes before reporting only "Unable to initialize the Broker asb in time".
+    ///
+    /// That is what GH-3786 was: conventional routing derives its queue name from the message type,
+    /// and a handler taking an ARRAY -- <c>Handle(BatchedItem[] items)</c> -- yields
+    /// "…bugs.batcheditem[]". One such handler anywhere in the assembly took down broker startup for
+    /// every conventionally-routed host in it. Generic and nested message types ('&lt;', '&gt;', ',', '+')
+    /// have the same shape.
+    ///
+    /// Substituting rather than stripping keeps distinct type names distinct: <c>Foo[]</c> becomes
+    /// "foo__" and stays separable from <c>Foo</c>. No name that works today changes -- a name
+    /// containing an illegal character could never have been provisioned in the first place.
+    /// </summary>
     public override string SanitizeIdentifier(string identifier)
     {
-        return identifier.ToLowerInvariant();
+        var lowered = identifier.ToLowerInvariant();
+
+        char[]? corrected = null;
+        for (var i = 0; i < lowered.Length; i++)
+        {
+            if (isLegalEntityCharacter(lowered[i])) continue;
+
+            corrected ??= lowered.ToCharArray();
+            corrected[i] = '_';
+        }
+
+        return corrected is null ? lowered : new string(corrected);
     }
+
+    // '/' is kept because Azure Service Bus allows hierarchical entity PATHS, and an application
+    // already running against a name like "orders/priority" must keep addressing the same entity.
+    private static bool isLegalEntityCharacter(char c)
+        => char.IsAsciiLetterOrDigit(c) || c is '.' or '-' or '_' or '/';
 
     internal LightweightCache<string, AzureServiceBusTenant> Tenants { get; } = new(key => new AzureServiceBusTenant(key));
 
@@ -84,9 +126,39 @@ public partial class AzureServiceBusTransport : BrokerTransport<AzureServiceBusE
     /// </summary>
     public bool SystemQueuesEnabled { get; set; } = true;
 
+    private int _prefetchCount;
+
+    /// <summary>
+    ///     The transport-wide default for the number of messages that the underlying Azure Service
+    ///     Bus receivers eagerly buffer on the client ahead of any ReceiveMessagesAsync() calls.
+    ///     Applied to every listening endpoint that does not override PrefetchCount itself. The
+    ///     default is 0 (prefetch is disabled). Be aware that prefetched messages age against the
+    ///     queue's message lock duration while they sit in the client buffer, so an oversized
+    ///     prefetch combined with slow handlers leads to lock-lost redeliveries.
+    /// </summary>
+    public int PrefetchCount
+    {
+        get => _prefetchCount;
+        set
+        {
+            if (value < 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(value), value,
+                    "PrefetchCount cannot be negative");
+            }
+
+            _prefetchCount = value;
+        }
+    }
+
+    [IgnoreDescription]
     public LightweightCache<string, AzureServiceBusQueue> Queues { get; }
+    [IgnoreDescription]
     public LightweightCache<string, AzureServiceBusTopic> Topics { get; }
 
+    // Contains shared access key / password — raw value hidden to avoid
+    // leaking secrets in diagnostic views. Surfaced via ConnectionSummary below.
+    [IgnoreDescription]
     public string? ConnectionString { get; set; }
 
     /// <summary>
@@ -94,13 +166,34 @@ public partial class AzureServiceBusTransport : BrokerTransport<AzureServiceBusE
     /// When set, the management client uses this instead of ConnectionString.
     /// Useful for the Azure Service Bus Emulator which exposes management on a different port.
     /// </summary>
+    [IgnoreDescription]
     public string? ManagementConnectionString { get; set; }
 
+    /// <summary>
+    /// The configured connection string with the <c>SharedAccessKey</c> value
+    /// masked. Safe to render in diagnostic output.
+    /// </summary>
+    public string? ConnectionSummary => ConnectionString == null
+        ? null
+        : ConnectionStringRedactor.Redact(ConnectionString, "SharedAccessKey");
+
+    /// <summary>
+    /// The configured management connection string with the <c>SharedAccessKey</c>
+    /// value masked. Safe to render in diagnostic output.
+    /// </summary>
+    public string? ManagementConnectionSummary => ManagementConnectionString == null
+        ? null
+        : ConnectionStringRedactor.Redact(ManagementConnectionString, "SharedAccessKey");
+
     public string? FullyQualifiedNamespace { get; set; }
+    [IgnoreDescription]
     public TokenCredential? TokenCredential { get; set; }
+    [IgnoreDescription]
     public AzureNamedKeyCredential? NamedKeyCredential { get; set; }
+    [IgnoreDescription]
     public AzureSasCredential? SasCredential { get; set; }
 
+    [ChildDescription]
     public ServiceBusClientOptions ClientOptions { get; } = new()
     {
         TransportType = ServiceBusTransportType.AmqpTcp
@@ -150,9 +243,14 @@ public partial class AzureServiceBusTransport : BrokerTransport<AzureServiceBusE
         }
     }
     
+    // GH-3740: both of these lazily *build a live Azure client* on first read. Diagnostic descriptions
+    // (JasperFx OptionsDescription, and through it Wolverine's ServiceCapabilities) reflect over every public
+    // property, so without this they would connect to Azure Service Bus as a side effect of describing the
+    // configuration -- and throw outright on any transport that has no connection information yet.
+    [IgnoreDescription]
     public ServiceBusClient BusClient => _busClient.Value;
 
-
+    [IgnoreDescription]
     public ServiceBusAdministrationClient ManagementClient => _managementClient.Value;
 
     public async ValueTask DisposeAsync()
@@ -172,7 +270,14 @@ public partial class AzureServiceBusTransport : BrokerTransport<AzureServiceBusE
     {
         if (!SystemQueuesEnabled) return;
 
-        var queueName = $"wolverine.response.{runtime.Options.ServiceName}.{runtime.DurabilitySettings.AssignedNodeNumber}";
+        // In Solo mode the assigned node number is always 1 (#3188) and the service name is not
+        // unique per host, so multiple Solo hosts on one namespace would share a response queue and
+        // cross-deliver replies — key on the always-unique UniqueNodeId instead. Balanced gets a
+        // unique AssignedNodeNumber via election. See #3189.
+        var responseNode = runtime.Options.Durability.Mode == DurabilityMode.Solo
+            ? runtime.Options.UniqueNodeId.ToString("N")
+            : runtime.DurabilitySettings.AssignedNodeNumber.ToString();
+        var queueName = $"wolverine.response.{runtime.Options.ServiceName}.{responseNode}";
 
         var queue = Queues[queueName];
 
@@ -204,25 +309,52 @@ public partial class AzureServiceBusTransport : BrokerTransport<AzureServiceBusE
 
     internal AzureServiceBusQueue? RetryQueue { get; set; }
 
-    public string HostName
+    /// <summary>
+    /// The host name of the connected Azure Service Bus namespace, parsed from the <c>Endpoint</c> segment of
+    /// <see cref="ConnectionString"/> when there is one, and otherwise the configured
+    /// <see cref="FullyQualifiedNamespace"/> (which *is* the host name for credential-based connections).
+    /// Null only when this transport has no connection information at all.
+    /// </summary>
+    public string? HostName
     {
         get
         {
+            // GH-3740: this used to blow up with a NullReferenceException on `ConnectionString!` for every
+            // credential-based connection (FullyQualifiedNamespace + TokenCredential / NamedKeyCredential /
+            // SasCredential), where there is no connection string at all. Being a public getter, it was
+            // reached reflectively by JasperFx's OptionsDescription while building the Wolverine
+            // ServiceCapabilities snapshot, so a perfectly valid managed-identity setup could never complete
+            // a CritterWatch handshake.
             if (_hostName == null)
             {
-                var parts = ConnectionString!.Split(';');
-                foreach (var part in parts)
+                foreach (var part in ConnectionString?.Split(';') ?? [])
                 {
-                    var split = part.Split('=');
-                    if (split[0].EqualsIgnoreCase("Endpoint"))
+                    // Only split on the FIRST '=' -- SharedAccessKey values are base64 and routinely
+                    // carry trailing '=' padding.
+                    var split = part.Split('=', 2);
+                    if (split.Length == 2 && split[0].Trim().EqualsIgnoreCase("Endpoint") &&
+                        Uri.TryCreate(split[1].Trim(), UriKind.Absolute, out var uri))
                     {
-                        _hostName = new Uri(split[1]).Host;
+                        _hostName = uri.Host;
+                        break;
                     }
                 }
+
+                _hostName ??= FullyQualifiedNamespace;
             }
 
-            return _hostName!;
+            return _hostName;
         }
+    }
+
+    public override string? DescribeEndpoint()
+    {
+        if (!string.IsNullOrEmpty(FullyQualifiedNamespace)) return FullyQualifiedNamespace;
+
+        // The Endpoint host inside the connection string is the namespace FQDN; only the SharedAccessKey is secret.
+        if (!string.IsNullOrEmpty(ConnectionString)) return HostName;
+
+        return null;
     }
 
     protected override IEnumerable<Endpoint> explicitEndpoints()
@@ -280,10 +412,18 @@ public partial class AzureServiceBusTransport : BrokerTransport<AzureServiceBusE
         throw new ArgumentOutOfRangeException(nameof(uri));
     }
 
-    public override ValueTask ConnectAsync(IWolverineRuntime runtime)
+    public override async ValueTask ConnectAsync(IWolverineRuntime runtime)
     {
-        // we're going to use a client per endpoint
-        return ValueTask.CompletedTask;
+        if (DeleteAllExistingObjectsOnStartup)
+        {
+            runtime.Logger.LogWarning(
+                "Deleting all existing queues and topics in the Azure Service Bus namespace at {Broker} because DeleteAllExistingObjectsOnStartup() was enabled",
+                DescribeEndpoint());
+
+            await DeleteAllObjectsAsync();
+        }
+
+        // otherwise, we're going to use a client per endpoint
     }
 
     public WolverineTransportHealthCheck BuildHealthCheck(IWolverineRuntime runtime)

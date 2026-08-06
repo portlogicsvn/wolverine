@@ -21,16 +21,17 @@ public class event_forwarding_routing_bug
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery().IncludeType(typeof(SomeEventHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.PublishAllMessages().ToLocalQueue("forwarded-events");
                 opts.Services.AddMarten(m =>
                     {
                         m.Connection(Servers.PostgresConnectionString);
                         m.DatabaseSchemaName = "forwarding_routing";
                     })
-                    .IntegrateWithWolverine()
-                    .EventForwardingToWolverine();
+                    .IntegrateWithWolverine(x => x.UseFastEventForwarding = true);
             })
-            .StartAsync();
+            .StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var session = await host.SendMessageAndWaitAsync(new Event<SomeEvent>(new SomeEvent()));
         session.Executed.SingleEnvelope<IEvent<SomeEvent>>()
@@ -47,6 +48,8 @@ public class event_forwarding_routing_bug
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery().IncludeType(typeof(SomeEventHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.PublishAllMessages().ToLocalQueue("forwarded-events");
                 opts.Services.AddMarten(m =>
                     {
@@ -56,7 +59,7 @@ public class event_forwarding_routing_bug
                     .IntegrateWithWolverine()
                     .PublishEventsToWolverine("forwarded-events");
             })
-            .StartAsync();
+            .StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var bus = host.MessageBus();
         bus.PreviewSubscriptions(new Event<SomeEvent>(new SomeEvent()))

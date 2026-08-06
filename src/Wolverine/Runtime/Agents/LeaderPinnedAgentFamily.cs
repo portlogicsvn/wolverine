@@ -16,12 +16,20 @@ internal class LeaderPinnedListenerAgent : IAgent
         _endpoint = endpoint;
         _runtime = runtime;
 
-        Uri = new Uri($"{LeaderPinnedListenerFamily.SchemeName}://{_endpoint.EndpointName}");
+        // Include the endpoint's transport scheme so two endpoints that share the same logical
+        // EndpointName across different transports (e.g. a "critterwatch" queue on both Rabbit and
+        // SQS) don't collapse to the same agent Uri and collide in the family's ToDictionary. GH-3027.
+        Uri = new Uri($"{LeaderPinnedListenerFamily.SchemeName}://{_endpoint.Uri.Scheme}/{_endpoint.EndpointName}");
     }
 
-    public Task StartAsync(CancellationToken cancellationToken)
+    public async Task StartAsync(CancellationToken cancellationToken)
     {
-        return _runtime.Endpoints.StartListenerAsync(_endpoint, cancellationToken);
+        await _runtime.Endpoints.StartListenerAsync(_endpoint, cancellationToken);
+
+        // GH-3604: same cached-instance hazard as ExclusiveListenerAgent -- a leader-pinned listener is
+        // stopped on the old leader and started on the new one, so every election after the first would
+        // otherwise restart this listener while still reporting it Stopped.
+        Status = AgentStatus.Running;
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
@@ -33,6 +41,12 @@ internal class LeaderPinnedListenerAgent : IAgent
     public Uri Uri { get; set; }
 
     public AgentStatus Status { get; set; } = AgentStatus.Running;
+
+    /// <summary>
+    /// Human-readable description for monitoring tools — see
+    /// <see cref="IAgent.Description"/>.
+    /// </summary>
+    public string Description => $"Leader-pinned listener for {_endpoint.Uri} — runs only on the cluster's elected leader node, so the listening role moves with leader elections.";
 
     public Task<HealthCheckResult> CheckHealthAsync(HealthCheckContext context,
         CancellationToken cancellationToken = default)
@@ -51,6 +65,7 @@ internal class LeaderPinnedListenerAgent : IAgent
         return Task.FromResult(listeningAgent.Status switch
         {
             ListeningStatus.TooBusy => HealthCheckResult.Degraded($"Listener {_endpoint.EndpointName} is too busy"),
+            ListeningStatus.Paused => HealthCheckResult.Degraded($"Listener {_endpoint.EndpointName} is administratively paused and will not self-resume"),
             ListeningStatus.GloballyLatched => HealthCheckResult.Unhealthy($"Listener {_endpoint.EndpointName} is globally latched"),
             _ => HealthCheckResult.Healthy()
         });

@@ -14,13 +14,14 @@ public class Bug_191_marten_aggregate_handler_command_should_not_require_version
 {
     private IHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
                 opts.Discovery.DisableConventionalDiscovery()
                     .IncludeType(typeof(UpdateThingAggregateHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
 
                 opts.Services.AddMarten(marten =>
                 {
@@ -31,7 +32,7 @@ public class Bug_191_marten_aggregate_handler_command_should_not_require_version
             }).StartAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _host.StopAsync();
         _host.Dispose();
@@ -44,7 +45,7 @@ public class Bug_191_marten_aggregate_handler_command_should_not_require_version
         using (var session = _host.Services.GetRequiredService<IDocumentStore>().LightweightSession())
         {
             session.Events.StartStream<Thing>(id, new ThingStarted(id, "stuff"));
-            await session.SaveChangesAsync();
+            await session.SaveChangesAsync(TestContext.Current.CancellationToken);
         }
 
         await _host.InvokeMessageAndWaitAsync(new UpdateThing(id, "new stuff"));

@@ -3,59 +3,47 @@ using JasperFx.CodeGeneration;
 using JasperFx.Core;
 using JasperFx.Events.Projections;
 using Marten;
-using Marten.Events.Projections;
 using MartenTests.Distribution.TripDomain;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Npgsql;
-using Weasel.Core;
+using System.Collections.Concurrent;
 using Weasel.Postgresql;
-using Weasel.Postgresql.Tables;
 using Wolverine;
 using Wolverine.Marten;
 using Wolverine.Marten.Distribution;
 using Wolverine.MessagePack;
 using Wolverine.Runtime.Agents;
 using Wolverine.Tracking;
-using Xunit.Abstractions;
-
+using Xunit;
 namespace MartenTests.Distribution.Support;
 
-public abstract class SingleTenantContext : IAsyncLifetime
+public abstract class SingleTenantContext(ITestOutputHelper output) : IAsyncLifetime
 {
-    private readonly List<IHost> _hosts = new();
-    private readonly ITestOutputHelper _output;
+    private readonly ConcurrentBag<IHost> _hosts = [];
+    private readonly ConcurrentBag<XUnitEventObserver> _observers = [];
     protected IHost theOriginalHost = null!;
-    internal EventSubscriptionAgentFamily theProjectionAgents = null!;
 
-    public SingleTenantContext(ITestOutputHelper output)
+    public async ValueTask InitializeAsync()
     {
-        _output = output;
-    }
-
-    public async Task InitializeAsync()
-    {
-        await dropSchema();
+        await DropSchemasAsync("csp");
 
         theOriginalHost = await startHostAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
-        _hosts.Reverse();
-        foreach (var host in _hosts.ToArray())
-        {
-            await shutdownHostAsync(host);
-        }
+        _observers.Each(x => x.Dispose());
+        await Task.WhenAll(_hosts.Select(ShutdownHostAsync));
+        _hosts.Clear();
     }
 
-    private async Task shutdownHostAsync(IHost host)
+    private async Task ShutdownHostAsync(IHost host)
     {
         host.GetRuntime().Agents.DisableHealthChecks();
         await host.StopAsync();
         host.Dispose();
-        _hosts.Remove(host);
     }
 
     protected async Task<IHost> startHostAsync()
@@ -69,7 +57,6 @@ public abstract class SingleTenantContext : IAsyncLifetime
                 opts.UseMessagePackSerialization();
 
                 #region sample_opt_into_wolverine_managed_subscription_distribution
-
                 opts.Services.AddMarten(m =>
                     {
                         m.DisableNpgsqlLogging = true;
@@ -90,16 +77,13 @@ public abstract class SingleTenantContext : IAsyncLifetime
 
                 #endregion
 
-                opts.Services.AddSingleton<ILoggerProvider>(new OutputLoggerProvider(_output));
-
+                opts.Services.AddSingleton<ILoggerProvider>(new OutputLoggerProvider(output));
+                opts.Discovery.DisableConventionalDiscovery();
                 opts.CodeGeneration.TypeLoadMode = TypeLoadMode.Auto;
             }).StartAsync();
 
-        new XUnitEventObserver(host, _output);
-
+        _observers.Add(new XUnitEventObserver(host, output));
         _hosts.Add(host);
-
-        theProjectionAgents ??= host.Services.GetServices<IAgentFamily>().OfType<EventSubscriptionAgentFamily>().Single();
 
         return host;
     }
@@ -124,29 +108,31 @@ public abstract class SingleTenantContext : IAsyncLifetime
                     })
                     .IntegrateWithWolverine(m => m.UseWolverineManagedEventSubscriptionDistribution = true);
 
-                opts.Services.AddSingleton<ILoggerProvider>(new OutputLoggerProvider(_output));
+                opts.Services.AddSingleton<ILoggerProvider>(new OutputLoggerProvider(output));
                 
                 opts.UseMessagePackSerialization();
-
-                opts.CodeGeneration.TypeLoadMode = TypeLoadMode.Auto;
             }).StartAsync();
 
-        new XUnitEventObserver(host, _output);
-
+        _observers.Add(new XUnitEventObserver(host, output));
         _hosts.Add(host);
-
-        theProjectionAgents ??= host.Services.GetServices<IAgentFamily>().OfType<EventSubscriptionAgentFamily>().Single();
 
         return host;
     }
 
-    private static async Task dropSchema()
+    private static async Task DropSchemasAsync(params string[] names)
     {
         using var conn = new NpgsqlConnection(Servers.PostgresConnectionString);
         await conn.OpenAsync();
-        await new Table(new DbObjectName("csp", "wolverine_node_records")).DropAsync(conn);
-        await new Table(new DbObjectName("csp", "wolverine_nodes")).DropAsync(conn);
-        await new Table(new DbObjectName("csp", "wolverine_node_assignments")).DropAsync(conn);
+        foreach (var name in names)
+            await conn.DropSchemaAsync(name);
         await conn.CloseAsync();
+    }
+
+    protected static async Task<string[]> GetAgentUrisAsync(IHost host)
+    {
+        var agentsFamily = host.Services.GetServices<IAgentFamily>()
+            .OfType<EventSubscriptionAgentFamily>().Single();
+        var agents = await agentsFamily.AllKnownAgentsAsync();
+        return [.. agents.Select(x => x.AbsoluteUri)];
     }
 }

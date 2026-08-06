@@ -3,8 +3,6 @@ using Microsoft.Extensions.Hosting;
 using Shouldly;
 using Wolverine.Tracking;
 using Xunit;
-using Xunit.Abstractions;
-
 namespace Wolverine.RabbitMQ.Tests.Bugs;
 
 /// <summary>
@@ -44,7 +42,7 @@ public class Bug_2360_publish_with_require_response
                 opts.Discovery.DisableConventionalDiscovery()
                     .IncludeType(typeof(Bug2360InitHandler))
                     .IncludeType(typeof(Bug2360ResponseHandler));
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         // The "server" service that handles the request and returns a response
         using var receiver = await Host.CreateDefaultBuilder()
@@ -59,7 +57,7 @@ public class Bug_2360_publish_with_require_response
 
                 opts.Discovery.DisableConventionalDiscovery()
                     .IncludeType(typeof(Bug2360RequestHandler));
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         // Send the initial message that triggers PublishAsync with RequireResponse
         var session = await sender
@@ -93,7 +91,7 @@ public class Bug_2360_publish_with_require_response
                 opts.PublishMessage<Bug2360Request>().ToRabbitQueue(receiverQueue);
 
                 opts.Discovery.DisableConventionalDiscovery();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         // The "server" service
         using var receiver = await Host.CreateDefaultBuilder()
@@ -108,11 +106,11 @@ public class Bug_2360_publish_with_require_response
 
                 opts.Discovery.DisableConventionalDiscovery()
                     .IncludeType(typeof(Bug2360RequestHandler));
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         // InvokeAsync should still work as a synchronous request/reply
         var bus = sender.MessageBus();
-        var response = await bus.InvokeAsync<Bug2360Response>(new Bug2360Request("InvokeTest"), timeout: 30.Seconds());
+        var response = await bus.InvokeAsync<Bug2360Response>(new Bug2360Request("InvokeTest"), cancellation: TestContext.Current.CancellationToken);
 
         response.ShouldNotBeNull();
         response.Reply.ShouldBe("Handled: InvokeTest");

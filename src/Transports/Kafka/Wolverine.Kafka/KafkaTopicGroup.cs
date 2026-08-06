@@ -43,13 +43,41 @@ public class KafkaTopicGroup : KafkaTopic, IBrokerEndpoint
 
         var config = GetEffectiveConsumerConfig();
 
-        if (Mode == EndpointMode.Durable)
+        ApplyHotTailConfig(config, runtime);
+
+        // Wire the Kafka client for the configured commit strategy (GH-3150).
+        KafkaOffsetCommitter.ApplyTo(config, CommitMode);
+
+        // GH-3454: the tracker is wired into the consumer's error callback (when not claimed by user
+        // configuration) and handed to the listener for IReportConnectionState
+        var tracker = new KafkaConnectionStateTracker();
+        var listener = new KafkaTopicGroupListener(this, config,
+            Parent.CreateConsumer(config, tracker), receiver,
+            runtime.LoggerFactory.CreateLogger<KafkaTopicGroupListener>(),
+            runtime.DurabilitySettings.DrainTimeout, connectionState: tracker);
+
+        // Broker-per-tenant (GH-3303): mirror the single-topic listener treatment — a shared listener on the
+        // default cluster plus one per-tenant listener on each tenant cluster, stamping the tenant id inbound.
+        if (Parent.Tenants.Any() && TenancyBehavior == TenancyBehavior.TenantAware)
         {
-            config.EnableAutoCommit = false;
+            var compound = new CompoundListener(Uri);
+            compound.Inner.Add(listener);
+
+            foreach (var tenant in Parent.Tenants)
+            {
+                var tenantConfig = cloneConsumerConfigForTenant(config, tenant);
+                var tenantReceiver = new ReceiverWithRules(receiver, [new TenantIdRule(tenant.TenantId)]);
+                var tenantTracker = new KafkaConnectionStateTracker();
+                var tenantListener = new KafkaTopicGroupListener(this, tenantConfig,
+                    tenant.Transport.CreateConsumer(tenantConfig, tenantTracker), tenantReceiver,
+                    runtime.LoggerFactory.CreateLogger<KafkaTopicGroupListener>(),
+                    runtime.DurabilitySettings.DrainTimeout, tenant.Transport, tenantTracker);
+                compound.Inner.Add(tenantListener);
+            }
+
+            return ValueTask.FromResult((IListener)compound);
         }
 
-        var listener = new KafkaTopicGroupListener(this, config,
-            Parent.CreateConsumer(config), receiver, runtime.LoggerFactory.CreateLogger<KafkaTopicGroupListener>());
         return ValueTask.FromResult((IListener)listener);
     }
 
@@ -64,7 +92,7 @@ public class KafkaTopicGroup : KafkaTopic, IBrokerEndpoint
         {
             var dlqTopic = Parent.Topics[Parent.DeadLetterQueueTopicName];
             dlqTopic.EnvelopeMapper ??= dlqTopic.BuildMapper(runtime);
-            deadLetterSender = new InlineKafkaSender(dlqTopic);
+            deadLetterSender = new InlineKafkaSender(dlqTopic, fixedDestination: true);
             return true;
         }
 
@@ -86,7 +114,7 @@ public class KafkaTopicGroup : KafkaTopic, IBrokerEndpoint
                 await client.ProduceAsync(topicName, new Message<string, byte[]>
                 {
                     Key = "ping",
-                    Value = System.Text.Encoding.Default.GetBytes("ping")
+                    Value = System.Text.Encoding.UTF8.GetBytes("ping")
                 });
             }
 
@@ -100,6 +128,8 @@ public class KafkaTopicGroup : KafkaTopic, IBrokerEndpoint
 
     new public async ValueTask TeardownAsync(ILogger logger)
     {
+        if (IsExternallyOwned) return;
+
         using var adminClient = Parent.CreateAdminClient();
         await adminClient.DeleteTopicsAsync(TopicNames);
     }
@@ -118,7 +148,19 @@ public class KafkaTopicGroup : KafkaTopic, IBrokerEndpoint
 
     new public async ValueTask SetupAsync(ILogger logger)
     {
+        if (IsExternallyOwned) return;
+
         using var adminClient = Parent.CreateAdminClient();
+        await SetupOnAsync(adminClient, logger);
+    }
+
+    /// <summary>
+    /// Create every topic in this group on the supplied admin client. Split out from <see cref="SetupAsync"/>
+    /// so the same multi-topic creation logic can be applied against a tenant cluster (broker-per-tenant, GH-3303).
+    /// </summary>
+    internal new async ValueTask SetupOnAsync(IAdminClient adminClient, ILogger logger)
+    {
+        if (IsExternallyOwned) return;
 
         foreach (var topicName in TopicNames)
         {
@@ -139,9 +181,29 @@ public class KafkaTopicGroup : KafkaTopic, IBrokerEndpoint
             }
             catch (CreateTopicsException e)
             {
-                if (e.Message.Contains("already exists.")) continue;
+                if (e.Results.Count > 0 && e.Results.All(x => x.Error.Code == ErrorCode.TopicAlreadyExists)) continue;
                 throw;
             }
+        }
+    }
+
+    /// <summary>
+    /// Called during transport startup. When AutoProvision is on for the parent
+    /// transport, ensure every Kafka topic in this group exists on the broker
+    /// before the listener subscribes. Without this, the KafkaTopicGroupListener's
+    /// consumer raises "Subscribed topic not available" on the first Consume().
+    /// Overrides the base KafkaTopic.InitializeAsync so the group's multi-topic
+    /// SetupAsync is invoked (not the single-topic base version).
+    /// Groups marked <see cref="KafkaTopic.IsExternallyOwned"/> are skipped so
+    /// externally-managed topics don't fail startup when the calling identity
+    /// lacks CreateTopics ACLs.
+    /// See https://github.com/JasperFx/wolverine/issues/2537.
+    /// </summary>
+    public override async ValueTask InitializeAsync(ILogger logger)
+    {
+        if (Parent.AutoProvision && !IsExternallyOwned)
+        {
+            await SetupAsync(logger);
         }
     }
 }

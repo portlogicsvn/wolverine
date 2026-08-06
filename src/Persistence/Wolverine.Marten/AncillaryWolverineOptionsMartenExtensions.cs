@@ -17,6 +17,7 @@ using Weasel.Core.Migrations;
 using Weasel.Postgresql;
 using Wolverine.Marten.Distribution;
 using Wolverine.Marten.Publishing;
+using Wolverine.Runtime.Agents;
 using Wolverine.Marten.Subscriptions;
 using Wolverine.Persistence;
 using Wolverine.Persistence.Durability;
@@ -57,6 +58,17 @@ public class AncillaryMartenIntegration
     /// </summary>
     public AutoCreate? AutoCreate { get; set; }
 
+    /// <summary>
+    /// Opt into Wolverine-managed distribution of this store's async projections and event
+    /// subscriptions (GH-3438), mirroring the main store's
+    /// <see cref="MartenIntegration.UseWolverineManagedEventSubscriptionDistribution"/>. This is what an
+    /// ancillary-only host — one with no main <c>AddMarten</c> that already enables it — must set to run
+    /// managed distribution and to expose the store to tooling (e.g. CritterWatch's projection admin)
+    /// that resolves the agent family through <c>IEventSubscriptionAgentFamily</c>. When a main store
+    /// already enables it, that registration wins and setting it here is redundant but harmless.
+    /// </summary>
+    public bool UseWolverineManagedEventSubscriptionDistribution { get; set; }
+
     internal void AssertValidity()
     {
         if (SchemaName.IsNotEmpty() && SchemaName != SchemaName.ToLowerInvariant())
@@ -93,8 +105,12 @@ public static class AncillaryWolverineOptionsMartenExtensions
 
             integration.SchemaName ??= runtime.Options.Durability.MessageStorageSchemaName ?? store.Options.DatabaseSchemaName;
 
-            // TODO -- hacky. Need a way to expose this in Marten
-            if (store.Tenancy.GetType().Name == "DefaultTenancy")
+            // Dispatch on database cardinality, mirroring the main-store integration. The old
+            // exact-type-name check ("DefaultTenancy") misrouted Marten's
+            // TenantPartitionedSingleDatabaseTenancy (marten#4864, a DefaultTenancy subclass for
+            // single-database stores with UseTenantPartitionedEvents) to the multi-tenanted
+            // message-database path, which then failed for lack of a master database.
+            if (store.Tenancy.Cardinality == JasperFx.Descriptors.DatabaseCardinality.Single)
             {
                 return BuildSinglePostgresqlMessageStore<T>(integration.SchemaName, integration.AutoCreate, store, runtime, logger);
             }
@@ -105,16 +121,35 @@ public static class AncillaryWolverineOptionsMartenExtensions
         expression.Services.AddType(typeof(IDatabaseSource), typeof(MessageDatabaseDiscovery),
             ServiceLifetime.Singleton);
 
-        // TODO -- watch the service registrations
+        // The concrete family already takes IEnumerable<IEventStore>, so one instance manages every
+        // registered store including the ancillaries.
         expression.Services.AddSingleton<EventSubscriptionAgentFamily>();
-        
-        
+
+        // GH-3438: the main-store integration aliases the family to IAgentFamily /
+        // IEventSubscriptionAgentFamily, but an ancillary-only host has no main integration to do that,
+        // so managed distribution and any tooling resolving the family through those interfaces get
+        // nothing. Register the aliases from here too when managed distribution is opted in. TryAdd so
+        // that a main store which already aliased them wins and we don't double-register (one family
+        // instance covers all stores either way). Gated on the flag because NodeAgentController
+        // distributes the agents of every registered IAgentFamily — an ancillary host that never asked
+        // for managed distribution must not suddenly start distributing.
+        if (integration.UseWolverineManagedEventSubscriptionDistribution)
+        {
+            expression.Services.TryAddSingleton<IAgentFamily>(s => s.GetRequiredService<EventSubscriptionAgentFamily>());
+            expression.Services.TryAddSingleton<IEventSubscriptionAgentFamily>(s => s.GetRequiredService<EventSubscriptionAgentFamily>());
+        }
+
         expression.Services.AddSingleton<IProjectionCoordinator<T>>(s =>
         {
-            var integration = s.GetService<MartenIntegration>();
+            var mainIntegration = s.GetService<MartenIntegration>();
             var store = s.GetRequiredService<T>();
-            
-            if (integration == null || !integration.UseWolverineManagedEventSubscriptionDistribution)
+
+            // Managed when the main store opted in (main+ancillary), or when this ancillary store did
+            // (ancillary-only) — the captured integration carries the ancillary flag.
+            var managed = integration.UseWolverineManagedEventSubscriptionDistribution
+                          || (mainIntegration?.UseWolverineManagedEventSubscriptionDistribution ?? false);
+
+            if (!managed)
             {
                 return new ProjectionCoordinator<T>(store, s.GetRequiredService<ILogger<ProjectionCoordinator>>());
             }
@@ -357,7 +392,7 @@ public static class AncillaryWolverineOptionsMartenExtensions
         {
             var runtime = sp.GetRequiredService<IWolverineRuntime>();
 
-            var relay = new PublishingRelay(subscriptionName);
+            var relay = new PublishingRelay(subscriptionName, opts.Events.TenancyStyle);
             configure?.Invoke(relay);
 
             var subscription = new WolverineSubscriptionRunner(relay, runtime);

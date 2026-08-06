@@ -16,7 +16,6 @@ public class Samples
     public static async Task listen_to_topics()
     {
         #region sample_publishing_to_rabbit_mq_topics_exchange
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -37,14 +36,12 @@ public class Samples
         #endregion
 
         #region sample_sending_topic_routed_message
-
         var publisher = host.MessageBus();
         await publisher.SendAsync(new Message1());
 
         #endregion
 
         #region sample_sending_to_a_specific_topic
-
         await publisher.BroadcastToTopicAsync("color.*", new Message1());
 
         #endregion
@@ -53,7 +50,6 @@ public class Samples
     public static async Task disable_system_queue()
     {
         #region sample_disable_rabbit_mq_system_queue
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -82,7 +78,6 @@ public class Samples
     public static async Task use_rabbit_for_control_queues()
     {
         #region sample_using_rabbit_mq_control_queues
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -100,7 +95,6 @@ public class Samples
     public static async Task use_listener_connection_only()
     {
         #region sample_only_use_listener_connection_with_rabbitmq
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -128,7 +122,6 @@ public class Samples
     public static async Task use_sender_connection_only()
     {
         #region sample_only_use_sending_connection_with_rabbitmq
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -153,10 +146,33 @@ public class Samples
         #endregion
     }
 
+    public static async Task configure_rabbit_mq_cluster_nodes()
+    {
+        #region sample_rabbit_mq_cluster_nodes
+        using var host = await Host.CreateDefaultBuilder()
+            .UseWolverine(opts =>
+            {
+                // Configure the shared connection settings (credentials, TLS, etc.)
+                // first via UseRabbitMq, then declare each cluster node. The
+                // RabbitMQ.NET client picks one node and handles failover
+                // between them on connection loss.
+                opts.UseRabbitMq(f =>
+                    {
+                        f.UserName = "guest";
+                        f.Password = "guest";
+                        f.Ssl.Enabled = true;
+                        f.Ssl.ServerName = "rabbit-cluster";
+                    })
+                    .AddClusterNode("rabbit-1.local")
+                    .AddClusterNode("rabbit-2.local")
+                    .AddClusterNode("rabbit-3.local");
+            }).StartAsync();
+        #endregion
+    }
+
     public static async Task listen_to_queue()
     {
         #region sample_listening_to_rabbitmq_queue
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -192,7 +208,6 @@ public class Samples
     public static async Task interop_with_masstransit()
     {
         #region sample_rabbitmq_interop_with_masstransit
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -230,7 +245,6 @@ public class Samples
     public static async Task interop_with_cloudevents()
     {
         #region sample_rabbitmq_interop_with_cloudevents
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -253,7 +267,6 @@ public class Samples
     public static async Task publish_to_queue()
     {
         #region sample_publish_to_rabbitmq_queue
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -275,7 +288,6 @@ public class Samples
     public static async Task publish_to_exchange()
     {
         #region sample_publish_to_rabbitmq_exchange
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -303,7 +315,6 @@ public class Samples
     public static async Task publish_to_routing_key()
     {
         #region sample_publish_to_rabbitmq_routing_key
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -328,7 +339,6 @@ public class Samples
     public static async Task autopurge()
     {
         #region sample_autopurge_rabbitmq
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -342,7 +352,6 @@ public class Samples
     public static async Task autopurge_one_queue()
     {
         #region sample_autopurge_selective_queues
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -357,7 +366,6 @@ public class Samples
     public static async Task out_of_the_box_conventions()
     {
         #region sample_activating_rabbit_mq_conventional_routing
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -372,7 +380,6 @@ public class Samples
     public static async Task configure_conventions()
     {
         #region sample_activating_rabbit_mq_conventional_routing_customized
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -411,7 +418,6 @@ public class Samples
     public static async Task customize_dead_letter_queueing()
     {
         #region sample_overriding_rabbit_mq_dead_letter_queue
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -434,7 +440,6 @@ public class Samples
     public static async Task customize_dead_letter_queueing_to_interop()
     {
         #region sample_overriding_rabbit_mq_dead_letter_queue_interop_friendly
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -462,7 +467,6 @@ public class Samples
     public static async Task disable_dead_letter_queueing_to_wolverine()
     {
         #region sample_disable_rabbit_mq_dead_letter_queue
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -488,7 +492,6 @@ public class Samples
     public static async Task configuring_to_receive_json_from_external_systems()
     {
         #region sample_setting_default_message_type_with_rabbit
-
         var builder = Host.CreateApplicationBuilder();
         builder.UseWolverine(opts =>
         {
@@ -512,7 +515,6 @@ public class Samples
     public static async Task configuring_custom_interop()
     {
         #region sample_registering_custom_rabbit_mq_envelope_mapper
-
         var builder = Host.CreateApplicationBuilder();
 
         builder.UseWolverine(opts =>
@@ -540,7 +542,6 @@ public class Samples
     public static async Task publish_by_topic_rules()
     {
         #region sample_rabbit_topic_rules
-
         var builder = Host.CreateApplicationBuilder();
         builder.UseWolverine(opts =>
         {
@@ -564,8 +565,7 @@ public class Samples
 
     public static async Task configure_quorum_queues()
     {
-        #region sample_configuring_quorum_or_streams_in_rabbit_MQ
-
+        #region sample_configuring_quorum_or_streams_in_rabbit_mq
         var builder = Host.CreateApplicationBuilder();
         builder.UseWolverine(opts =>
         {
@@ -594,10 +594,10 @@ public class Samples
         #endregion
     }
 
-    public static void configure_routing_conventions()
+    public static async Task configure_routing_conventions()
     {
         #region sample_conventional_routing_exchange_conventions
-        var sender = WolverineHost.For(opts =>
+        var sender = await WolverineHost.ForAsync(opts =>
         {
             opts.UseRabbitMq()
                 .UseConventionalRouting(conventions =>
@@ -613,8 +613,8 @@ public class Samples
                     });
                 });
         });
-        
-        var receiver = WolverineHost.For(opts =>
+
+        var receiver = await WolverineHost.ForAsync(opts =>
         {
             opts.UseRabbitMq()
                 .UseConventionalRouting(conventions =>
@@ -635,11 +635,10 @@ public class Samples
                 });
         });
         #endregion
-      
+
     }
 
-    #region sample_RabbitMQ_configuration_in_wolverine_extension
-
+    #region sample_rabbitmq_configuration_in_wolverine_extension
     public class MyModuleExtension : IWolverineExtension
     {
         public void Configure(WolverineOptions options)
@@ -657,7 +656,6 @@ public class Samples
 }
 
 #region sample_rabbit_itenantmessage
-
 public interface ITenantMessage
 {
     string TenantId { get; }
@@ -672,7 +670,6 @@ public static class AdditionalBrokers
     public static async Task configure()
     {
         #region sample_configure_additional_rabbit_mq_broker
-
         var builder = Host.CreateApplicationBuilder();
         builder.UseWolverine(opts =>
         {
@@ -719,7 +716,6 @@ public static class GlobalTopology
     public static async Task configure()
     {
         #region sample_global_partitioned_with_rabbit_mq
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {

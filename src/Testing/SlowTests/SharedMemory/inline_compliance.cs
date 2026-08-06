@@ -11,7 +11,7 @@ public class InlineSharedMemoryInlineFixture : TransportComplianceFixture, IAsyn
         AllLocally = true;
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         await SharedMemoryQueueManager.ClearAllAsync();
         
@@ -27,7 +27,10 @@ public class InlineSharedMemoryInlineFixture : TransportComplianceFixture, IAsyn
         });
     }
 
-    public new Task DisposeAsync()
+    // AfterDisposeAsync, not a `new DisposeAsync`: TransportCompliance<T> disposes the fixture through
+    // the statically-bound base method, so a hiding override never runs and the queues were never cleared.
+    // See #3763.
+    protected override Task AfterDisposeAsync()
     {
         return SharedMemoryQueueManager.ClearAllAsync();
     }

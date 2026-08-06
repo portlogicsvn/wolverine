@@ -51,6 +51,16 @@ public class SqlServerTransport : BrokerTransport<SqlServerQueue>
     /// </summary>
     public string MessageStorageSchemaName { get; private set; } = "dbo";
 
+    /// <summary>
+    /// Opt into the higher-throughput queue table storage layout: queue and scheduled tables are
+    /// clustered on a monotonic <c>seq</c> identity column (for FIFO dequeue and contiguous deletes)
+    /// with a unique non-clustered index on the message id, instead of a clustered primary key on a
+    /// random Guid. Off by default. Enable via <see cref="SqlServerPersistenceExpression.OptimizeQueueThroughput"/>.
+    /// This is the default for every queue in this transport; an individual queue can opt in or out
+    /// through <see cref="SqlServerQueue.OptimizeThroughput"/> (sharded topology queues opt in).
+    /// </summary>
+    public bool OptimizeQueueThroughput { get; set; }
+
     protected override IEnumerable<SqlServerQueue> endpoints()
     {
         return Queues;
@@ -63,7 +73,7 @@ public class SqlServerTransport : BrokerTransport<SqlServerQueue>
 
     public override string SanitizeIdentifier(string identifier)
     {
-        return identifier.Replace('-', '_').ToLower();
+        return identifier.Replace('-', '_').ToLowerInvariant();
     }
 
     protected override SqlServerQueue findEndpointByUri(Uri uri)
@@ -87,8 +97,23 @@ public class SqlServerTransport : BrokerTransport<SqlServerQueue>
         }
         else
         {
-            throw new InvalidOperationException(
-                "The Sql Server Transport can only be used if the message persistence is also Sql Server backed");
+            // #3248 — the Main envelope store is a different engine (e.g. a host that persists to
+            // PostgreSQL but wires a SQL Server queue transport). The transport's queue tables only need
+            // a SQL Server database, not the Main store, so bind to a same-engine store registered as
+            // Ancillary (see MessageStoreRole.Ancillary / role: passthrough) instead of throwing.
+            var sqlServerStores = await runtime.Stores.FindAllAsync<SqlServerMessageStore>();
+            if (sqlServerStores.Count > 0)
+            {
+                // A host can carry several same-engine stores (e.g. a primary + ancillary store on the
+                // same server); they are co-located in practice, so the first is a safe binding.
+                Storage = sqlServerStores[0];
+            }
+            else
+            {
+                throw new InvalidOperationException(
+                    "The Sql Server Transport requires at least one Sql Server-backed message store (the Main " +
+                    "store, or an Ancillary store registered with role: MessageStoreRole.Ancillary), but found none.");
+            }
         }
 
         Settings = Storage.Settings;
@@ -117,6 +142,7 @@ public class SqlServerTransport : BrokerTransport<SqlServerQueue>
         await using var conn = new SqlConnection(Settings.ConnectionString);
         await conn.OpenAsync();
 
-        return (DateTimeOffset)(await conn.CreateCommand("select SYSDATETIMEOFFSET()").ExecuteScalarAsync())!;
+        await using var cmd = conn.CreateCommand("select SYSDATETIMEOFFSET()");
+        return (DateTimeOffset)(await cmd.ExecuteScalarAsync())!;
     }
 }

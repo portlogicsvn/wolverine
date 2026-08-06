@@ -5,8 +5,7 @@ using Microsoft.Extensions.DependencyInjection;
 using NSubstitute;
 using Shouldly;
 using Wolverine;
-using Xunit.Abstractions;
-
+using Xunit;
 namespace AppWithMiddleware.Tests;
 
 public class try_out_the_middleware
@@ -22,7 +21,6 @@ public class try_out_the_middleware
     public async Task the_application_assembly_is_inferred_correctly()
     {
         #region sample_disabling_the_transports_from_web_application_factory
-
         // This is using Alba to bootstrap a Wolverine application
         // for integration tests, but it's using WebApplicationFactory
         // to do the actual bootstrapping
@@ -52,12 +50,12 @@ public class try_out_the_middleware
         var store = host.Services.GetRequiredService<IDocumentStore>();
         await using var session = store.LightweightSession();
         session.Store(account);
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         var bus = host.MessageBus();
-        await bus.InvokeAsync(new DebitAccount(account.Id, 100));
+        await bus.InvokeAsync(new DebitAccount(account.Id, 100), TestContext.Current.CancellationToken);
 
-        var account2 = await session.LoadAsync<Account>(account.Id);
+        var account2 = await session.LoadAsync<Account>(account.Id, TestContext.Current.CancellationToken);
 
         // Should be 1000 + 100
         account2!.Balance.ShouldBe(900);
@@ -76,7 +74,7 @@ public class try_out_the_middleware
         var store = host.Services.GetRequiredService<IDocumentStore>();
         await using var session = store.LightweightSession();
         session.Store(account);
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         var bus = host.MessageBus();
 
@@ -88,7 +86,6 @@ public class try_out_the_middleware
 }
 
 #region sample_when_the_account_is_overdrawn
-
 public class when_the_account_is_overdrawn : IAsyncLifetime
 {
     private readonly Account theAccount = new Account
@@ -103,7 +100,7 @@ public class when_the_account_is_overdrawn : IAsyncLifetime
     // I happen to like NSubstitute for mocking or dynamic stubs
     private readonly IDocumentSession theDocumentSession = Substitute.For<IDocumentSession>();
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         var command = new DebitAccount(theAccount.Id, 1200);
         await DebitAccountHandler.Handle(command, theAccount, theDocumentSession, theContext);
@@ -134,9 +131,9 @@ public class when_the_account_is_overdrawn : IAsyncLifetime
             .ScheduleDelay.ShouldBe(10.Days());
     }
 
-    public Task DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        return Task.CompletedTask;
+        return ValueTask.CompletedTask;
     }
 }
 

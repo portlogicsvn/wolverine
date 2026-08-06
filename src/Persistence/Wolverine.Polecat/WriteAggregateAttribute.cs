@@ -1,15 +1,16 @@
-using System.Reflection;
 using JasperFx;
 using JasperFx.CodeGeneration;
 using JasperFx.CodeGeneration.Model;
 using JasperFx.CodeGeneration.Services;
 using JasperFx.Core;
 using JasperFx.Core.Reflection;
+using JasperFx.Events;
+using JasperFx.Events.Aggregation;
 using Microsoft.Extensions.DependencyInjection;
 using Polecat;
 using Polecat.Events;
-using JasperFx.Events;
-using JasperFx.Events.Aggregation;
+using System.Diagnostics.CodeAnalysis;
+using System.Reflection;
 using Wolverine.Attributes;
 using Wolverine.Configuration;
 using Wolverine.Persistence;
@@ -33,7 +34,7 @@ public class WriteAggregateAttribute : WolverineParameterAttribute, IDataRequire
 
     private OnMissing? _onMissing;
     public bool Required { get; set; } = true;
-    public string MissingMessage { get; set; }
+    public string MissingMessage { get; set; } = null!;
 
     public OnMissing OnMissing
     {
@@ -62,7 +63,16 @@ public class WriteAggregateAttribute : WolverineParameterAttribute, IDataRequire
         var idProp = aggregateType.GetProperty("Id", BindingFlags.Public | BindingFlags.Instance);
         var idType = idProp?.PropertyType ?? typeof(Guid);
 
-        var identity = FindIdentity(aggregateType, idType, chain);
+        // If a specific ValueSource has been set (e.g. via FromMethod, FromRoute, FromHeader, FromClaim),
+        // use the base class identity resolution which respects that ValueSource
+        Variable? identity = null;
+        if (ValueSource != ValueSource.InputMember && ArgumentName.IsNotEmpty())
+        {
+            tryFindIdentityVariable(chain, parameter, idType, out identity);
+        }
+
+        // Fall back to WriteAggregate's standard identity resolution
+        identity ??= FindIdentity(aggregateType, idType, chain);
         var isNaturalKey = false;
 
         // If standard identity resolution failed, check for natural key support
@@ -168,12 +178,12 @@ public class WriteAggregateAttribute : WolverineParameterAttribute, IDataRequire
         return identifiedByInterface?.GetGenericArguments()[0];
     }
 
-    public bool TryInferMessageIdentity(IChain chain, out PropertyInfo property)
+    public bool TryInferMessageIdentity(IChain chain, [NotNullWhen(true)] out PropertyInfo? property)
     {
         var inputType = chain.InputType();
         if (inputType == null)
         {
-            property = default;
+            property = null;
             return false;
         }
 

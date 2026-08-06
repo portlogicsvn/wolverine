@@ -14,8 +14,7 @@ using Wolverine.Persistence.Durability;
 using Wolverine.Runtime;
 using Wolverine.Runtime.WorkerQueues;
 using Wolverine.Tracking;
-using Xunit.Abstractions;
-
+using Xunit;
 namespace OracleTests.Transport;
 
 [Collection("oracle")]
@@ -34,7 +33,7 @@ public class basic_functionality : IAsyncLifetime
     private IMessageStore theMessageStore = null!;
     private WolverineRuntime theRuntime = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         // Clean the schema
         var dataSource = new OracleDataSource(Servers.OracleConnectionString);
@@ -44,14 +43,14 @@ public class basic_functionality : IAsyncLifetime
             // Drop queue tables if they exist
             try
             {
-                var cmd = conn.CreateCommand("DROP TABLE WOLVERINE.WOLVERINE_QUEUE_ONE CASCADE CONSTRAINTS");
+                await using var cmd = conn.CreateCommand("DROP TABLE WOLVERINE.WOLVERINE_QUEUE_ONE CASCADE CONSTRAINTS");
                 await cmd.ExecuteNonQueryAsync();
             }
             catch (OracleException) { /* table doesn't exist */ }
 
             try
             {
-                var cmd = conn.CreateCommand("DROP TABLE WOLVERINE.WOLVERINE_QUEUE_ONE_SCHEDULED CASCADE CONSTRAINTS");
+                await using var cmd = conn.CreateCommand("DROP TABLE WOLVERINE.WOLVERINE_QUEUE_ONE_SCHEDULED CASCADE CONSTRAINTS");
                 await cmd.ExecuteNonQueryAsync();
             }
             catch (OracleException) { /* table doesn't exist */ }
@@ -78,7 +77,7 @@ public class basic_functionality : IAsyncLifetime
         theRuntime = theHost.GetRuntime();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await theHost.StopAsync();
         theHost.Dispose();

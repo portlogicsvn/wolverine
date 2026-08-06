@@ -37,6 +37,7 @@ public class MySqlQueue : Endpoint, IBrokerQueue, IDatabaseBackedEndpoint
         Mode = EndpointMode.Durable;
         Name = name;
         EndpointName = name;
+        BrokerRole = "queue";
 
         _queueTable = new Lazy<QueueTable>(() => new QueueTable(Parent, queueTableName));
         _scheduledMessageTable =
@@ -159,11 +160,11 @@ public class MySqlQueue : Endpoint, IBrokerQueue, IDatabaseBackedEndpoint
             await using var conn = await source.OpenConnectionAsync();
             try
             {
-                var cmd1 = conn.CreateCommand();
+                await using var cmd1 = conn.CreateCommand();
                 cmd1.CommandText = $"DELETE FROM {QueueTable.Identifier.QualifiedName}";
                 await cmd1.ExecuteNonQueryAsync();
 
-                var cmd2 = conn.CreateCommand();
+                await using var cmd2 = conn.CreateCommand();
                 cmd2.CommandText = $"DELETE FROM {ScheduledTable.Identifier.QualifiedName}";
                 await cmd2.ExecuteNonQueryAsync();
             }
@@ -226,16 +227,22 @@ public class MySqlQueue : Endpoint, IBrokerQueue, IDatabaseBackedEndpoint
 
     public async ValueTask SetupAsync(ILogger logger)
     {
-        await forEveryDatabase(async (source, identifier) =>
-        {
-            await EnsureSchemaExists(identifier, source);
-        });
+        // Deliberately bypasses the _checkedDatabases memo. SetupAsync is the explicit
+        // "make sure these tables exist right now" call - resource setup, and
+        // IHost.ClearAllWolverineStorageAsync() - so it has to re-apply against a database
+        // whose queue tables were dropped after we last looked.
+        await forEveryDatabase(applySchemaChangesAsync);
     }
 
     internal async Task EnsureSchemaExists(string identifier, MySqlDataSource source)
     {
         if (_checkedDatabases.Contains(identifier)) return;
 
+        await applySchemaChangesAsync(source, identifier);
+    }
+
+    private async Task applySchemaChangesAsync(MySqlDataSource source, string identifier)
+    {
         await using (var conn = await source.OpenConnectionAsync())
         {
             await QueueTable.ApplyChangesAsync(conn);
@@ -256,7 +263,7 @@ public class MySqlQueue : Endpoint, IBrokerQueue, IDatabaseBackedEndpoint
 
             try
             {
-                var cmd = conn.CreateCommand();
+                await using var cmd = conn.CreateCommand();
                 cmd.CommandText = $"SELECT COUNT(*) FROM {QueueTable.Identifier.QualifiedName}";
                 count += Convert.ToInt64(await cmd.ExecuteScalarAsync());
             }
@@ -277,7 +284,7 @@ public class MySqlQueue : Endpoint, IBrokerQueue, IDatabaseBackedEndpoint
             await using var conn = await source.OpenConnectionAsync();
             try
             {
-                var cmd = conn.CreateCommand();
+                await using var cmd = conn.CreateCommand();
                 cmd.CommandText = $"SELECT COUNT(*) FROM {ScheduledTable.Identifier.QualifiedName}";
                 count += Convert.ToInt64(await cmd.ExecuteScalarAsync());
             }

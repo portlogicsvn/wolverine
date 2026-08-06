@@ -1,8 +1,10 @@
 using System.Diagnostics;
 using IntegrationTests;
 using JasperFx.Core;
+using JasperFx.Events;
 using Marten;
 using Marten.Metadata;
+using JasperFx;
 using Microsoft.Extensions.Hosting;
 using Shouldly;
 using Wolverine.Configuration;
@@ -10,8 +12,6 @@ using Wolverine.Marten;
 using Wolverine.Runtime.Partitioning;
 using Wolverine.Tracking;
 using Xunit;
-using Xunit.Abstractions;
-
 namespace Wolverine.Kafka.Tests;
 
 public class global_partitioned_sharded_processing
@@ -74,7 +74,7 @@ public class global_partitioned_sharded_processing
                     topology.UseShardedKafkaTopics("gletters", 4);
                     topology.MessagesImplementing<IGLetterMessage>();
                 });
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var tracked = await host
             .TrackActivity()
@@ -136,9 +136,11 @@ public static class GLetterMessageHandler
     }
 }
 
-public class GSimpleAggregate : IRevisioned
+public partial class GSimpleAggregate : JasperFx.ILongVersioned
 {
-    public int Version { get; set; }
+    // ILongVersioned (long), not IRevisioned (int): this is an event-sourced
+    // aggregate tracking a long stream version under JasperFx 2.0 rc.
+    public long Version { get; set; }
     public Guid Id { get; set; }
 
     public int ACount { get; set; }

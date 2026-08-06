@@ -26,7 +26,7 @@ public class ancillary_stores_use_different_databases : IAsyncLifetime
     private string thingsConnectionString = null!;
     private IAgentFamily theStores = null!;
     
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         await using var conn = new NpgsqlConnection(Servers.PostgresConnectionString);
         await conn.OpenAsync();
@@ -63,13 +63,16 @@ public class ancillary_stores_use_different_databases : IAsyncLifetime
                     m.Connection(thingsConnectionString);
                 }).IntegrateWithWolverine(x => x.MainConnectionString = Servers.PostgresConnectionString);
 
+                opts.Discovery.DisableConventionalDiscovery();
+                opts.Durability.Mode = DurabilityMode.Solo;
+                
                 opts.Services.AddResourceSetupOnStartup();
             }).StartAsync();
 
         theStores = theHost.GetRuntime().Stores;
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await theHost.StopAsync();
         theHost.Dispose();
@@ -108,10 +111,11 @@ public class ancillary_stores_use_different_databases : IAsyncLifetime
     public async Task have_durability_agents_for_other_databases()
     {
         var uris = await theStores.AllKnownAgentsAsync();
-        uris.OrderBy(x => x.ToString()).ShouldBe([
+        uris.OrderBy(x => x.ToString()).ShouldBe([.. new[]
+        {
             new Uri("wolverinedb://postgresql/localhost/players/wolverine"),
-            new Uri("wolverinedb://postgresql/localhost/postgres/wolverine"),
-            new Uri("wolverinedb://postgresql/localhost/things/wolverine"),
-        ]);
+            new Uri($"wolverinedb://postgresql/localhost/{Servers.PostgresDatabaseName}/wolverine"),
+            new Uri("wolverinedb://postgresql/localhost/things/wolverine")
+        }.OrderBy(x => x.ToString())]);
     }
 }

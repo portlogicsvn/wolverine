@@ -9,11 +9,8 @@ using Wolverine;
 using Wolverine.Postgresql;
 using Wolverine.RateLimiting;
 using Xunit;
-using Xunit.Abstractions;
-
 namespace Wolverine.RabbitMQ.Tests;
 
-[Trait("Category", "Flaky")]
 public class rate_limiting_end_to_end
 {
     private readonly ITestOutputHelper _output;
@@ -42,7 +39,7 @@ public class rate_limiting_end_to_end
                     opts.UseRabbitMq().DisableDeadLetterQueueing().AutoProvision().AutoPurgeOnStartup();
                     opts.PublishAllMessages().ToRabbitQueue(queueName);
                     opts.Services.AddResourceSetupOnStartup(StartupAction.ResetState);
-                }).StartAsync();
+                }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
             receiver = await Host.CreateDefaultBuilder()
                 .UseWolverine(opts =>
@@ -58,18 +55,18 @@ public class rate_limiting_end_to_end
                         .RateLimit("rabbitmq-rate-limit", new RateLimit(1, window));
 
                     opts.Services.AddResourceSetupOnStartup(StartupAction.ResetState);
-                }).StartAsync();
+                }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
-            await publisher.ResetResourceState();
-            await receiver.ResetResourceState();
+            await publisher.ResetResourceState(cancellation: TestContext.Current.CancellationToken);
+            await receiver.ResetResourceState(cancellation: TestContext.Current.CancellationToken);
             await alignToWindowStart(window);
 
             var bus = publisher.MessageBus();
             await bus.PublishAsync(new RateLimitedMessage());
             await bus.PublishAsync(new RateLimitedMessage());
 
-            var first = await tracker.FirstHandled.Task.WaitAsync(10.Seconds());
-            var second = await tracker.SecondHandled.Task.WaitAsync(10.Seconds());
+            var first = await tracker.FirstHandled.Task.WaitAsync(10.Seconds(), TestContext.Current.CancellationToken);
+            var second = await tracker.SecondHandled.Task.WaitAsync(10.Seconds(), TestContext.Current.CancellationToken);
 
             (second - first).ShouldBeGreaterThanOrEqualTo(700.Milliseconds());
         }
@@ -120,7 +117,7 @@ public class rate_limiting_end_to_end
                         .RateLimit("pause-test", new RateLimit(1, window));
 
                     opts.Services.AddResourceSetupOnStartup(StartupAction.ResetState);
-                }).StartAsync();
+                }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
             publisher = await Host.CreateDefaultBuilder()
                 .UseWolverine(opts =>
@@ -128,11 +125,11 @@ public class rate_limiting_end_to_end
                     opts.UseRabbitMq().DisableDeadLetterQueueing().AutoProvision();
                     opts.PublishAllMessages().ToRabbitQueue(queueName);
                     opts.Services.AddResourceSetupOnStartup(StartupAction.ResetState);
-                }).StartAsync();
+                }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
-            await publisher.ResetResourceState();
-            await receiver.ResetResourceState();
-            await Task.Delay(500.Milliseconds());
+            await publisher.ResetResourceState(cancellation: TestContext.Current.CancellationToken);
+            await receiver.ResetResourceState(cancellation: TestContext.Current.CancellationToken);
+            await Task.Delay(500.Milliseconds(), TestContext.Current.CancellationToken);
 
             var bus = publisher.MessageBus();
             for (var i = 0; i < 10; i++)
@@ -141,7 +138,7 @@ public class rate_limiting_end_to_end
             }
 
             // Wait long enough for rescheduling to occur
-            await Task.Delay(8.Seconds());
+            await Task.Delay(8.Seconds(), TestContext.Current.CancellationToken);
 
             // The critical assertion: no NullReferenceException during pause/resume
             exceptions.Any(ContainsNullRef).ShouldBeFalse(
@@ -175,16 +172,20 @@ public class rate_limiting_end_to_end
     private static async Task alignToWindowStart(TimeSpan window)
     {
         var windowTicks = window.Ticks;
-        var thresholdTicks = 50.Milliseconds().Ticks;
+        // Looser tolerance window: must be in the first 30ms of the window (not too close
+        // to the next boundary or risk of crossing it during async hops).
+        var minTicks = 5.Milliseconds().Ticks;
+        var maxTicks = 30.Milliseconds().Ticks;
 
-        for (var attempt = 0; attempt < 200; attempt++)
+        for (var attempt = 0; attempt < 500; attempt++)
         {
-            if (DateTimeOffset.UtcNow.Ticks % windowTicks < thresholdTicks)
+            var phase = DateTimeOffset.UtcNow.Ticks % windowTicks;
+            if (phase >= minTicks && phase < maxTicks)
             {
                 return;
             }
 
-            await Task.Delay(10.Milliseconds());
+            await Task.Delay(2.Milliseconds());
         }
 
         throw new TimeoutException("Could not align to rate limit window start.");
@@ -199,8 +200,6 @@ public class rate_limiting_end_to_end
         catch (OperationCanceledException)
         {
         }
-
-        host.Dispose();
 
         try
         {

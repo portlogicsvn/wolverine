@@ -1,6 +1,7 @@
 using Alba;
 using IntegrationTests;
 using Marten;
+using JasperFx.Events.Projections;
 using Marten.Events.Projections;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Mvc;
@@ -15,7 +16,7 @@ public class reacting_to_read_aggregate : IAsyncLifetime
 {
     private IAlbaHost theHost = null!;
     
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         var builder = WebApplication.CreateBuilder([]);
 
@@ -39,7 +40,7 @@ public class reacting_to_read_aggregate : IAsyncLifetime
         });
     }
 
-    async Task IAsyncLifetime.DisposeAsync()
+    async ValueTask IAsyncDisposable.DisposeAsync()
     {
         if (theHost != null)
         {
@@ -66,7 +67,8 @@ public class reacting_to_read_aggregate : IAsyncLifetime
             x.Get.Url("/letters2/" + Guid.NewGuid());
         });
         
-        result.ReadAsText().ShouldBe("No Letters");
+        var text = await result.ReadAsTextAsync();
+        text.ShouldBe("No Letters");
     }
 
     [Fact]
@@ -98,7 +100,8 @@ public class reacting_to_read_aggregate : IAsyncLifetime
             x.Post.Url("/letters5/" + Guid.NewGuid());
         });
         
-        result.ReadAsText().ShouldBe("No Letters");
+        var text = await result.ReadAsTextAsync();
+        text.ShouldBe("No Letters");
     }
 
     [Fact]
@@ -148,7 +151,6 @@ public static class LetterAggregateEndpoint
     public static void Load(Guid id) { }
 
     #region sample_read_aggregate_fine_grained_validation_control
-
     // Straight up 404 on missing
     [WolverineGet("/letters1/{id}")]
     public static LetterAggregate GetLetter1([ReadAggregate] LetterAggregate letters) => letters;

@@ -1,12 +1,12 @@
 using System.Collections.Concurrent;
 using JasperFx.Core.Reflection;
 using Microsoft.Extensions.Logging;
+using Wolverine.Configuration.Capabilities;
 using Wolverine.Runtime.Agents;
 
 namespace Wolverine.Runtime.Handlers;
 
-#region sample_MessageHandler
-
+#region sample_messagehandler
 public interface IMessageHandler
 {
     Type MessageType { get; }
@@ -54,10 +54,19 @@ public abstract class MessageHandler : IMessageHandler
     /// Records cause-and-effect relationships between the incoming message type
     /// and any outgoing messages produced during handling. Latched: each unique
     /// (incoming, outgoing) pair is only reported once to the observer.
+    ///
+    /// Gating is owned by codegen: <c>RecordMessageCausationFrame</c> is the only
+    /// caller in production hot paths and is emitted into the generated handler
+    /// only when <c>WolverineOptions.Tracking.EnableMessageCausationTracking</c>
+    /// is set at codegen time. No runtime <c>if/then</c> guard here — when the
+    /// flag is off, this method is never called from generated handlers.
     /// </summary>
     public void RecordCauseAndEffect(MessageContext context, IWolverineObserver observer)
     {
-        if (!context.Runtime.Options.EnableMessageCausationTracking) return;
+        // Skip the entire causation report when the incoming message itself is a
+        // framework-internal type (IAgentCommand, INotToBeRouted, IInternalMessage, etc.).
+        // See GH-2520.
+        if (MessageType.IsSystemMessageType()) return;
 
         var incomingType = MessageType.FullName ?? MessageType.Name;
         var handlerType = GetType().FullName ?? GetType().Name;
@@ -65,7 +74,15 @@ public abstract class MessageHandler : IMessageHandler
 
         foreach (var envelope in context.Outstanding)
         {
-            var outgoingType = envelope.Message?.GetType().FullName;
+            var outgoingMessage = envelope.Message;
+            if (outgoingMessage is null) continue;
+
+            // Per-instance check uses fast pattern match over runtime type-tests for
+            // the marker interfaces; falls through to the helper for assembly attrs.
+            var outgoingMessageType = outgoingMessage.GetType();
+            if (outgoingMessageType.IsSystemMessageType()) continue;
+
+            var outgoingType = outgoingMessageType.FullName;
             if (string.IsNullOrEmpty(outgoingType)) continue;
 
             var key = $"{incomingType}->{outgoingType}@{handlerType}";

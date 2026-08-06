@@ -1,0 +1,273 @@
+# Claim Checks
+
+Some messages carry payloads that are too large to send efficiently through a message broker — multi-megabyte attachments, screenshots, blob exports, generated documents. Pushing those bytes through RabbitMQ, Azure Service Bus, SQS, or any other transport that has practical message-size limits hurts throughput, raises broker storage costs, and can fail outright once a single message crosses the broker's hard limit.
+
+The classic solution is the [Claim Check / Data Bus pattern](https://www.enterpriseintegrationpatterns.com/patterns/messaging/StoreInLibrary.html): store the payload in shared external storage (a blob store, object store, or even a network share), pass a small reference token through the message transport, and re-hydrate the payload on the receiving side. Wolverine ships first-class support for this pattern with a pluggable storage backend.
+
+## How it works
+
+Mark properties on a message that should be off-loaded with the `[Blob]` attribute (`Wolverine.Persistence.BlobAttribute`):
+
+<<< @/../src/Testing/CoreTests/Persistence/ClaimCheck/Messages.cs#sample_blob_attribute_message
+
+When `opts.UseClaimCheck(...)` is configured (see below), every send and receive runs the message through a small decorator on the configured `IMessageSerializer`:
+
+- **Outgoing**: each `[Blob]`-marked property is uploaded to the configured `IClaimCheckStore`. The original property is set to `null` (or `ReadOnlyMemory<byte>.Empty`) so the serialized envelope body stays small. A header named `claim-check.{PropertyName}` carrying the token is written onto the envelope.
+- **Incoming**: after the inner serializer reconstructs the message, the decorator inspects the same headers, fetches each payload back out of the store, and writes the bytes back onto the message before the handler runs.
+
+The handler sees a fully populated message — it never has to know that the bytes traveled out of band.
+
+Once the envelope body has been serialized, the decorator **restores** each off-loaded property back onto the in-memory message. The bytes already placed on the bus are unaffected — they still carry only the claim-check token — but the live message object is left intact rather than mutated. This matters for **in-process routing**: a local queue can hand the *same* message instance to the handler without a serialize → deserialize round trip, so restoring the off-loaded properties is what guarantees the handler still sees the full payload.
+
+`[Blob]` is supported on properties typed as `byte[]`, `ReadOnlyMemory<byte>`, `System.IO.Stream`, or `string`. Use the constructor argument to declare a MIME content type that the storage backend can preserve:
+
+```csharp
+public record CreateInvoice(
+    [property: Blob("application/pdf")] byte[] Pdf,
+    string Reference);
+```
+
+A `[Blob]`-marked `System.IO.Stream` is read fully into memory to off-load it, and is re-materialized as a fresh, read-only `MemoryStream` on the receiving side (and on the in-process restore described above). Don't assume the handler receives the original stream implementation or that it is positioned anywhere other than the start.
+
+## Core abstractions
+
+The pattern is built on three small types in `Wolverine.Persistence`:
+
+### `IClaimCheckStore`
+
+The pluggable backend contract. Implementations persist a payload, return an opaque `ClaimCheckToken` that subsequent loads will use to refer back to it, and support best-effort delete.
+
+<<< @/../src/Wolverine/Persistence/ClaimCheck/IClaimCheckStore.cs
+
+### `ClaimCheckToken`
+
+A small record that captures the backend's payload id, the MIME content type, and the size in bytes. Tokens are wire-encoded as a single string into the envelope header so they round-trip cleanly through any transport without requiring transport-specific support.
+
+```csharp
+public record ClaimCheckToken(string Id, string ContentType, long Length);
+```
+
+### `[Blob]` attribute
+
+Applied to message properties that should be off-loaded. Constructor accepts the MIME content type (defaults to `application/octet-stream`).
+
+## Configuration
+
+Enable the pipeline once on `WolverineOptions`:
+
+```csharp
+using Wolverine.Persistence; // brings in UseClaimCheck
+
+builder.Host.UseWolverine(opts =>
+{
+    opts.UseClaimCheck(claimCheck =>
+    {
+        // Pick a backend; see below.
+    });
+});
+```
+
+When `UseClaimCheck(...)` runs without an explicit `Store`, the pipeline falls back to a `FileSystemClaimCheckStore` rooted at `Path.GetTempPath()/wolverine-claim-check`. That default is fine for local development and integration tests but is not appropriate across multiple machines — production deployments should pick one of the shared-storage backends below.
+
+`UseClaimCheck` is idempotent: calling it again replaces the store on the existing decorator without double-wrapping the serializer.
+
+`IClaimCheckStore` is registered as a singleton in DI, so any handler that needs to upload or fetch payloads explicitly can take it as a constructor dependency.
+
+### Size-threshold auto-offload <Badge type="tip" text="6.22" />
+
+`[Blob]` is opt-in per property. The common failure mode it doesn't cover is *forgetting* the attribute on a property that occasionally gets large, and only discovering it when a message slams into the broker's hard size limit (SQS 1 MiB, Azure Service Bus standard 256 KB, Kafka default `message.max.bytes` ~1 MB).
+
+Set a size threshold as a safety net. When the **serialized body** of any outgoing message exceeds it, Wolverine off-loads the **entire body** to the configured store and replaces it on the wire with a single reference header — no `[Blob]` required. The receiving side pulls the body back from the store before deserializing, transparently:
+
+```csharp
+opts.UseClaimCheck(claimCheck =>
+{
+    claimCheck.UseAmazonS3FromServices(bucketName: "wolverine-claim-checks");
+
+    // Anything whose serialized body is larger than 200 KB is off-loaded whole,
+    // even if no property is marked [Blob].
+    claimCheck.AutoOffloadPayloadsLargerThan(200 * 1024);
+});
+```
+
+The threshold is measured **after** any `[Blob]` properties have already been off-loaded, so it reflects the body that would actually go on the wire. The two mechanisms compose: `[Blob]` is the explicit per-property path, and the threshold is the whole-body backstop. Leaving `AutoOffloadThreshold` unset (the default) disables auto-offload entirely.
+
+### Per-message / per-endpoint store selection <Badge type="tip" text="6.22" />
+
+`UseClaimCheck(...)` configures one global store, but you can route individual messages (or whole endpoints) to different backends — S3 for one, Azure Blob for another, database-LOB for a third — and override the threshold per route. `Store` remains the default when no route matches:
+
+```csharp
+opts.UseClaimCheck(claimCheck =>
+{
+    claimCheck.Store = defaultStore;                       // fallback for everything else
+    claimCheck.AutoOffloadPayloadsLargerThan(256 * 1024);  // global default threshold
+
+    // A specific message type → a specific store (+ its own threshold)
+    claimCheck.StoreForMessage<ExportGenerated>(s3Store, autoOffloadThreshold: 1024 * 1024);
+
+    // Any message type matching a predicate
+    claimCheck.StoreForMessages(t => t.Namespace!.StartsWith("Acme.Media"), azureStore);
+
+    // Route by the outgoing envelope — e.g. everything headed to a particular endpoint
+    claimCheck.StoreWhen(env => env.Destination?.Scheme == "rabbitmq", dbLobStore);
+});
+```
+
+Routes are evaluated in registration order; the first match wins. The store a payload was off-loaded to is recorded in a `claim-check.$store` header, so the **receiver loads from the same backend even though its listening endpoint URI differs from the sender's** — this is what makes `StoreWhen` (endpoint-based) routing round-trip. Envelopes that used the default store carry no such header, so single-store apps are byte-for-byte unchanged.
+
+::: warning Both nodes must share the configuration
+The receiver resolves the store by the key the sender stamped, so it must register the same routes. `StoreForMessage<T>` keys off the message type name (order-independent); `StoreForMessages` / `StoreWhen` use positional keys, so register them in the same order on every host. An envelope that references an unknown store key fails fast with a clear error rather than silently loading from the wrong place.
+:::
+
+## Backends
+
+Wolverine ships several production-grade storage backends as separate NuGet packages.
+
+### Azure Blob Storage
+
+```sh
+dotnet add package WolverineFx.ClaimCheck.AzureBlobStorage
+```
+
+```csharp
+using Wolverine.ClaimCheck.AzureBlobStorage;
+
+builder.Host.UseWolverine(opts =>
+{
+    opts.UseClaimCheck(cc => cc.UseAzureBlobStorage(
+        connectionString: builder.Configuration.GetConnectionString("AzureStorage")!,
+        containerName: "wolverine-claim-checks"));
+});
+```
+
+Or hand the store an existing `BlobContainerClient` if you want to control the credential pipeline yourself:
+
+```csharp
+opts.UseClaimCheck(cc => cc.UseAzureBlobStorage(myContainerClient));
+```
+
+The store maps each `ClaimCheckToken.Id` directly to a blob name, and sets `BlobHttpHeaders.ContentType` from the token so the blob is browseable in the Azure portal with the right MIME type. `DeleteAsync` is idempotent (uses `DeleteIfExistsAsync`), so retries and crash-recovery flows are safe.
+
+### Amazon S3
+
+```sh
+dotnet add package WolverineFx.ClaimCheck.AmazonS3
+```
+
+```csharp
+using Wolverine.ClaimCheck.AmazonS3;
+
+builder.Services.AddSingleton<IAmazonS3>(sp => new AmazonS3Client(/* ... */));
+
+builder.Host.UseWolverine(opts =>
+{
+    opts.UseClaimCheck(cc => cc.UseAmazonS3FromServices(bucketName: "wolverine-claim-checks"));
+});
+```
+
+The `UseAmazonS3FromServices` overload defers `IAmazonS3` resolution until the container is built, which lets you reuse whatever client your application already configures (with its credential chain, retry policy, region, etc.). For tests and one-off setups, an explicit-client overload is also available:
+
+```csharp
+opts.UseClaimCheck(cc => cc.UseAmazonS3(myS3Client, bucketName: "wolverine-claim-checks"));
+```
+
+Token id maps to the object key. The supplied content type is set as `PutObjectRequest.ContentType`, which preserves the MIME type for downloads and S3 lifecycle policies. `DeleteAsync` is naturally idempotent — S3 returns success even when the key is absent.
+
+### Google Cloud Storage
+
+```sh
+dotnet add package WolverineFx.ClaimCheck.GoogleCloudStorage
+```
+
+```csharp
+using Google.Cloud.Storage.V1;
+using Wolverine.ClaimCheck.GoogleCloudStorage;
+
+builder.Services.AddSingleton(StorageClient.Create());
+
+builder.Host.UseWolverine(opts =>
+{
+    opts.UseClaimCheck(cc => cc.UseGoogleCloudStorageFromServices(bucketName: "wolverine-claim-checks"));
+});
+```
+
+The `UseGoogleCloudStorageFromServices` overload defers `StorageClient` resolution until the container is built, mirroring the S3 pattern. An explicit-client overload is also available for tests and one-off setups:
+
+```csharp
+opts.UseClaimCheck(cc => cc.UseGoogleCloudStorage(myStorageClient, bucketName: "wolverine-claim-checks"));
+```
+
+Token id maps to the object name, and the supplied content type is set on the object so it downloads with the right MIME type and participates in GCS lifecycle rules. `DeleteAsync` is idempotent — a `404 Not Found` on a missing object is swallowed.
+
+### NATS JetStream Object Store
+
+For applications already using NATS — especially the [Wolverine NATS transport](/guide/messaging/transports/nats) — the NATS [JetStream Object Store](https://docs.nats.io/nats-concepts/jetstream/obj_store) backend lets you off-load large payloads without standing up a separate blob or object store. This backend is unique to Wolverine in the .NET messaging space.
+
+```sh
+dotnet add package WolverineFx.ClaimCheck.Nats
+```
+
+```csharp
+using Wolverine.ClaimCheck.Nats;
+
+// Reuse the application's existing, already-connected NATS connection
+INatsConnection connection = /* your connected NatsConnection */;
+
+builder.Host.UseWolverine(opts =>
+{
+    opts.UseClaimCheck(cc => cc.UseNatsObjectStore(connection, bucketName: "wolverine-claim-checks"));
+});
+```
+
+The server must have JetStream enabled. The object-store bucket is created on first use if it does not already exist. Token id maps to the object name; the content type travels with the token. `DeleteAsync` is idempotent — a missing object is treated as already deleted. An overload accepting an existing `INatsObjContext` is also available if you manage the object-store context yourself.
+
+### PostgreSQL (database LOB)
+
+The zero-new-infrastructure option for critter-stack users: off-loaded payloads are stored as `bytea` rows in your existing PostgreSQL database — no S3 / Azure / GCS account required.
+
+```sh
+dotnet add package WolverineFx.ClaimCheck.Postgresql
+```
+
+```csharp
+using Wolverine.ClaimCheck.Postgresql;
+
+builder.Host.UseWolverine(opts =>
+{
+    opts.UseClaimCheck(cc => cc.UsePostgresqlClaimCheck(
+        connectionString: builder.Configuration.GetConnectionString("Postgres")!,
+        schemaName: "public",
+        tableName: "wolverine_claim_check"));
+});
+```
+
+An overload accepting an existing `NpgsqlDataSource` is also available if you want to reuse the data source your application already configures:
+
+```csharp
+opts.UseClaimCheck(cc => cc.UsePostgresqlClaimCheck(myDataSource));
+```
+
+The claim check table is created on first use (`create schema/table if not exists`). Token id maps to the row's primary key; the content type and length are stored alongside the `bytea` body. `DeleteAsync` is naturally idempotent — deleting a missing row is a no-op. Because the payloads live in a table you own, database-native cleanup (a scheduled `delete ... where created < ...`) is straightforward.
+
+### File system (built in)
+
+For local development, integration tests, or single-node deployments you can use the bundled `FileSystemClaimCheckStore` directly:
+
+```csharp
+opts.UseClaimCheck(cc => cc.UseFileSystem("/var/wolverine/claim-checks"));
+```
+
+Each payload is written as `{id}.bin`, with a sidecar `{id}.meta` file recording the original content type so the round-trip is lossless even if the token were ever reconstructed externally.
+
+## Operational considerations
+
+- **Lifetime of stored payloads.** The pipeline never auto-deletes blobs. If you let large payloads accumulate, they will eat storage. The recommended pattern is to use the storage system's native lifecycle support (S3 lifecycle rules, Azure Blob Storage lifecycle policies, or a periodic cleanup job for the file system backend) keyed off blob age. A future enhancement may add Wolverine-driven TTL; tracked separately.
+- **Synchronous serializer hot path.** `IMessageSerializer.Write` and `IMessageSerializer.ReadFromData` are synchronous. When the inner serializer is `IAsyncMessageSerializer` (most are), the pipeline preserves async end-to-end. If your inner serializer is sync-only, the upload/download will block on the hot path; pre-uploading payloads outside the serializer is an option for very high-throughput scenarios.
+- **Backend failures.** If the store is unreachable on send, the publish fails and Wolverine's normal retry/dead-letter machinery applies. If the store is unreachable on receive, the handler chain throws and the message is retried per its failure rules — the same behavior as if the original payload were corrupted in transport.
+- **Tokens are opaque.** Don't parse `ClaimCheckToken.Id`. Backends are free to use whatever id format makes sense (`Guid.ToString("N")` for the bundled stores).
+- **Local queues and in-process routing.** A *durable* local queue serializes the envelope when it persists it, so the off-load fires for it exactly as it would for an external transport. A *buffered* (in-memory) local queue never serializes the local hand-off, so no off-load happens there. Either way the handler receives a fully-populated message: the off-loaded properties are restored on the live message after serialization (see [How it works](#how-it-works)).
+- **Off-loading requires an envelope.** The claim-check token is carried in an envelope header, so the off-load only round-trips through Wolverine's normal `Write(envelope)` / `WriteAsync(envelope)` paths. Serializing a `[Blob]` message outside that path — for example a raw `IMessageSerializer.WriteMessage(object)` call with no envelope — cannot carry the token, so the payload would not be recoverable on the other side.
+
+## Issue tracking
+
+This feature was originally tracked in [#2412](https://github.com/JasperFx/wolverine/issues/2412). The in-process / local-queue re-hydration behavior was fixed in [#3048](https://github.com/JasperFx/wolverine/pull/3048).

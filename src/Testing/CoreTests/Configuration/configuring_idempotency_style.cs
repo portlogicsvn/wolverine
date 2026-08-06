@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using JasperFx.RuntimeCompiler;
 using Microsoft.Extensions.Hosting;
 using Wolverine.Attributes;
 using Wolverine.Persistence;
@@ -15,7 +14,7 @@ public class configuring_idempotency_style
     {
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine()
-            .StartAsync();
+            .StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         // Forces the codegen rules to be applied that will execute
         // the transactional attribute among other things
@@ -39,13 +38,12 @@ public class configuring_idempotency_style
     public async Task use_transactional_policies_to_eager()
     {
         #region sample_setting_default_idempotency_check_level
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
                 opts.Policies.AutoApplyTransactions(IdempotencyStyle.Eager);
             })
-            .StartAsync();
+            .StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
             #endregion
         
@@ -81,7 +79,7 @@ public class configuring_idempotency_style
             {
                 opts.Policies.AutoApplyTransactions(IdempotencyStyle.Optimistic);
             })
-            .StartAsync();
+            .StartAsync(cancellationToken: TestContext.Current.CancellationToken);
         
         // Forces the codegen rules to be applied that will execute
         // the transactional attribute among other things
@@ -108,7 +106,6 @@ public record DoSomething(Guid Id);
 public static class DoSomethingHandler
 {
     #region sample_using_explicit_idempotency_on_single_handler
-
     [Transactional(IdempotencyStyle.Eager)]
     public static void Handle(DoSomething msg)
     {

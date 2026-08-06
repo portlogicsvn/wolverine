@@ -28,7 +28,7 @@ public class message_store_initialization_and_configuration : SqliteContext, IAs
         _connectionString = _database.ConnectionString;
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -39,7 +39,7 @@ public class message_store_initialization_and_configuration : SqliteContext, IAs
             }).StartAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         if (_host != null)
         {
@@ -60,9 +60,9 @@ public class message_store_initialization_and_configuration : SqliteContext, IAs
     public async Task builds_the_node_and_control_queue_tables()
     {
         using var dataSource = new SqliteDataSource(_connectionString);
-        await using var conn = (SqliteConnection)await dataSource.OpenConnectionAsync();
+        await using var conn = (SqliteConnection)await dataSource.OpenConnectionAsync(TestContext.Current.CancellationToken);
 
-        var tables = await conn.ExistingTablesAsync(schemas: ["main"]);
+        var tables = await conn.ExistingTablesAsync(schemas: ["main"], ct: TestContext.Current.CancellationToken);
 
         tables.ShouldContain(x => x.Name == DatabaseConstants.NodeTableName);
         tables.ShouldContain(x => x.Name == DatabaseConstants.NodeAssignmentsTableName);
@@ -97,7 +97,7 @@ public class message_store_initialization_and_configuration : SqliteContext, IAs
     [Fact]
     public async Task deletes_the_node_on_shutdown()
     {
-        await _host.StopAsync();
+        await _host.StopAsync(TestContext.Current.CancellationToken);
         _host.Dispose();
         _host = null!;
 

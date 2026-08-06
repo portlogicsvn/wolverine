@@ -23,7 +23,7 @@ within its own `IHostedService` service that is registered **after** Wolverine i
 
 ## Getting Started
 
-To use the Wolverine integration with Marten, just install the Wolverine.Persistence.Marten Nuget into your application. Assuming that you've [configured Marten](https://martendb.io/configuration/)
+To use the Wolverine integration with Marten, just install the WolverineFx.Marten Nuget into your application. Assuming that you've [configured Marten](https://martendb.io/configuration/)
 in your application (and Wolverine itself!), you next need to add the Wolverine integration to Marten as shown in this sample application bootstrapping:
 
 <!-- snippet: sample_integrating_wolverine_with_marten -->
@@ -57,7 +57,7 @@ builder.Host.UseWolverine(opts =>
     opts.Policies.AutoApplyTransactions();
 });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/ChaosSender/Program.cs#L13-L44' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_integrating_wolverine_with_marten' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/ChaosSender/Program.cs#L13-L43' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_integrating_wolverine_with_marten' title='Start of snippet'>anchor</a></sup>
 <a id='snippet-sample_integrating_wolverine_with_marten-1'></a>
 ```cs
 var builder = WebApplication.CreateBuilder(args);
@@ -69,7 +69,7 @@ builder.Services.AddMarten(opts =>
             .Configuration
             .GetConnectionString("postgres");
 
-        opts.Connection(connectionString);
+        opts.Connection(connectionString!);
         opts.DatabaseSchemaName = "orders";
     })
     // Optionally add Marten/Postgresql integration
@@ -90,7 +90,7 @@ builder.Host.UseWolverine(opts =>
         .UseDurableInbox();
 });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/WebApiWithMarten/Program.cs#L8-L40' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_integrating_wolverine_with_marten-1' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/WebApiWithMarten/Program.cs#L8-L39' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_integrating_wolverine_with_marten-1' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 For more information, see [durable messaging](/guide/durability/) and the [sample Marten + Wolverine project](https://github.com/JasperFx/wolverine/tree/main/src/Samples/WebApiWithMarten).

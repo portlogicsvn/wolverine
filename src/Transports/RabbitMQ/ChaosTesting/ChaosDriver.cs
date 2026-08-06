@@ -8,8 +8,7 @@ using Wolverine;
 using Wolverine.ErrorHandling;
 using Wolverine.Runtime;
 using Wolverine.Transports;
-using Xunit.Abstractions;
-
+using Xunit;
 namespace ChaosTesting;
 
 public interface IMessageStorageStrategy
@@ -80,7 +79,7 @@ public class ChaosDriver : IAsyncDisposable, IDisposable
         foreach (var host in _receivers.Values) host.Dispose();
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         using var sender = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -127,7 +126,7 @@ public class ChaosDriver : IAsyncDisposable, IDisposable
             bus.TenantId = "tenant3";
         }
 
-        var task = Task.Factory.StartNew(async () =>
+        var _ = Task.Run(async () =>
         {
             _output.WriteLine($"Starting to continuously send messages from node {name} in batches of {batchSize}");
             while (DateTimeOffset.UtcNow < endingDate)

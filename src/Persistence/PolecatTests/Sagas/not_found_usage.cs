@@ -14,9 +14,9 @@ namespace PolecatTests.Sagas;
 
 public class not_found_usage : IAsyncLifetime
 {
-    private IHost _host;
+    private IHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -34,9 +34,10 @@ public class not_found_usage : IAsyncLifetime
             .ApplyAllConfiguredChangesToDatabaseAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _host.StopAsync();
+        _host.Dispose();
     }
 
     [Fact]
@@ -50,7 +51,7 @@ public class not_found_usage : IAsyncLifetime
         await using var query = _host.Services.GetRequiredService<IDocumentStore>().LightweightSession();
 
         // Should be deleted at this point
-        (await query.LoadAsync<InvitationPolicy>(id)).ShouldBeNull();
+        (await query.LoadAsync<InvitationPolicy>(id, TestContext.Current.CancellationToken)).ShouldBeNull();
 
         // NotFound should fire here, and no exceptions
         await _host.InvokeMessageAndWaitAsync(new InvitationTimeout(id));
@@ -95,7 +96,7 @@ public record InvitationExpired(string Id);
 
 public class InvitationIssued
 {
-    [SagaIdentity] public string Id { get; set; }
+    [SagaIdentity] public required string Id { get; init; }
 }
 
 public record InvitationTimeout(string Id) : TimeoutMessage(10.Seconds());

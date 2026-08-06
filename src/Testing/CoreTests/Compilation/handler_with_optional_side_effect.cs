@@ -2,8 +2,6 @@ using Microsoft.Extensions.DependencyInjection;
 using Wolverine.ComplianceTests;
 using Wolverine.Runtime.Handlers;
 using Xunit;
-using Xunit.Abstractions;
-
 namespace CoreTests.Compilation;
 
 public class handler_with_optional_side_effect
@@ -21,12 +19,12 @@ public class handler_with_optional_side_effect
         using var host = WolverineHost.Basic();
 
         var bus = host.MessageBus();
-        await bus.InvokeAsync(new SomeCommand());
+        await bus.InvokeAsync(new SomeCommand(), TestContext.Current.CancellationToken);
 
         var graph = host.Services.GetRequiredService<HandlerGraph>();
         var chain = graph.ChainFor<SomeCommand>();
 
-        _output.WriteLine(chain!.SourceCode);
+        _output.WriteLine(chain!.SourceCode!);
     }
 
     [Fact]
@@ -35,12 +33,12 @@ public class handler_with_optional_side_effect
         using var host = WolverineHost.Basic();
 
         var bus = host.MessageBus();
-        await bus.InvokeAsync(new SomeOtherCommand());
+        await bus.InvokeAsync(new SomeOtherCommand(), TestContext.Current.CancellationToken);
 
         var graph = host.Services.GetRequiredService<HandlerGraph>();
         var chain = graph.ChainFor<SomeOtherCommand>();
 
-        _output.WriteLine(chain!.SourceCode);
+        _output.WriteLine(chain!.SourceCode!);
     }
 }
 

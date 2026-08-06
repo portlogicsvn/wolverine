@@ -9,15 +9,19 @@ using Marten;
 using Marten.Events.Daemon.Coordination;
 using Marten.Storage;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using Weasel.Core;
 using Weasel.Core.Migrations;
 using Weasel.Postgresql;
 using Wolverine.Marten.Distribution;
+using Wolverine.Marten.Persistence.Sagas;
 using Wolverine.Marten.Publishing;
 using Wolverine.Marten.Subscriptions;
 using Wolverine.Persistence.Durability;
+using Wolverine.Persistence.Sagas;
 using Wolverine.Postgresql;
 using Wolverine.RDBMS;
 using Wolverine.RDBMS.MultiTenancy;
@@ -86,6 +90,17 @@ public static class WolverineOptionsMartenExtensions
 
         expression.Services.AddScoped<IMartenOutbox, MartenOutbox>();
 
+        // GH-3001: structural scope priming for Marten sessions. When a handler falls back to service
+        // location, the generated code primes the child scope's ScopedDocumentSessionHolder with the
+        // handler's outbox-enrolled IDocumentSession (PrimeScopedDocumentSessionFrame). Decorate
+        // Marten's own IDocumentSession / IQuerySession scoped registrations so service-located
+        // resolution prefers that primed session — enrolled with the active outbox — instead of a
+        // separate, un-enrolled session. Non-handler scopes (the holder is empty) fall back to
+        // Marten's original session factory.
+        expression.Services.AddScoped<ScopedDocumentSessionHolder>();
+        preferScopedSession<IDocumentSession>(expression.Services);
+        preferScopedSession<IQuerySession>(expression.Services);
+
         // Gotta have at least a placeholder just in case a user also has
         // EF Core
         expression.Services.AddSingleton<DatabaseSettings>(s =>
@@ -130,7 +145,12 @@ public static class WolverineOptionsMartenExtensions
             expression.Services.AddSingleton<WolverineProjectionCoordinator>();
             expression.Services.AddSingleton<EventSubscriptionAgentFamily>();
             expression.Services.AddSingleton<IAgentFamily>(s => s.GetRequiredService<EventSubscriptionAgentFamily>());
+            expression.Services.AddSingleton<IEventSubscriptionAgentFamily>(s => s.GetRequiredService<EventSubscriptionAgentFamily>());
             expression.Services.AddSingleton<IProjectionCoordinator, WolverineProjectionCoordinator>();
+
+            // GH-3388 — refuse a competing Marten-side daemon (Solo/HotCold) at host start, where
+            // the store's options are final regardless of the order AddAsyncDaemon() was called in.
+            expression.Services.AddSingleton<IHostedService, ManagedDistributionDaemonModeValidator>();
         }
 
         expression.Services.AddType(typeof(IDatabaseSource), typeof(MessageDatabaseDiscovery),
@@ -140,7 +160,66 @@ public static class WolverineOptionsMartenExtensions
 
         expression.Services.AddSingleton<OutboxedSessionFactory>();
 
+        // GH-3109: lets the provider-agnostic [Storage(typeof(IMyStore))] attribute route a handler to
+        // a Marten ancillary store by resolving this provider from the store marker type. Registered
+        // here (not in MartenIntegration.Configure) so the singleton is present in the codegen-time
+        // container that StorageAttribute.Modify queries. TryAddEnumerable keeps it to one instance
+        // even when multiple Marten stores integrate.
+        expression.Services.TryAddEnumerable(
+            ServiceDescriptor.Singleton<Wolverine.Persistence.IAncillaryStoreFrameProvider, MartenAncillaryStoreFrameProvider>());
+
+        // CritterWatch / saga-explorer diagnostic surface — Marten owns
+        // every saga whose state class is a Marten document, so register
+        // a Marten-backed ISagaStoreDiagnostics that the runtime
+        // aggregator fans out to.
+        expression.Services.AddSingleton<ISagaStoreDiagnostics>(s =>
+            new MartenSagaStoreDiagnostics(
+                s.GetRequiredService<IWolverineRuntime>(),
+                s.GetRequiredService<IDocumentStore>()));
+
         return expression;
+    }
+
+    // GH-3001: replace Marten's scoped session registration with one that prefers a scope-primed
+    // session (the outbox-enrolled session the handler is using), falling back to Marten's original
+    // factory when the holder is empty (non-handler scopes). Preserving the original factory keeps
+    // Marten's exact session-building (options, tenancy) for the fall-back path.
+    private static void preferScopedSession<T>(IServiceCollection services) where T : class
+    {
+        var descriptor = services.LastOrDefault(x => x.ServiceType == typeof(T));
+        if (descriptor == null)
+        {
+            return;
+        }
+
+        Func<IServiceProvider, object> original;
+        if (descriptor.ImplementationFactory != null)
+        {
+            original = descriptor.ImplementationFactory;
+        }
+        else if (descriptor.ImplementationInstance != null)
+        {
+            original = _ => descriptor.ImplementationInstance;
+        }
+        else if (descriptor.ImplementationType != null)
+        {
+            original = sp => ActivatorUtilities.CreateInstance(sp, descriptor.ImplementationType);
+        }
+        else
+        {
+            return;
+        }
+
+        services.Remove(descriptor);
+        services.AddScoped<T>(sp =>
+        {
+            if (sp.GetRequiredService<ScopedDocumentSessionHolder>().Session is T primed)
+            {
+                return primed;
+            }
+
+            return (T)original(sp);
+        });
     }
 
     internal static NpgsqlDataSource findMasterDataSource(
@@ -237,56 +316,6 @@ public static class WolverineOptionsMartenExtensions
             x.ServiceType == typeof(IWolverineExtension) && x.ImplementationInstance is MartenIntegration);
 
         return descriptor?.ImplementationInstance as MartenIntegration;
-    }
-
-    /// <summary>
-    ///     Enable publishing of events to Wolverine message routing when captured in Marten sessions that are enrolled in a
-    ///     Wolverine outbox
-    /// </summary>
-    /// <param name="expression"></param>
-    /// <returns></returns>
-    [Obsolete(
-        $"Favor using the {nameof(MartenIntegration.UseFastEventForwarding)} property as part of {nameof(IntegrateWithWolverine)}. This will be removed in Wolverine 4.0")]
-    public static MartenServiceCollectionExtensions.MartenConfigurationExpression EventForwardingToWolverine(
-        this MartenServiceCollectionExtensions.MartenConfigurationExpression expression)
-    {
-        var integration = expression.Services.FindMartenIntegration();
-        if (integration == null)
-        {
-            expression.IntegrateWithWolverine();
-            integration = expression.Services.FindMartenIntegration();
-        }
-
-        integration!.UseFastEventForwarding = true;
-
-        return expression;
-    }
-
-    /// <summary>
-    ///     Enable publishing of events to Wolverine message routing when captured in Marten sessions that are enrolled in a
-    ///     Wolverine outbox. This requires usage of Marten transactional middleware within Wolverine, and makes no guarantees
-    ///     about ordering
-    /// </summary>
-    /// <param name="expression"></param>
-    /// <returns></returns>
-    [Obsolete(
-        $"All of these options are available within the {nameof(IntegrateWithWolverine)}() method. This will be removed in Wolverine 4.0")]
-    public static MartenServiceCollectionExtensions.MartenConfigurationExpression EventForwardingToWolverine(
-        this MartenServiceCollectionExtensions.MartenConfigurationExpression expression,
-        Action<IEventForwarding> configure)
-    {
-        var integration = expression.Services.FindMartenIntegration();
-        if (integration == null)
-        {
-            expression.IntegrateWithWolverine();
-            integration = expression.Services.FindMartenIntegration();
-        }
-
-        integration!.UseFastEventForwarding = true;
-
-        configure(integration);
-
-        return expression;
     }
 
     /// <summary>
@@ -462,7 +491,7 @@ public static class WolverineOptionsMartenExtensions
         {
             var runtime = sp.GetRequiredService<IWolverineRuntime>();
 
-            var relay = new PublishingRelay(subscriptionName);
+            var relay = new PublishingRelay(subscriptionName, opts.Events.TenancyStyle);
             configure?.Invoke(relay);
 
             var subscription = new WolverineSubscriptionRunner(relay, runtime);

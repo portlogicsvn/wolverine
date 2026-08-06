@@ -22,7 +22,8 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("Age is 8");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("Age is 8");
     }
 
     [Fact]
@@ -34,7 +35,8 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("North");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("North");
     }
 
     [Fact]
@@ -45,7 +47,8 @@ public class using_querystring_parameters : IntegrationContext
             x.Get.Url("/querystring/explicit?name=north");
         });
 
-        body.ReadAsText().ShouldBe("north");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("north");
     }
 
     [Fact]
@@ -56,7 +59,8 @@ public class using_querystring_parameters : IntegrationContext
             x.Get.Url("/querystring/explicit");
         });
 
-        body.ReadAsText().ShouldBeEmpty();
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBeEmpty();
     }
 
     [Fact]
@@ -68,7 +72,8 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("North");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("North");
     }
 
     [Fact]
@@ -80,7 +85,8 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("Age is ");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("Age is ");
     }
 
     [Fact]
@@ -92,7 +98,8 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("Age is ");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("Age is ");
     }
 
     [Fact]
@@ -104,7 +111,8 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("Age is 11");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("Age is 11");
     }
 
     [Fact]
@@ -116,7 +124,8 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("Age is missing");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("Age is missing");
     }
 
     [Fact]
@@ -128,7 +137,8 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("Age is missing");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("Age is missing");
     }
 
     [Fact]
@@ -145,7 +155,8 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("foo,bar,baz");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("foo,bar,baz");
     }
 
     [Fact]
@@ -162,7 +173,8 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("5,8,13");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("5,8,13");
     }
 
     [Fact]
@@ -183,7 +195,8 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe($"{guid1},{guid2},{guid3}");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe($"{guid1},{guid2},{guid3}");
     }
 
     [Fact]
@@ -200,7 +213,64 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe($"North,East,South");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe($"North,East,South");
+    }
+
+    [Fact]
+    public async Task use_parsed_enum_array()
+    {
+        var body = await Scenario(x =>
+        {
+            x.Get
+                .Url("/querystring/enumarray")
+                .QueryString("values", "North")
+                .QueryString("values", "East")
+                .QueryString("values", "South");
+
+            x.Header("content-type").SingleValueShouldEqual("text/plain");
+        });
+
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("North,East,South");
+    }
+
+    // An enum array element used to be parsed case-sensitively while the scalar and List<TEnum> binders
+    // parsed case-insensitively, so a camelCased value -- the default System.Text.Json spelling clients
+    // see in responses -- was silently dropped from the array.
+    [Fact]
+    public async Task use_parsed_enum_array_is_case_insensitive()
+    {
+        var body = await Scenario(x =>
+        {
+            x.Get
+                .Url("/querystring/enumarray")
+                .QueryString("values", "north")
+                .QueryString("values", "eAsT")
+                .QueryString("values", "SOUTH");
+
+            x.Header("content-type").SingleValueShouldEqual("text/plain");
+        });
+
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("North,East,South");
+    }
+
+    [Fact]
+    public async Task use_parsed_enum_array_still_ignores_unparseable_values()
+    {
+        var body = await Scenario(x =>
+        {
+            x.Get
+                .Url("/querystring/enumarray")
+                .QueryString("values", "north")
+                .QueryString("values", "nonsense");
+
+            x.Header("content-type").SingleValueShouldEqual("text/plain");
+        });
+
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("North");
     }
 
     [Fact]
@@ -217,7 +287,8 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("foo,bar,baz");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("foo,bar,baz");
     }
     
     [Fact]
@@ -231,7 +302,8 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("none");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("none");
     }
     
     [Fact]
@@ -248,7 +320,8 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("1,2,4");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("1,2,4");
     }
     
     [Fact]
@@ -262,7 +335,86 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("none");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("none");
+    }
+
+    // GH-3602: [FromQuery] on an array/collection must bind from repeated query values just like the
+    // attribute-less form above, instead of being misrouted into complex member-flattening (which threw
+    // at discovery). Covers string[], int[] and List<int>.
+    [Fact]
+    public async Task using_fromquery_string_array_completely_hit()
+    {
+        var body = await Scenario(x =>
+        {
+            x.Get
+                .Url("/querystring/stringarray2")
+                .QueryString("values", "foo")
+                .QueryString("values", "bar")
+                .QueryString("values", "baz");
+
+            x.Header("content-type").SingleValueShouldEqual("text/plain");
+        });
+
+        (await body.ReadAsTextAsync()).ShouldBe("foo,bar,baz");
+    }
+
+    [Fact]
+    public async Task using_fromquery_string_array_completely_miss()
+    {
+        var body = await Scenario(x =>
+        {
+            x.Get.Url("/querystring/stringarray2");
+            x.Header("content-type").SingleValueShouldEqual("text/plain");
+        });
+
+        (await body.ReadAsTextAsync()).ShouldBe("none");
+    }
+
+    [Fact]
+    public async Task using_fromquery_int_array_completely_hit()
+    {
+        var body = await Scenario(x =>
+        {
+            x.Get
+                .Url("/querystring/intarray2")
+                .QueryString("values", "4")
+                .QueryString("values", "2")
+                .QueryString("values", "1");
+
+            x.Header("content-type").SingleValueShouldEqual("text/plain");
+        });
+
+        (await body.ReadAsTextAsync()).ShouldBe("1,2,4");
+    }
+
+    [Fact]
+    public async Task using_fromquery_int_list_completely_hit()
+    {
+        var body = await Scenario(x =>
+        {
+            x.Get
+                .Url("/querystring/intlist2")
+                .QueryString("values", "4")
+                .QueryString("values", "2")
+                .QueryString("values", "1");
+
+            x.Header("content-type").SingleValueShouldEqual("text/plain");
+        });
+
+        (await body.ReadAsTextAsync()).ShouldBe("1,2,4");
+    }
+
+    [Fact]
+    public async Task using_fromquery_int_list_completely_miss()
+    {
+        var body = await Scenario(x =>
+        {
+            x.Get.Url("/querystring/intlist2");
+            x.Header("content-type").SingleValueShouldEqual("text/plain");
+        });
+
+        (await body.ReadAsTextAsync()).ShouldBe("none");
     }
 
     [Fact]
@@ -275,7 +427,8 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("0001-01-01T00:00:00.0000000");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("0001-01-01T00:00:00.0000000");
     }
 
     [Fact]
@@ -288,7 +441,8 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("0001-01-01T00:00:00.0000000");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("0001-01-01T00:00:00.0000000");
     }
 
     [Fact]
@@ -301,7 +455,8 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("2025-04-05T00:00:00.0000000");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("2025-04-05T00:00:00.0000000");
     }
 
     [Fact]
@@ -314,7 +469,8 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("2025-04-05T13:37:42.0123456");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("2025-04-05T13:37:42.0123456");
     }
 
     [Fact]
@@ -327,7 +483,8 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("2025-04-05T13:37:42.0123456");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("2025-04-05T13:37:42.0123456");
     }
     
     [Fact]
@@ -340,7 +497,8 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("Value is missing");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("Value is missing");
     }
 
     [Fact]
@@ -353,7 +511,8 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("2025-04-05T00:00:00.0000000");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("2025-04-05T00:00:00.0000000");
     }
 
     [Fact]
@@ -366,7 +525,8 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("2025-04-05T13:37:42.0123456");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("2025-04-05T13:37:42.0123456");
     }
 
     [Fact]
@@ -379,7 +539,8 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("0001-01-01");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("0001-01-01");
     }
 
     [Fact]
@@ -392,7 +553,8 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("2025-04-05");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("2025-04-05");
     }
 
     [Fact]
@@ -405,7 +567,8 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("0001-01-01");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("0001-01-01");
     }
 
     [Fact]
@@ -418,7 +581,8 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("Value is missing");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("Value is missing");
     }
 
     [Fact]
@@ -431,7 +595,8 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("2025-04-05");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("2025-04-05");
     }
 
     [Fact]
@@ -444,11 +609,11 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("0001-01-01");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("0001-01-01");
     }
 
     #region sample_query_string_usage
-
     [Fact]
     public async Task use_string_querystring_hit()
     {
@@ -458,7 +623,8 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("Name is Magic");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("Name is Magic");
     }
 
     [Fact]
@@ -470,7 +636,8 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("Name is missing");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("Name is missing");
     }
 
     [Fact]
@@ -483,7 +650,96 @@ public class using_querystring_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("Amount is 42.1");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("Amount is 42.1");
+    }
+
+    [Fact]
+    public async Task use_decimal_fromquery_hit()
+    {
+        // GH-3586 follow-up: an explicit [FromQuery] on a scalar decimal used to throw at endpoint
+        // discovery ("System.Decimal has multiple constructors"). It now binds from its own key.
+        var body = await Scenario(x =>
+        {
+            x.Get.Url("/querystring/decimal2?value=42.1");
+            x.Header("content-type").SingleValueShouldEqual("text/plain");
+        });
+
+        (await body.ReadAsTextAsync()).ShouldBe("42.1");
+    }
+
+    [Fact]
+    public async Task use_nullable_decimal_fromquery_hit()
+    {
+        var body = await Scenario(x =>
+        {
+            x.Get.Url("/querystring/decimal2/nullable?value=42.1");
+            x.Header("content-type").SingleValueShouldEqual("text/plain");
+        });
+
+        (await body.ReadAsTextAsync()).ShouldBe("42.1");
+    }
+
+    [Fact]
+    public async Task use_nullable_decimal_fromquery_miss()
+    {
+        var body = await Scenario(x =>
+        {
+            x.Get.Url("/querystring/decimal2/nullable");
+            x.Header("content-type").SingleValueShouldEqual("text/plain");
+        });
+
+        (await body.ReadAsTextAsync()).ShouldBe("Value is missing");
+    }
+
+    [Fact]
+    public async Task use_enum_fromquery_hit_with_string_name()
+    {
+        // Enum values arrive as their string name on the wire, not as an integer.
+        var body = await Scenario(x =>
+        {
+            x.Get.Url("/querystring/enum2?value=North");
+            x.Header("content-type").SingleValueShouldEqual("text/plain");
+        });
+
+        (await body.ReadAsTextAsync()).ShouldBe("North");
+    }
+
+    [Fact]
+    public async Task use_enum_fromquery_hit_with_lowercase_string_name()
+    {
+        // ...and the name parse is case-insensitive.
+        var body = await Scenario(x =>
+        {
+            x.Get.Url("/querystring/enum2?value=west");
+            x.Header("content-type").SingleValueShouldEqual("text/plain");
+        });
+
+        (await body.ReadAsTextAsync()).ShouldBe("West");
+    }
+
+    [Fact]
+    public async Task use_nullable_enum_fromquery_hit_with_string_name()
+    {
+        var body = await Scenario(x =>
+        {
+            x.Get.Url("/querystring/enum2/nullable?value=South");
+            x.Header("content-type").SingleValueShouldEqual("text/plain");
+        });
+
+        (await body.ReadAsTextAsync()).ShouldBe("South");
+    }
+
+    [Fact]
+    public async Task use_nullable_enum_fromquery_miss()
+    {
+        var body = await Scenario(x =>
+        {
+            x.Get.Url("/querystring/enum2/nullable");
+            x.Header("content-type").SingleValueShouldEqual("text/plain");
+        });
+
+        (await body.ReadAsTextAsync()).ShouldBe("Value is missing");
     }
 
     #endregion

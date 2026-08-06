@@ -4,6 +4,7 @@ using JasperFx.Events.Tags;
 using JasperFx.Resources;
 using Marten;
 using Marten.Events;
+using MartenTests.AncillaryStores;
 using MartenTests.Dcb.University;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -20,7 +21,7 @@ public class boundary_model_workflow_tests : PostgresqlContext, IAsyncLifetime
     private IHost theHost = null!;
     private IDocumentStore theStore = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         // Drop the schema if it exists to avoid migration conflicts
         await using (var conn = new NpgsqlConnection(Servers.PostgresConnectionString))
@@ -46,6 +47,14 @@ public class boundary_model_workflow_tests : PostgresqlContext, IAsyncLifetime
                             .ForAggregate<SubscriptionState>();
                         m.Events.RegisterTagType<FacultyId>("faculty");
 
+                        // FetchForWritingByTags<T> resolves its aggregator via the JasperFx.Events
+                        // source generator, which only emits a dispatcher for an aggregate that is
+                        // registered as a single-stream projection. Registering SubscriptionState as a
+                        // live aggregation (it also carries an Id) gives the SG something to generate
+                        // for; without it the boundary fetch throws InvalidProjectionException. This
+                        // mirrors Marten's own DCB tests (StudentCourseEnrollment / HsTicketSummary).
+                        m.Projections.LiveStreamAggregation<SubscriptionState>();
+
                         // Register event types
                         m.Events.AddEventType<CourseCreated>();
                         m.Events.AddEventType<CourseCapacityChanged>();
@@ -60,13 +69,16 @@ public class boundary_model_workflow_tests : PostgresqlContext, IAsyncLifetime
                     .UseLightweightSessions()
                     .IntegrateWithWolverine();
 
+                opts.Discovery.DisableConventionalDiscovery()
+                    .IncludeType(typeof(BoundaryModelSubscribeStudentHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Services.AddResourceSetupOnStartup();
             }).StartAsync();
 
         theStore = theHost.Services.GetRequiredService<IDocumentStore>();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await theHost.StopAsync();
         theHost.Dispose();
@@ -105,7 +117,7 @@ public class boundary_model_workflow_tests : PostgresqlContext, IAsyncLifetime
             .Or<CourseCreated, CourseId>(courseId)
             .Or<StudentEnrolledInFaculty, StudentId>(studentId);
 
-        var boundary = await session.Events.FetchForWritingByTags<SubscriptionState>(query);
+        var boundary = await session.Events.FetchForWritingByTags<SubscriptionState>(query, TestContext.Current.CancellationToken);
         boundary.Events.Count.ShouldBe(2);
         boundary.Aggregate.ShouldNotBeNull();
         boundary.Aggregate.CourseId.ShouldBe(courseId);
@@ -126,8 +138,7 @@ public class boundary_model_workflow_tests : PostgresqlContext, IAsyncLifetime
 
         // Verify the subscription event was appended and discoverable by tag
         await using var session = theStore.LightweightSession();
-        var events = await session.Events.QueryByTagsAsync(
-            new EventTagQuery().Or<StudentId>(studentId));
+        var events = await session.Events.QueryByTagsAsync(new EventTagQuery().Or<StudentId>(studentId), TestContext.Current.CancellationToken);
 
         events.ShouldContain(e => e.Data is StudentSubscribedToCourse);
     }
@@ -144,7 +155,7 @@ public class boundary_model_workflow_tests : PostgresqlContext, IAsyncLifetime
             new CourseCreated(FacultyId.Default, courseId, "Math 101", 10));
         courseCreated.WithTag(courseId);
         session.Events.Append(courseId.Value, courseCreated);
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         // The handler should throw because student is not enrolled
         await Should.ThrowAsync<InvalidOperationException>(async () =>
@@ -166,7 +177,7 @@ public class boundary_model_workflow_tests : PostgresqlContext, IAsyncLifetime
             new StudentEnrolledInFaculty(FacultyId.Default, studentId, "Alice", "Smith"));
         enrolled.WithTag(studentId);
         session.Events.Append(studentId.Value, enrolled);
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         await Should.ThrowAsync<InvalidOperationException>(async () =>
         {
@@ -196,7 +207,7 @@ public class boundary_model_workflow_tests : PostgresqlContext, IAsyncLifetime
             new StudentSubscribedToCourse(FacultyId.Default, otherStudentId, courseId));
         subscribed.WithTag(otherStudentId, courseId);
         session.Events.Append(otherStudentId.Value, subscribed);
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         // Now try to subscribe our student — should fail because course is full
         await Should.ThrowAsync<InvalidOperationException>(async () =>

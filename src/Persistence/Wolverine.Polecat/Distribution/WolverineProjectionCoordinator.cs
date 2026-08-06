@@ -2,6 +2,7 @@ using JasperFx.Core.Reflection;
 using JasperFx.Events;
 using JasperFx.Events.Daemon;
 using Polecat;
+using Wolverine.Runtime.Agents;
 
 namespace Wolverine.Polecat.Distribution;
 
@@ -36,9 +37,9 @@ internal class WolverineProjectionCoordinator : IProjectionCoordinator
         return _storeAgents.StopAllAsync(cancellationToken);
     }
 
-    public IProjectionDaemon DaemonForMainDatabase()
+    public ValueTask<IProjectionDaemon> DaemonForMainDatabaseAsync()
     {
-        return _storeAgents.DaemonForMainDatabase();
+        return _storeAgents.DaemonForMainDatabaseAsync();
     }
 
     public ValueTask<IProjectionDaemon> DaemonForDatabase(string databaseIdentifier)

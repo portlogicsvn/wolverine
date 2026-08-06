@@ -6,15 +6,10 @@ using JasperFx.Resources;
 using Shouldly;
 using Wolverine;
 using Wolverine.Marten;
-using Wolverine.Runtime;
-using Wolverine.Runtime.Batching;
-using Wolverine.Runtime.Handlers;
-using Wolverine.Runtime.Routing;
 using Wolverine.Tracking;
 
 namespace MartenTests;
 
-[Trait("Category", "Flaky")]
 public class batch_processing
 {
 
@@ -40,10 +35,15 @@ public class batch_processing
                     batching.BatchSize = 8;
                     batching.LocalExecutionQueueName = "items";
                 }).UseDurableInbox();
-            }).StartAsync();
+
+                opts.Discovery.DisableConventionalDiscovery()
+                    .IncludeType(typeof(BatchItemHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
+                
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
         
         await theHost.CleanAllMartenDataAsync();
-        await theHost.ResetResourceState();
+        await theHost.ResetResourceState(cancellation: TestContext.Current.CancellationToken);
         
         var item1 = new BatchItem("one", Guid.NewGuid());
         var item2 = new BatchItem("two", Guid.NewGuid());
@@ -67,7 +67,7 @@ public class batch_processing
         };
         
         var tracked = await theHost.TrackActivity()
-            .WaitForMessageToBeReceivedAt<BatchItem[]>(theHost)
+            .WaitForCondition(new AllItemsReceived(item1, item2, item3, item4, item5, item6, item7, item8))
             .ExecuteAndWaitAsync(publish);
 
         var messages = tracked.Executed.MessagesOf<BatchItem[]>();
@@ -89,7 +89,7 @@ public class batch_processing
         items.ShouldContain(item8);
 
         using var session = theHost.DocumentStore().LightweightSession();
-        var count = await session.Query<BatchItem>().CountAsync();
+        var count = await session.Query<BatchItem>().CountAsync(token: TestContext.Current.CancellationToken);
         
         count.ShouldBe(8);
 
@@ -123,7 +123,11 @@ public class batch_processing
                     batching.BatchSize = 8;
                     batching.LocalExecutionQueueName = "items";
                 }).UseDurableInbox();
-            }).StartAsync();
+
+                opts.Discovery.DisableConventionalDiscovery()
+                    .IncludeType(typeof(BatchItemHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
         
         var item1 = new BatchItem("one", Guid.NewGuid());
         var item2 = new BatchItem("two", Guid.NewGuid());
@@ -135,7 +139,7 @@ public class batch_processing
         var item8 = new BatchItem("eight", Guid.NewGuid());
 
         await theHost.CleanAllMartenDataAsync();
-        await theHost.ResetResourceState();
+        await theHost.ResetResourceState(cancellation: TestContext.Current.CancellationToken);
         
         Func<IMessageContext, Task> publish = async c =>
         {
@@ -172,30 +176,45 @@ public class batch_processing
         items.ShouldContain(item8);
 
         using var blue = theHost.DocumentStore().LightweightSession("blue");
-        var blueItems = await blue.Query<BatchItem>().ToListAsync();
+        var blueItems = await blue.Query<BatchItem>().ToListAsync(token: TestContext.Current.CancellationToken);
         blueItems.Count.ShouldBe(5);
         
         using var green = theHost.DocumentStore().LightweightSession("green");
-        var greenItems = await green.Query<BatchItem>().ToListAsync();
+        var greenItems = await green.Query<BatchItem>().ToListAsync(token: TestContext.Current.CancellationToken);
         greenItems.Count.ShouldBe(3);
     }
 }
 
 public class AllItemsReceived(params BatchItem[] Items) : ITrackedCondition
 {
+    // Record fires from the tracking infrastructure on whichever thread the
+    // handler completes on. In end_to_end_with_tenancy two tenant batches
+    // ("blue" and "green") complete in parallel and both reach Record at the
+    // same time. List<T>.AddRange is not thread-safe — concurrent callers
+    // race on the internal array resize and writes, leaving null slots that
+    // surface as an NRE when IsCompleted reads `r.Id` in the polling
+    // predicate. Lock both the writer and the reader so the polling thread
+    // sees a consistent snapshot.
+    private readonly object _lock = new();
     private readonly List<BatchItem> _received = new();
-    
+
     public void Record(EnvelopeRecord record)
     {
         if (record.MessageEventType == MessageEventType.MessageSucceeded && record.Message is BatchItem[] items)
         {
-            _received.AddRange(items);
+            lock (_lock)
+            {
+                _received.AddRange(items);
+            }
         }
     }
 
     public bool IsCompleted()
     {
-        return Items.All(x => _received.Any(r => r.Id == x.Id));
+        lock (_lock)
+        {
+            return Items.All(x => _received.Any(r => r.Id == x.Id));
+        }
     }
 }
 

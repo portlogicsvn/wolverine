@@ -40,7 +40,7 @@ public class dynamically_spin_up_new_tenant_databases_with_autocreate
 
             // Apply Marten migrations to the tenant database
             var db = await tenancy.FindOrCreateDatabase("tenant1");
-            await db.ApplyAllConfiguredChangesToDatabaseAsync(AutoCreate.CreateOrUpdate);
+            await db.ApplyAllConfiguredChangesToDatabaseAsync(AutoCreate.CreateOrUpdate, ct: TestContext.Current.CancellationToken);
 
             // Wait for the agent of the new tenant to start
             await host.WaitUntilAssignmentsChangeTo(w =>
@@ -57,10 +57,10 @@ public class dynamically_spin_up_new_tenant_databases_with_autocreate
 
             // Assert the handling of the command
             await using var session = store.LightweightSession("tenant1");
-            var doc = await session.LoadAsync<PersistedDoc>(command.Id);
+            var doc = await session.LoadAsync<PersistedDoc>(command.Id, TestContext.Current.CancellationToken);
             doc.ShouldNotBeNull();
 
-            await host.StopAsync();
+            await host.StopAsync(TestContext.Current.CancellationToken);
         }
     }
 
@@ -96,6 +96,9 @@ public class dynamically_spin_up_new_tenant_databases_with_autocreate
         var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery()
+                    .IncludeType(typeof(PeristDocHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 // This is too extreme for real usage, but helps tests to run faster
                 opts.Durability.NodeReassignmentPollingTime = 1.Seconds();
 

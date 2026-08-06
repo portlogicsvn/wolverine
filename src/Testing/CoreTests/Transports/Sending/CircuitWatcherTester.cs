@@ -9,7 +9,7 @@ public class CircuitWatcherTester
     //[Fact]  //TODO -- CI doesn't like this one sometimes.
     public void ping_until_connected()
     {
-        var completed = new ManualResetEvent(false);
+        using var completed = new ManualResetEvent(false);
 
         var watcher = new CircuitWatcher(new StubCircuit(5, completed), default);
 
@@ -42,9 +42,11 @@ public class StubCircuit : ISenderCircuit
 
     public bool SupportsNativeScheduledSend => true;
 
+    public int CallCount => _count;
+
     public Task<bool> TryToResumeAsync(CancellationToken cancellationToken)
     {
-        _count++;
+        Interlocked.Increment(ref _count);
 
         if (_count < _failureCount)
         {
@@ -60,10 +62,11 @@ public class StubCircuit : ISenderCircuit
         return Task.CompletedTask;
     }
 
-    public TimeSpan RetryInterval { get; } = 50.Milliseconds();
+    public TimeSpan RetryInterval { get; set; } = 50.Milliseconds();
 
     public void Dispose()
     {
+        _completed.Dispose();
     }
 
     public void Start(ISenderCallback callback)

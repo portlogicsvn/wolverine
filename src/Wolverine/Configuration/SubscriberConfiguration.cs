@@ -1,6 +1,5 @@
 using System.Text.Json;
 using JasperFx.Core.Reflection;
-using Newtonsoft.Json;
 using Wolverine.ErrorHandling;
 using Wolverine.Runtime;
 using Wolverine.Runtime.Interop;
@@ -115,27 +114,45 @@ public class SubscriberConfiguration<T, TEndpoint> : DelayedEndpointConfiguratio
         return this.As<T>();
     }
 
+    /// <summary>
+    /// Force this sender endpoint to use the AES-256-GCM encrypting serializer
+    /// for all outgoing messages. Requires the encrypting serializer to be
+    /// registered first via <see cref="WolverineOptions.UseEncryption"/> or
+    /// <see cref="WolverineOptions.RegisterEncryptionSerializer"/>; if it is not
+    /// registered, the host fails to start.
+    /// </summary>
+    public T Encrypted()
+    {
+        add(endpoint =>
+        {
+            var runtime = endpoint.Runtime
+                ?? throw new InvalidOperationException(
+                    "Endpoint runtime is not set. .Encrypted() requires a fully-configured endpoint.");
+
+            var encrypting = runtime.Options.TryFindSerializer(
+                    Wolverine.Runtime.Serialization.Encryption.EncryptionHeaders.EncryptedContentType)
+                ?? throw new InvalidOperationException(
+                    "No encrypting serializer is registered. Call " +
+                    "WolverineOptions.UseEncryption(provider) or " +
+                    "WolverineOptions.RegisterEncryptionSerializer(provider) " +
+                    "before configuring an endpoint with .Encrypted().");
+
+            var rule = new Wolverine.Runtime.Serialization.Encryption.EncryptOutgoingEndpointRule(encrypting);
+            endpoint.OutgoingRules.Add(rule);
+        });
+        return this.As<T>();
+    }
+
     public T Named(string name)
     {
         add(e => e.EndpointName = name);
         return this.As<T>();
     }
 
-    public T CustomNewtonsoftJsonSerialization(JsonSerializerSettings customSettings)
-    {
-        add(e =>
-        {
-            var serializer = new NewtonsoftSerializer(customSettings);
-            e.RegisterSerializer(serializer);
-            e.DefaultSerializer = serializer;
-        });
-
-        return this.As<T>();
-    }
 
     /// <summary>
     /// For endpoints that send or receive messages in batches, this governs the maximum
-    /// number of messages that will be received or sent in one batch
+    /// number of messages that will be received or sent in one batch. Defaults to 100.
     /// </summary>
     public T MessageBatchSize(int batchSize)
     {
@@ -151,6 +168,17 @@ public class SubscriberConfiguration<T, TEndpoint> : DelayedEndpointConfiguratio
     public T MessageBatchMaxDegreeOfParallelism(int batchMaxDegreeOfParallelism)
     {
         add(e => e.MessageBatchMaxDegreeOfParallelism = batchMaxDegreeOfParallelism);
+        return this.As<T>();
+    }
+
+    /// <summary>
+    /// For endpoints that send messages in batches, this is the maximum time the
+    /// sender will wait to accumulate a full batch before flushing what it has.
+    /// Defaults to 250ms.
+    /// </summary>
+    public T MessageBatchTimeout(TimeSpan batchTimeout)
+    {
+        add(e => e.MessageBatchTimeout = batchTimeout);
         return this.As<T>();
     }
 

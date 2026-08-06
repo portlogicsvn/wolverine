@@ -1,5 +1,6 @@
 ﻿using System.Data;
 using System.Data.Common;
+using System.Diagnostics.CodeAnalysis;
 using ImTools;
 using JasperFx;
 using JasperFx.Core;
@@ -10,6 +11,7 @@ using Microsoft.Extensions.Logging;
 using Weasel.Core;
 using Weasel.SqlServer;
 using Wolverine.Logging;
+using Wolverine.Persistence;
 using Wolverine.Persistence.Durability;
 using Wolverine.Persistence.Durability.DeadLetterManagement;
 using Wolverine.Persistence.Durability.ScheduledMessageManagement;
@@ -29,14 +31,23 @@ using Table = Weasel.SqlServer.Tables.Table;
 
 namespace Wolverine.SqlServer.Persistence;
 
-public class SqlServerMessageStore : MessageDatabase<SqlConnection>
+public class SqlServerMessageStore : MessageDatabase<SqlConnection>, IConnectionBudgetProbe
 {
     private readonly string _findAtLargeEnvelopesSql;
     private readonly string _scheduledLockId;
+    private DatabaseServerId? _serverId;
     private ImHashMap<Type, IDatabaseSagaSchema> _sagaStorage = ImHashMap<Type, IDatabaseSagaSchema>.Empty;
     
     private readonly List<ISchemaObject> _externalTables = new();
     
+    // typeof(DatabaseSagaSchema<,>).CloseAndBuildAs<IDatabaseSagaSchema>(...) at L56
+    // closes the saga schema generic over (sagaType, idType) at startup. Same
+    // chunk D / I / J / K / AE CloseAndBuildAs pattern: AOT-clean apps preserve
+    // saga state types via TrimmerRootDescriptor. Cross-link to #2769.
+    [UnconditionalSuppressMessage("Trimming", "IL2026",
+        Justification = "DatabaseSagaSchema<,> closed over runtime saga / id types at startup; AOT consumers preserve via TrimmerRootDescriptor. See AOT guide / #2769.")]
+    [UnconditionalSuppressMessage("AOT", "IL3050",
+        Justification = "DatabaseSagaSchema<,> closed over runtime saga / id types at startup; AOT consumers preserve via TrimmerRootDescriptor. See AOT guide / #2769.")]
     public SqlServerMessageStore(DatabaseSettings database, DurabilitySettings settings,
         ILogger<SqlServerMessageStore> logger, IEnumerable<SagaTableDefinition> sagaTypes)
         : base(database, SqlClientFactory.Instance.CreateDataSource(database.ConnectionString!), settings, logger, new SqlServerMigrator(), SqlServerProvider.Instance)
@@ -45,7 +56,10 @@ public class SqlServerMessageStore : MessageDatabase<SqlConnection>
             $"select top (@limit) {DatabaseConstants.IncomingFields} from {database.SchemaName}.{DatabaseConstants.IncomingTable} where owner_id = {TransportConstants.AnyNode} and status = '{EnvelopeStatus.Incoming}' and {DatabaseConstants.ReceivedAt} = @address";
 
         _scheduledLockId = "Wolverine:Scheduled:" + database.ScheduledJobLockId.ToString();
-        AdvisoryLock = new AdvisoryLock(() => new SqlConnection(database.ConnectionString),
+        // Use the Wolverine-owned SqlServerAdvisoryLock (not Weasel.SqlServer.AdvisoryLock)
+        // so HasLock pings the held SQL session and detects KILL SPID / AlwaysOn
+        // failover / network drops. See GH-2602.
+        AdvisoryLock = new SqlServerAdvisoryLock(() => new SqlConnection(database.ConnectionString),
             logger, Identifier);
 
         foreach (var sagaTableDefinition in sagaTypes)
@@ -99,7 +113,7 @@ public class SqlServerMessageStore : MessageDatabase<SqlConnection>
         foreach (var schemaName in schemaNames)
         {
             var sql = $"SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema = @schema";
-            var cmd = conn.CreateCommand(sql).With("schema", schemaName);
+            await using var cmd = conn.CreateCommand(sql).With("schema", schemaName);
 
             await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
             while (await reader.ReadAsync(ct).ConfigureAwait(false))
@@ -124,7 +138,23 @@ public class SqlServerMessageStore : MessageDatabase<SqlConnection>
 
     protected override bool isExceptionFromDuplicateEnvelope(Exception ex)
     {
-        return ex is SqlException sqlEx && sqlEx.Message.ContainsIgnoreCase("Violation of PRIMARY KEY constraint");
+        if (ex is SqlException sqlEx)
+        {
+            if (sqlEx.Number == 2627 || sqlEx.Number == 2601) return true;
+            return sqlEx.Message.ContainsIgnoreCase("Violation of PRIMARY KEY constraint")
+                || sqlEx.Message.ContainsIgnoreCase("Violation of UNIQUE KEY constraint");
+        }
+
+        return false;
+    }
+
+    public override string? BatchedDeleteExpiredHandledEnvelopesSql(int batchSize)
+    {
+        // DELETE TOP bounds each statement so locks are held only briefly, reducing contention
+        // with live inbox traffic under heavy load.
+        return
+            $"delete top ({batchSize}) from {SchemaName}.{DatabaseConstants.IncomingTable} " +
+            $"where {DatabaseConstants.Status} = '{EnvelopeStatus.Handled}' and {DatabaseConstants.KeepUntil} <= @now;";
     }
 
     protected override void writePagingAfter(DbCommandBuilder builder, int offset, int limit)
@@ -339,7 +369,7 @@ public class SqlServerMessageStore : MessageDatabase<SqlConnection>
         return table;
     }
 
-    protected override Task deleteMany(DbTransaction tx, Guid[] ids, DbObjectName tableName, string idColumnName)
+    protected override async Task deleteMany(DbTransaction tx, Guid[] ids, DbObjectName tableName, string idColumnName)
     {
         var builder = new BatchBuilder();
 
@@ -350,16 +380,21 @@ public class SqlServerMessageStore : MessageDatabase<SqlConnection>
             builder.AppendParameter(id);
         }
 
-        var batch = builder.Compile();
+        await using var batch = builder.Compile();
         batch.Connection = (SqlConnection)tx.Connection!;
         batch.Transaction = (SqlTransaction)tx;
 
-        return batch.ExecuteNonQueryAsync();
+        await batch.ExecuteNonQueryAsync();
     }
 
     protected override Task<bool> TryAttainLockAsync(int lockId, SqlConnection connection, CancellationToken token)
     {
         return connection.TryGetGlobalLock(lockId.ToString(), token);
+    }
+
+    protected override Task ReleaseLockAsync(int lockId, SqlConnection connection, CancellationToken token)
+    {
+        return connection.ReleaseGlobalLock(lockId.ToString(), token);
     }
 
     protected override DbCommand buildFetchSql(SqlConnection conn, DbObjectName tableName, string[] columnNames, int maxRecords)
@@ -380,12 +415,16 @@ public class SqlServerMessageStore : MessageDatabase<SqlConnection>
         await conn.OpenAsync(cancellationToken);
         try
         {
+            // GH-3664: transaction-scoped lock — keep this transaction short and never await anything
+            // that isn't a command on this connection while it is open. See the fuller discussion on the
+            // Postgres twin (PostgresqlMessageStore.PollForScheduledMessagesAsync); the same hygiene
+            // applies here even though Marten's gap-liveness gate is Postgres-only.
             var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken);
             if (await tx.TryGetGlobalTxLock(_scheduledLockId, cancellationToken))
             {
                 var builder = new DbCommandBuilder(conn);
                 WriteLoadScheduledEnvelopeSql(builder, DateTimeOffset.UtcNow);
-                var cmd = builder.Compile();
+                await using var cmd = builder.Compile();
                 cmd.Connection = conn;
                 cmd.Transaction = tx;
 
@@ -398,7 +437,7 @@ public class SqlServerMessageStore : MessageDatabase<SqlConnection>
                     return;
                 }
 
-                var reassign = conn.CreateCommand($"{_settings.SchemaName}.uspMarkIncomingOwnership", tx);
+                await using var reassign = conn.CreateCommand($"{_settings.SchemaName}.uspMarkIncomingOwnership", tx);
                 reassign.CommandType = CommandType.StoredProcedure;
 
                 await reassign
@@ -407,6 +446,14 @@ public class SqlServerMessageStore : MessageDatabase<SqlConnection>
                     .ExecuteNonQueryAsync(_cancellation);
 
                 await tx.CommitAsync(cancellationToken);
+
+                // Stamp the envelope's owning store on each row so the rest of the
+                // pipeline (DelegatingMessageInbox, DurableReceiver._markAsHandled)
+                // routes its writes back to THIS store. See GH-2576.
+                foreach (var envelope in envelopes)
+                {
+                    envelope.Store = this;
+                }
 
                 // Judging that there's very little chance of errors here
                 await runtime.EnqueueDirectlyAsync(envelopes);
@@ -418,6 +465,54 @@ public class SqlServerMessageStore : MessageDatabase<SqlConnection>
         }
     }
 
+    /// <summary>
+    /// The SQL Server instance this database lives on (#3397). Unlike PostgreSQL, the port is left
+    /// null: SQL Server's <c>Data Source</c> already carries it (<c>host,1433</c>) or a named
+    /// instance (<c>host\SQLEXPRESS</c>), so it is kept whole and is already unique.
+    /// </summary>
+    public DatabaseServerId ServerId
+    {
+        get
+        {
+            if (_serverId.HasValue)
+            {
+                return _serverId.Value;
+            }
+
+            // Sourced from Describe() so the server id and the diagnostic descriptor can't disagree
+            // about the host. Cached, so the descriptor is only built once.
+            _serverId = DatabaseServerId.For(Describe());
+
+            return _serverId.Value;
+        }
+    }
+
+    /// <summary>
+    /// Note that this needs the <c>VIEW SERVER STATE</c> permission, which locked-down hosting does
+    /// not always grant. The sweeper degrades to "budget unknown" (one warning, then silence) rather
+    /// than failing the metrics pass when it is missing — see #3397.
+    /// </summary>
+    public async ValueTask<int> CountServerConnectionsAsync(CancellationToken token)
+    {
+        // Server-wide, across every database and application on the instance — connections are an
+        // instance-scoped resource, so scoping the count to this database would measure the wrong
+        // thing.
+        var raw = await CreateCommand("select count(*) from sys.dm_exec_connections")
+            .ExecuteScalarAsync(token).ConfigureAwait(false);
+
+        return raw is int count ? count : 0;
+    }
+
+    public async ValueTask<int?> ProbeMaxConnectionsAsync(CancellationToken token)
+    {
+        var raw = await CreateCommand("select @@MAX_CONNECTIONS")
+            .ExecuteScalarAsync(token).ConfigureAwait(false);
+
+        // Zero means "unlimited, SQL Server sizes it dynamically" — which is not a budget, so report
+        // it as unknown rather than charting a limit of nothing.
+        return raw is int max && max > 0 ? max : null;
+    }
+
     public override DatabaseDescriptor Describe()
     {
         var builder = new SqlConnectionStringBuilder(_settings.ConnectionString);
@@ -425,6 +520,9 @@ public class SqlServerMessageStore : MessageDatabase<SqlConnection>
         {
             Engine = "SqlServer",
             ServerName = builder.DataSource ?? string.Empty,
+            // Deliberately null: SqlServer's Data Source already carries the port (host,1433) or a
+            // named instance (host\SQLEXPRESS), so splitting it back out would only invent ambiguity.
+            Port = null,
             DatabaseName = builder.InitialCatalog ?? string.Empty,
             Subject = GetType().FullNameInCode(),
             SchemaOrNamespace = _settings.SchemaName!,
@@ -524,6 +622,15 @@ public class SqlServerMessageStore : MessageDatabase<SqlConnection>
             eventTable.AddColumn("description", "varchar(500)").AllowNulls();
             yield return eventTable;
 
+            // Dynamic listener registry (GH-2685). Provisioned only when the opt-in
+            // flag is set so existing apps see no migration churn.
+            if (Durability.EnableDynamicListeners)
+            {
+                var listenerTable =
+                    new Table(new DbObjectName(SchemaName, DatabaseConstants.ListenersTableName));
+                listenerTable.AddColumn<string>("uri").AsPrimaryKey();
+                yield return listenerTable;
+            }
         }
         
         foreach (var entry in _sagaStorage.Enumerate())

@@ -2,14 +2,12 @@ using System.Diagnostics;
 using IntegrationTests;
 using JasperFx;
 using JasperFx.Core;
+using JasperFx.MultiTenancy;
 using Marten;
-using Marten.Storage;
 using Microsoft.Extensions.Hosting;
 using JasperFx.Resources;
 using Shouldly;
-using Weasel.Core;
 using Wolverine;
-using Wolverine.Configuration;
 using Wolverine.Marten;
 using Wolverine.Postgresql;
 using Wolverine.Tracking;
@@ -41,9 +39,12 @@ public class Bug_1175_schema_name_with_queues
                         options.MessageStorageSchemaName = "sender";
                     });
 
+                opts.Discovery.DisableConventionalDiscovery()
+                    .IncludeType(typeof(ColorResponseHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Services.AddResourceSetupOnStartup();
 
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
         
         using var listener = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -68,9 +69,12 @@ public class Bug_1175_schema_name_with_queues
                         options.MessageStorageSchemaName = "listener";
                     });
 
+                opts.Discovery.DisableConventionalDiscovery()
+                    .IncludeType(typeof(ColorRequestHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Services.AddResourceSetupOnStartup();
 
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var tracked = await sender.TrackActivity().AlsoTrack(listener).SendMessageAndWaitAsync(new ColorRequest("red"));
         tracked.Received.SingleMessage<ColorResponse>().Color.ShouldBe("red");

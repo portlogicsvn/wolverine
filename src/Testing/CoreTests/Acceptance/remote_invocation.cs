@@ -24,7 +24,7 @@ public class remote_invocation : IAsyncLifetime
 
     private IHost _sender = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         var senderPort = PortFinder.GetAvailablePort();
         _receiver1Port = PortFinder.GetAvailablePort();
@@ -69,7 +69,7 @@ public class remote_invocation : IAsyncLifetime
             }).StartAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _receiver1.StopAsync();
         _receiver1.Dispose();
@@ -419,7 +419,7 @@ public class remote_invocation : IAsyncLifetime
 
         // The response should ALSO have been published as a cascading message
         // and handled by AlwaysPublishResponseReceivedHandler on the receiver
-        var handled = await AlwaysPublishResponseReceivedHandler.Received.Task.WaitAsync(10.Seconds());
+        var handled = await AlwaysPublishResponseReceivedHandler.Received.Task.WaitAsync(10.Seconds(), TestContext.Current.CancellationToken);
         handled.ShouldBeTrue();
     }
 }

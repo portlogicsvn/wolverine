@@ -16,12 +16,16 @@ public class catch_up_then_restart : IAsyncLifetime
 {
     private IHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
 
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery()
+                    .IncludeType(typeof(AppendLettersHandler))
+                    .IncludeType(typeof(AppendLetters2Handler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Services.AddMarten(m =>
                 {
                     m.Connection(Servers.PostgresConnectionString);
@@ -36,7 +40,9 @@ public class catch_up_then_restart : IAsyncLifetime
                     m.DatabaseSchemaName = "letters3";
 
                     m.Projections.Add<LetterCountsProjection>(ProjectionLifecycle.Async);
-                }).AddAsyncDaemon(DaemonMode.Solo).IntegrateWithWolverine();
+                }).IntegrateWithWolverine(); // GH-3388: no AddAsyncDaemon here — this is the SAME main store
+                              // that enabled UseWolverineManagedEventSubscriptionDistribution above,
+                              // and Wolverine runs its daemon.
                 
                 opts.Services.AddMartenStore<ILetterStore>(m =>
                 {
@@ -52,9 +58,10 @@ public class catch_up_then_restart : IAsyncLifetime
             }).StartAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _host.StopAsync();
+        _host.Dispose();
     }
     
     [Fact]
@@ -69,10 +76,10 @@ public class catch_up_then_restart : IAsyncLifetime
         session.Events.StartStream<LetterCounts>("AABBCCDDEE".ToLetterEvents());
         session.Events.StartStream<LetterCounts>("AABBCCDDEE".ToLetterEvents());
         session.Events.StartStream<LetterCounts>("AABBCCDDEE".ToLetterEvents());
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
         await _host.WaitForNonStaleProjectionDataAsync(5.Seconds());
         
-        (await session.Query<LetterCounts>().CountAsync()).ShouldBe(3);
+        (await session.Query<LetterCounts>().CountAsync(token: TestContext.Current.CancellationToken)).ShouldBe(3);
 
 
         var tracked = await _host.TrackActivity()
@@ -86,7 +93,7 @@ public class catch_up_then_restart : IAsyncLifetime
 
         // Proving that previous data was wiped out
 
-        var all = await session.Query<LetterCounts>().ToListAsync();
+        var all = await session.Query<LetterCounts>().ToListAsync(token: TestContext.Current.CancellationToken);
         var counts = all.Single();
         counts.Id.ShouldBe(id);
         
@@ -107,10 +114,10 @@ public class catch_up_then_restart : IAsyncLifetime
         session.Events.StartStream<LetterCounts>("AABBCCDDEE".ToLetterEvents());
         session.Events.StartStream<LetterCounts>("AABBCCDDEE".ToLetterEvents());
         session.Events.StartStream<LetterCounts>("AABBCCDDEE".ToLetterEvents());
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
         await _host.WaitForNonStaleProjectionDataAsync<ILetterStore>(5.Seconds());
         
-        (await session.Query<LetterCounts>().CountAsync()).ShouldBe(3);
+        (await session.Query<LetterCounts>().CountAsync(token: TestContext.Current.CancellationToken)).ShouldBe(3);
 
 
         var tracked = await _host.TrackActivity()
@@ -120,7 +127,7 @@ public class catch_up_then_restart : IAsyncLifetime
         
         // Proving that previous data was wiped out
 
-        var all = await session.Query<LetterCounts>().ToListAsync();
+        var all = await session.Query<LetterCounts>().ToListAsync(token: TestContext.Current.CancellationToken);
         var counts = all.Single();
         counts.Id.ShouldBe(id);
         

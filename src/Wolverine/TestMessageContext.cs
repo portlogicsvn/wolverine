@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using JasperFx.Core;
 using JasperFx.Core.Reflection;
 using Wolverine.Runtime.RemoteInvocation;
@@ -219,6 +220,49 @@ public class TestMessageContext : IMessageContext
 
         var response = findResponse<T>(message);
         return Task.FromResult(response);
+    }
+
+    IAsyncEnumerable<TResponse> ICommandBus.StreamAsync<TResponse>(object message, CancellationToken cancellation)
+    {
+        _invoked.Add(message);
+        return EmptyAsyncEnumerable<TResponse>(cancellation);
+    }
+
+    IAsyncEnumerable<TResponse> ICommandBus.StreamAsync<TResponse>(object message, DeliveryOptions options,
+        CancellationToken cancellation)
+    {
+        var envelope = new Envelope(message);
+        options.Override(envelope);
+        _invoked.Add(envelope);
+        return EmptyAsyncEnumerable<TResponse>(cancellation);
+    }
+
+    Task<TResponse> ICommandBus.StreamAsync<TRequest, TResponse>(IAsyncEnumerable<TRequest> messages,
+        CancellationToken cancellation, TimeSpan? timeout)
+    {
+        _invoked.Add(messages);
+
+        var response = findResponse<TResponse>(messages);
+        return Task.FromResult(response);
+    }
+
+    Task<TResponse> ICommandBus.StreamAsync<TRequest, TResponse>(IAsyncEnumerable<TRequest> messages,
+        DeliveryOptions options, CancellationToken cancellation, TimeSpan? timeout)
+    {
+        var envelope = new Envelope(messages);
+        options.Override(envelope);
+
+        _invoked.Add(envelope);
+
+        var response = findResponse<TResponse>(messages);
+        return Task.FromResult(response);
+    }
+
+    private static async IAsyncEnumerable<T> EmptyAsyncEnumerable<T>(
+        [EnumeratorCancellation] CancellationToken cancellation = default)
+    {
+        await Task.CompletedTask;
+        yield break;
     }
 
     public Task InvokeForTenantAsync(string tenantId, object message, CancellationToken cancellation = default,

@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Linq.Expressions;
 using FastExpressionCompiler;
 using ImTools;
@@ -17,6 +18,17 @@ using Wolverine.Runtime;
 
 namespace Wolverine.EntityFrameworkCore.Internals;
 
+// AOT note (#2746): Tenanted DbContext construction reflects over the DbContext
+// generic type to find the public ctor accepting DbContextOptions<T>, then
+// expression-compiles a factory. Same chunk M (LoggerVariableSource) Dynamic-
+// codegen pattern; AOT consumers register the DbContext factory explicitly
+// (or use the Static codegen path that bakes it in).
+[UnconditionalSuppressMessage("Trimming", "IL2026",
+    Justification = "FastExpressionCompiler.CompileFast at registration; AOT consumers register an explicit factory. See AOT guide / #2755.")]
+[UnconditionalSuppressMessage("Trimming", "IL2090",
+    Justification = "DbContext T parameter accessed for ctor lookup; T is statically rooted by AddWolverineEFCore<T>(). See AOT guide.")]
+[UnconditionalSuppressMessage("AOT", "IL3050",
+    Justification = "FastExpressionCompiler emits IL at registration time; AOT consumers register an explicit factory. See AOT guide / #2755.")]
 public class TenantedDbContextBuilderByConnectionString<T> : IDbContextBuilder<T>  where T : DbContext
 {
     private readonly Action<DbContextOptionsBuilder<T>, ConnectionString, TenantId> _configuration;
@@ -66,6 +78,8 @@ public class TenantedDbContextBuilderByConnectionString<T> : IDbContextBuilder<T
         builder.UseApplicationServiceProvider(_serviceProvider);
         
         builder.ReplaceService<IModelCustomizer, WolverineModelCustomizer>();
+        // Cache models per (context type, wolverine schema) -- GH-3497
+        builder.ReplaceService<IModelCacheKeyFactory, WolverineModelCacheKeyFactory>();
         _configuration(builder, new ConnectionString(connectionString), new TenantId(messaging.TenantId!));
         var dbContext = _constructor(builder.Options);
 
@@ -110,13 +124,16 @@ public class TenantedDbContextBuilderByConnectionString<T> : IDbContextBuilder<T
     public async Task EnsureAllTenantDatabasesCreatedAsync()
     {
         await _store.Source.RefreshAsync();
-        foreach (var assignment in _store.Source.AllActiveByTenant())
-        {
-            var dbContext = await BuildAsync(assignment.TenantId, CancellationToken.None);
-            await _serviceProvider.EnsureDatabaseExistsAsync(dbContext);
-            await using var migration = await _serviceProvider.CreateMigrationAsync(dbContext, CancellationToken.None);
-            await migration.ExecuteAsync(AutoCreate.CreateOrUpdate, CancellationToken.None);
-        }
+        var assignments = _store.Source.AllActiveByTenant().ToList();
+
+        await Parallel.ForEachAsync(assignments, new ParallelOptions { MaxDegreeOfParallelism = 10 },
+            async (assignment, ct) =>
+            {
+                var dbContext = await BuildAsync(assignment.TenantId, ct);
+                await _serviceProvider.EnsureDatabaseExistsAsync(dbContext, ct);
+                await using var migration = await _serviceProvider.CreateMigrationAsync(dbContext, ct);
+                await migration.ExecuteAsync(AutoCreate.CreateOrUpdate, ct);
+            });
     }
 
     public async Task ApplyAllChangesToDatabasesAsync()
@@ -152,6 +169,8 @@ public class TenantedDbContextBuilderByConnectionString<T> : IDbContextBuilder<T
         var builder = new DbContextOptionsBuilder<T>();
         builder.UseApplicationServiceProvider(_serviceProvider);
         builder.ReplaceService<IModelCustomizer, WolverineModelCustomizer>();
+        // Cache models per (context type, wolverine schema) -- GH-3497
+        builder.ReplaceService<IModelCacheKeyFactory, WolverineModelCacheKeyFactory>();
         
         _configuration(builder, new ConnectionString(connectionString), new TenantId(tenantId));
         var dbContext = _constructor(builder.Options);
@@ -195,6 +214,8 @@ public class TenantedDbContextBuilderByConnectionString<T> : IDbContextBuilder<T
         var builder = new DbContextOptionsBuilder<T>();
         builder.UseApplicationServiceProvider(_serviceProvider);
         builder.ReplaceService<IModelCustomizer, WolverineModelCustomizer>();
+        // Cache models per (context type, wolverine schema) -- GH-3497
+        builder.ReplaceService<IModelCacheKeyFactory, WolverineModelCacheKeyFactory>();
         _configuration(builder, new ConnectionString(connectionString!), new TenantId(StorageConstants.DefaultTenantId));
         return builder.Options;
     }

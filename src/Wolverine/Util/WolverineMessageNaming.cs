@@ -1,4 +1,5 @@
-﻿using System.Reflection;
+﻿using System.Diagnostics.CodeAnalysis;
+using System.Reflection;
 using System.Text.RegularExpressions;
 using ImTools;
 using JasperFx.Core;
@@ -65,6 +66,8 @@ internal class MessageIdentityAttributeNaming : IMessageTypeNaming
 
 internal class ForwardNaming : IMessageTypeNaming
 {
+    [UnconditionalSuppressMessage("Trimming", "IL2067",
+        Justification = "messageType originates from Wolverine's message-type registry (HandlerDiscovery / RegisterMessageType). The IForwardsTo<> interface closure inspection runs against application-rooted forwarder types preserved by the registration.")]
     public bool TryDetermineName(Type messageType, out string messageTypeName)
     {
         if (messageType.Closes(typeof(IForwardsTo<>)))
@@ -107,6 +110,15 @@ internal class InteropAssemblyInterfaces : IMessageTypeNaming
 {
     internal List<Assembly> Assemblies { get; } = [];
 
+    // Suppression rather than annotating the IMessageTypeNaming interface +
+    // 6 implementations: the messageType comes from runtime-resolved message
+    // types that are already kept by virtue of being instantiated. Trimming
+    // could in theory remove an interface from messageType's interface list,
+    // but the impl is opt-in interop naming — Apps that need it register the
+    // assemblies explicitly via opts.AddInteropAssembly(...), which keeps
+    // those assemblies' types in the trim graph.
+    [UnconditionalSuppressMessage("Trimming", "IL2070",
+        Justification = "InteropAssemblyInterfaces is opt-in interop naming; consumers register assemblies explicitly which preserves the relevant interfaces in the trim graph.")]
     public bool TryDetermineName(Type messageType, out string messageTypeName)
     {
         var @interface = messageType.GetInterfaces()
@@ -141,6 +153,8 @@ public static class WolverineMessageNaming
     {
         if (_namingStrategies[0] is T) return;
         _namingStrategies.Insert(0, new T());
+
+        clearCache();
     }
 
     /// <summary>
@@ -151,7 +165,22 @@ public static class WolverineMessageNaming
     public static void AddMessageInterfaceAssembly(Assembly assembly)
     {
         var naming = _namingStrategies.OfType<InteropAssemblyInterfaces>().Single();
+        if (naming.Assemblies.Contains(assembly)) return;
+
         naming.Assemblies.Fill(assembly);
+
+        clearCache();
+    }
+
+    /// <summary>
+    /// Discard every memoized message type name. Changing the naming strategies invalidates any name
+    /// already resolved by the previous set -- a type cached under its full name by an earlier
+    /// <see cref="ToMessageTypeName(Type)"/> call (or by <see cref="PrepopulateCache"/> during a host
+    /// start) would otherwise keep that name forever and silently ignore the new strategy. See GH-3703.
+    /// </summary>
+    private static void clearCache()
+    {
+        _typeNames = ImHashMap<Type, string>.Empty;
     }
 
     public static string GetPrettyName(this Type t)
@@ -189,6 +218,28 @@ public static class WolverineMessageNaming
         _typeNames = _typeNames.AddOrUpdate(type, name);
 
         return name;
+    }
+
+    /// <summary>
+    /// Pre-populate the message-type-name cache with the supplied types. Called during
+    /// Wolverine startup so the per-message <see cref="ToMessageTypeName(Type)"/> hot
+    /// path never pays the first-occurrence reflection cost (attribute reads, interface
+    /// walks, generic-type pretty-printing) inside <c>Envelope</c> construction or
+    /// dispatch. See issue #1577 (cold-start optimizations).
+    /// </summary>
+    /// <param name="types">Types to resolve and cache. Duplicates are tolerated.</param>
+    public static void PrepopulateCache(IEnumerable<Type> types)
+    {
+        if (types == null) return;
+
+        foreach (var type in types)
+        {
+            if (type == null) continue;
+            if (_typeNames.TryFind(type, out _)) continue;
+
+            var name = toMessageTypeName(type);
+            _typeNames = _typeNames.AddOrUpdate(type, name);
+        }
     }
 
     private static string toMessageTypeName(Type type)

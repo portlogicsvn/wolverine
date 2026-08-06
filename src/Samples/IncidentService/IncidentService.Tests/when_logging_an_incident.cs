@@ -16,7 +16,6 @@ public class when_logging_an_incident : IntegrationContext
     }
 
     #region sample_unit_test_log_incident
-
     [Fact]
     public void unit_test()
     {
@@ -35,7 +34,6 @@ public class when_logging_an_incident : IntegrationContext
     #endregion
 
     #region sample_end_to_end_on_log_incident
-
     [Fact]
     public async Task happy_path_end_to_end()
     {
@@ -50,7 +48,7 @@ public class when_logging_an_incident : IntegrationContext
         });
 
         // Read the response body by deserialization
-        var response = initial.ReadAsJson<CreationResponse<Guid>>();
+        var response = await initial.ReadAsJsonAsync<CreationResponse<Guid>>();
 
         // Reaching into Marten to build the current state of the new Incident
         // just to check the expected outcome
@@ -59,7 +57,7 @@ public class when_logging_an_incident : IntegrationContext
         
         
         // This wallpapers over the exact projection lifecycle....
-        var incident = await session.Events.FetchLatest<Incident>(response.Value);
+        var incident = await session.Events.FetchLatest<Incident>(response.Value, TestContext.Current.CancellationToken);
         
         incident!.Status.ShouldBe(IncidentStatus.Pending);
     }

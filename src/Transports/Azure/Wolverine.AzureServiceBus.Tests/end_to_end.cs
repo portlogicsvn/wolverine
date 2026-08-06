@@ -4,20 +4,16 @@ using Shouldly;
 using Wolverine.AzureServiceBus.Internal;
 using Wolverine.Configuration;
 using Wolverine.Tracking;
-using Wolverine.Transports;
 using Xunit;
 
 namespace Wolverine.AzureServiceBus.Tests;
 
-[Trait("Category", "Flaky")]
 public class end_to_end : IAsyncLifetime
 {
     private IHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
-        #region sample_using_azure_service_bus_session_identifiers
-
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -57,11 +53,9 @@ public class end_to_end : IAsyncLifetime
 
                     .ProcessInline();
             }).StartAsync();
-
-        #endregion
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _host.StopAsync();
         _host.Dispose();
@@ -84,9 +78,7 @@ public class end_to_end : IAsyncLifetime
     [Fact]
     public async Task disable_system_queues()
     {
-        #region sample_disable_system_queues_in_azure_service_bus
-
-        var host = await Host.CreateDefaultBuilder()
+        using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
                 opts.UseAzureServiceBusTesting()
@@ -96,9 +88,7 @@ public class end_to_end : IAsyncLifetime
                 opts.ListenToAzureServiceBusQueue("send_and_receive");
 
                 opts.PublishAllMessages().ToAzureServiceBusQueue("send_and_receive");
-            }).StartAsync();
-
-        #endregion
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var transport = host.GetRuntime().Options.Transports.GetOrCreate<AzureServiceBusTransport>();
 
@@ -118,7 +108,7 @@ public class end_to_end : IAsyncLifetime
 
         var session = await _host.TrackActivity()
             .IncludeExternalTransports()
-            .Timeout(5.Minutes())
+            .Timeout(30.Seconds())
             .SendMessageAndWaitAsync(message);
 
         session.Received.SingleMessage<AsbMessage1>()
@@ -151,7 +141,6 @@ public class end_to_end : IAsyncLifetime
         Func<IMessageContext, Task> sendMany = async bus =>
         {
             #region sample_sending_with_session_identifier
-
             // bus is an IMessageBus
             await bus.SendAsync(new AsbMessage3("Red"), new DeliveryOptions { GroupId = "2" });
             await bus.SendAsync(new AsbMessage3("Green"), new DeliveryOptions { GroupId = "2" });

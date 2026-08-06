@@ -28,7 +28,7 @@ public interface IPublishingRelay
     /// </summary>
     void PublishEvent(Type eventType);
 
-    uint SubscriptionVersion { get; set; }
+    uint Version { get; set; }
 
     /// <summary>
     /// Should this subscription be applied to archived events? The default is false
@@ -83,7 +83,7 @@ internal class PublishingRelay : BatchSubscription, IPublishingRelay
             }
             else
             {
-                if (e.TenantId != global::Polecat.Tenancy.DefaultTenantId)
+                if (e.TenantId != JasperFx.StorageConstants.DefaultTenantId)
                 {
                     await bus.PublishAsync(e, new DeliveryOptions{TenantId = e.TenantId});
                 }

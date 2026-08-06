@@ -9,6 +9,7 @@ using Wolverine.Configuration;
 using Wolverine.Logging;
 using Wolverine.Persistence;
 using Wolverine.Persistence.Durability;
+using Wolverine.Persistence.Sagas;
 using Wolverine.Runtime;
 using Wolverine.Runtime.Agents;
 using Wolverine.Runtime.Handlers;
@@ -95,9 +96,19 @@ public class MockWolverineRuntime : IWolverineRuntime, IObserver<IWolverineEvent
     public IHandlerPipeline Pipeline { get; } = Substitute.For<IHandlerPipeline>();
     public WolverineTracker Tracker { get; } = new(NullLogger.Instance);
 
+    public Dictionary<Type, IMessageRouter> Routers { get; } = new();
+
     public IMessageRouter RoutingFor(Type messageType)
     {
-        return Substitute.For<IMessageRouter>();
+        return Routers.TryGetValue(messageType, out var router) ? router : Substitute.For<IMessageRouter>();
+    }
+
+    public Wolverine.Runtime.Routing.RoutingExplanation ExplainRoutingFor(Type messageType)
+    {
+        return new Wolverine.Runtime.Routing.RoutingExplanation
+        {
+            MessageType = messageType.FullName ?? messageType.Name
+        };
     }
 
     public T? TryFindExtension<T>() where T : class
@@ -112,6 +123,8 @@ public class MockWolverineRuntime : IWolverineRuntime, IObserver<IWolverineEvent
 
 
     public MessageStoreCollection Stores => new MessageStoreCollection(this, [], []);
+
+    public ISagaStoreDiagnostics SagaStorage { get; } = Substitute.For<ISagaStoreDiagnostics>();
 
     public Task<T?> TryFindMainMessageStore<T>() where T : class
     {

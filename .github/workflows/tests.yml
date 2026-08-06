@@ -1,0 +1,184 @@
+name: tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  config: Release
+  disable_test_parallelization: true
+
+jobs:
+  test:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    # The 20 minute cap is deliberately a REAL signal: a job that needs longer than this is a job that
+    # needs to be split, not a job that needs a bigger number. The two suites that used to blow through it
+    # (CIAWS and CIPolecat) are now sharded across parallel jobs instead. See #3350.
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          # AWS is split three ways: the SQS project is far and away the heavier of the two, so it is further
+          # split into its compliance batteries and everything else. See #3350.
+          - CIAWSSqs
+          - CIAWSSqsCompliance
+          - CIAWSSns
+          # Wolverine.AzureServiceBus.Tests is one project sharded three ways by CLASS, balanced on
+          # MEASURED per-class durations. Namespaces cannot split it — 264 of its 306 tests are in the
+          # root namespace. CIAzureServiceBus is the "everything else" shard, so a newly added class
+          # still runs somewhere. It sat at 84% of the 20 minute cap as a single job. See #3790, #3350.
+          - CIAzureServiceBus
+          - CIAzureServiceBusLeader
+          - CIAzureServiceBusRouting
+          - CICosmosDb
+          - CIEfCore
+          - CIGrpc
+          - CIKafka
+          # MartenTests is one Postgres project sharded three ways by namespace, each shard strictly
+          # sequential against a single database, balanced on MEASURED per-namespace durations. CIMarten
+          # is the "everything else" shard, so a newly added namespace still runs somewhere. Replaces the
+          # worker-lane split that got the runner OOM-killed. See #3771, #3762, #3350.
+          - CIMarten
+          - CIMartenDistribution
+          - CIMartenTenancy
+          - CIMQTT
+          - CIMQTT5
+          - CIMySql
+          - CINATS
+          - CIOracle
+          - CIOtel
+          - CIPersistence
+          # PolecatTests is one serial SqlServer project sharded three ways by namespace. CIPolecat is the
+          # "everything else" shard, so a newly added namespace still runs somewhere. See #3350.
+          - CIPolecat
+          - CIPolecatWorkflow
+          - CIPolecatSagas
+          - CIPubsub
+          - CIPulsar
+          - CIRabbitMQ
+          - CIRavenDb
+          - CIRedis
+          - CISqlite
+          - CISqlServer
+          - CICircuitBreaking
+          - CIAotSmoke
+          # NOTE: CISlowTests is deliberately NOT here. It is wall-clock bound by design and blew
+          # through the 20 minute cap on its first run; it lives in slow-tests.yml as a manual job.
+        include:
+          # CIMarten was twice killed outright by the runner ~15 minutes in ("The runner has received a
+          # shutdown signal"), on unrelated diffs, at almost exactly the same elapsed time on both
+          # attempts -- the signature of the VM running out of memory rather than of a test failure.
+          # The worker lanes that caused it are gone (the suite is sharded across these three jobs
+          # instead, one database at a time), so this sampler is now here to *confirm* the footprint
+          # actually dropped and to catch a recurrence with evidence rather than a guess. See #3771.
+          - target: CIMarten
+            memory_telemetry: true
+          - target: CIMartenDistribution
+            memory_telemetry: true
+          - target: CIMartenTenancy
+            memory_telemetry: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Run Tests
+        env:
+          MEMORY_TELEMETRY: ${{ matrix.memory_telemetry }}
+          # Names this job in the retry ledger (build/RetryLedger.cs). GITHUB_JOB is the matrix's
+          # job id -- the same string, "test", for all thirty of these -- so it cannot be used.
+          CI_JOB_NAME: ${{ matrix.target }}
+        run: |
+          # The sampler has to live inside this step: when the runner is killed, later steps are
+          # skipped, so only what has already been streamed to this step's log survives. See #3771.
+          if [ "${MEMORY_TELEMETRY:-}" = "true" ]; then
+            ./build/ci-memory-sampler.sh &
+            sampler_pid=$!
+            trap 'kill "${sampler_pid}" 2>/dev/null || true' EXIT
+          fi
+          ./build.sh ${{ matrix.target }} --framework net9.0
+
+      # Only reachable when the runner itself survived. If the OOM killer took a *test* process
+      # rather than the runner service, the kill is recorded here and nowhere else.
+      - name: Kernel OOM report
+        if: failure() && matrix.memory_telemetry == true
+        run: |
+          echo "::group::dmesg (OOM / kill events)"
+          sudo dmesg | grep -iE "out of memory|oom-kill|killed process" || echo "no OOM events in dmesg"
+          echo "::endgroup::"
+          free -m
+
+      # The per-job half of GH-3787. `if: always()` because a job that FAILED is exactly the one
+      # whose retry count is worth having -- and a job killed by the 20-minute cap uploads nothing
+      # at all, which the roll-up below reports as unmeasured rather than as clean.
+      - name: Upload retry ledger
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-ledger-${{ matrix.target }}
+          path: artifacts/test-ledger/
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Stop containers
+        if: always()
+        run: docker compose down
+
+  # The run-level half of GH-3787. Aggregates every job's ledger into one table on the run summary
+  # and diffs it against the last `main` run that published one.
+  #
+  # This exists because the absolute retry count was never the signal: CIAzureServiceBus sat at 22 of
+  # 25 retries for four consecutive GREEN main runs, and the step from 1 to 22 between two adjacent
+  # runs was the thing worth seeing. Nowhere had that number ever been written down to compare
+  # against. Informational only -- it never fails the run.
+  flakiness:
+    name: Flakiness roll-up
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      # Fails when nothing matches, which is a legitimate state: every test job can have died before
+      # it wrote a ledger. The roll-up reports that as unmeasured, so it must survive to run.
+      - name: Download retry ledgers
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          pattern: test-ledger-*
+          path: ledgers
+          merge-multiple: false
+
+      - name: Roll up
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./build/flakiness-report.sh ledgers rollup
+
+      # This run's aggregate becomes the next run's baseline. Only from `main`: a PR's numbers are
+      # measured against main, never the other way round, or one noisy branch would move the bar.
+      - name: Publish this run's baseline
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-ledger-run
+          path: rollup/aggregate.json
+          if-no-files-found: warn
+          retention-days: 90

@@ -75,6 +75,25 @@ public abstract class WolverineHttpMethodAttribute : Attribute
     /// Swashbuckle
     /// </summary>
     public string? OperationId { get; set; }
+
+    /// <summary>
+    /// Sets the summary for this endpoint in OpenAPI documentation
+    /// </summary>
+    public string? Summary { get; set; }
+
+    /// <summary>
+    /// Sets the description for this endpoint in OpenAPI documentation
+    /// </summary>
+    public string? Description { get; set; }
+
+    /// <summary>
+    /// Optionally override the name of the C# type Wolverine generates for this endpoint. Wolverine
+    /// normally derives that type name from the route template, but a route may contain characters that
+    /// are legal in a URL yet not in a C# identifier (for example <c>"/assets/$action"</c>). Wolverine
+    /// sanitizes those automatically, but this is the escape hatch when you want an explicit, readable
+    /// generated type name for such routes. The value is still sanitized to a valid identifier.
+    /// </summary>
+    public string? TypeName { get; set; }
 }
 
 /// <summary>
@@ -177,6 +196,22 @@ public class WolverinePatchAttribute : WolverineHttpMethodAttribute
 public class WolverineOptionsAttribute : WolverineHttpMethodAttribute
 {
     public WolverineOptionsAttribute([StringSyntax("Route")]string template) : base("OPTIONS", template)
+    {
+    }
+}
+
+/// <summary>
+///     Marks a method on a Wolverine endpoint as being a QUERY route. QUERY (RFC 10008) is a safe,
+///     idempotent method — like GET — that additionally carries a request body, so it is well suited
+///     to search/query endpoints whose parameters are too large or structured for the query string.
+///     Wolverine applies no verb-specific middleware rules: outbox middleware still requires an
+///     IMessageBus/IMessageContext dependency, and transactional middleware is still applied when the
+///     handler takes an IDocumentSession or DbContext dependency. Prefer IQuerySession (Marten) or
+///     [NonTransactional] (EF Core) to keep a QUERY endpoint free of transactional middleware.
+/// </summary>
+public class WolverineQueryAttribute : WolverineHttpMethodAttribute
+{
+    public WolverineQueryAttribute([StringSyntax("Route")]string template) : base("QUERY", template)
     {
     }
 }

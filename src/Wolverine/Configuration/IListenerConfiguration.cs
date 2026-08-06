@@ -1,6 +1,5 @@
-﻿using System.Threading.Tasks.Dataflow;
-using Newtonsoft.Json;
-using Wolverine.Runtime.Serialization;
+﻿using Wolverine.Runtime.Serialization;
+using Wolverine.Runtime.Serialization.Encryption;
 using Wolverine.Transports;
 
 namespace Wolverine.Configuration;
@@ -16,13 +15,6 @@ public interface IEndpointConfiguration<T>
     T Named(string name);
 
     /// <summary>
-    ///     Use custom Newtonsoft.Json settings for this listener endpoint
-    /// </summary>
-    /// <param name="customSettings"></param>
-    /// <returns></returns>
-    T CustomNewtonsoftJsonSerialization(JsonSerializerSettings customSettings);
-
-    /// <summary>
     ///     Override the default serializer for this endpoint
     /// </summary>
     /// <param name="serializer"></param>
@@ -31,7 +23,7 @@ public interface IEndpointConfiguration<T>
 
     /// <summary>
     /// For endpoints that send or receive messages in batches, this governs the maximum
-    /// number of messages that will be received or sent in one batch
+    /// number of messages that will be received or sent in one batch. Defaults to 100.
     /// </summary>
     T MessageBatchSize(int batchSize);
 
@@ -158,6 +150,24 @@ public interface IListenerConfiguration<T> : IEndpointConfiguration<T>
     /// </summary>
     /// <returns></returns>
     public T ListenOnlyAtLeader();
+
+    /// <summary>
+    /// Mark this listener as accepting only AES-256-GCM encrypted envelopes.
+    /// Inbound envelopes whose content-type is not the encrypted variant are
+    /// routed to the dead-letter queue with <see cref="EncryptionPolicyViolationException"/>
+    /// before any serializer runs.
+    /// </summary>
+    /// <remarks>
+    /// Scope is the inbound listener only. Outgoing republishes — including
+    /// auto-published <see cref="Fault{T}"/> events that originate from a
+    /// failure on this listener — route via the global routing graph and are
+    /// not constrained by this marker. To require encryption on outbound
+    /// fault events, configure outbound encryption via
+    /// <see cref="MessageTypePolicies{T}.Encrypt"/> or per-endpoint
+    /// <c>.Encrypted()</c>; both pair automatically with the corresponding
+    /// <see cref="Fault{T}"/> envelopes.
+    /// </remarks>
+    public T RequireEncryption();
 }
 
 public interface IListenerConfiguration : IListenerConfiguration<IListenerConfiguration>;

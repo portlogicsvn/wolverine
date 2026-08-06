@@ -7,19 +7,26 @@ using Wolverine.Transports;
 
 namespace Wolverine.AmazonSqs.Internal;
 
-internal class SqsListener : IListener, ISupportDeadLetterQueue
+internal class SqsListener : IListener, ISupportDeadLetterQueue, IReportReceiveLoopHealth
 {
-    private readonly CancellationTokenSource _cancellation = new();
     private readonly RetryBlock<Envelope>? _deadLetterBlock;
     private readonly AmazonSqsQueue? _deadLetterQueue;
     private readonly AmazonSqsQueue _queue;
     private readonly IReceiver _receiver;
     private readonly RetryBlock<AmazonSqsEnvelope> _requeueBlock;
-    private readonly Task _task;
+    private readonly BackgroundReceiveLoop _loop;
     private readonly AmazonSqsTransport _transport;
     private readonly ISqsEnvelopeMapper _mapper;
     private readonly TimeSpan _drainTimeout;
     private readonly ILogger _logger;
+
+    // GH-3493 (SO1): completion used to be one DeleteMessage HTTP round trip per message, so a
+    // single 10-message receive was paid for with 10 sequential deletes. These coalesce into
+    // DeleteMessageBatch calls of up to 10 -- 10x fewer round trips and 10x fewer billable API
+    // calls. Null when the endpoint opts out with DeleteMessageBatchSize = 1.
+    private readonly BatchingChannel<Message>? _deleteBatching;
+    private readonly Block<Message[]>? _deleteBlock;
+    private readonly RetryBlock<Message> _singleDeleteBlock;
 
     public SqsListener(IWolverineRuntime runtime, AmazonSqsQueue queue, AmazonSqsTransport transport,
         IReceiver receiver)
@@ -45,8 +52,6 @@ internal class SqsListener : IListener, ISupportDeadLetterQueue
             _deadLetterQueue = _transport.Queues[_queue.DeadLetterQueueName];
         }
 
-        var failedCount = 0;
-
         _requeueBlock = new RetryBlock<AmazonSqsEnvelope>(async (env, _) =>
         {
             if (!env.WasDeleted)
@@ -61,84 +66,79 @@ internal class SqsListener : IListener, ISupportDeadLetterQueue
             new RetryBlock<Envelope>(async (e, _) => { await _deadLetterQueue!.SendMessageAsync(e, logger); }, logger,
                 runtime.Cancellation);
 
-        _receiver = receiver;
+        _singleDeleteBlock = new RetryBlock<Message>(
+            (message, token) => _transport.Client!.DeleteMessageAsync(_queue.QueueUrl, message.ReceiptHandle, token),
+            logger, runtime.Cancellation);
 
-        _task = Task.Run(async () =>
+        if (_queue.DeleteMessageBatchSize > 1)
         {
-            while (!_cancellation.Token.IsCancellationRequested)
-            {
-                try
-                {
-                    var request = new ReceiveMessageRequest(_queue.QueueUrl);
+            _deleteBlock = new Block<Message[]>((batch, _) => deleteBatchAsync(batch));
+            _deleteBatching = new BatchingChannel<Message>(_queue.DeleteMessageBatchTimeout, _deleteBlock,
+                _queue.DeleteMessageBatchSize);
+        }
 
-                    _queue.ConfigureRequest(request);
-
-                    var results = await _transport.Client.ReceiveMessageAsync(request, _cancellation.Token);
-
-                    failedCount = 0;
-
-                    if (results.Messages != null && results.Messages.Any())
-                    {
-                        var envelopes = new List<Envelope>(results.Messages.Count);
-                        foreach (var message in results.Messages)
-                        {
-                            try
-                            {
-                                var envelope = buildEnvelope(message);
-
-                                envelopes.Add(envelope);
-                            }
-                            catch (Exception e)
-                            {
-                                if (_deadLetterQueue != null)
-                                {
-                                    try
-                                    {
-                                        await _transport.Client.SendMessageAsync(new SendMessageRequest(
-                                            _deadLetterQueue.QueueUrl,
-                                            message.Body));
-                                    }
-                                    catch (Exception exception)
-                                    {
-                                        logger.LogError(exception,
-                                            "Error while trying to directly send a dead letter message {Id} from {Uri}",
-                                            message.MessageId, _queue.Uri);
-                                    }
-                                }
-
-                                logger.LogError(e, "Error while reading message {Id} from {Uri}", message.MessageId,
-                                    _queue.Uri);
-                            }
-                        }
-
-                        // ReSharper disable once CoVariantArrayConversion
-                        if (envelopes.Any())
-                        {
-                            await receiver.ReceivedAsync(this, envelopes.ToArray());
-                        }
-                    }
-                    else
-                    {
-                        // Slow down if this is a periodically used queue
-                        await Task.Delay(250.Milliseconds());
-                    }
-                }
-                catch (TaskCanceledException)
-                {
-                    // do nothing here, it's all good
-                }
-                catch (Exception e)
-                {
-                    failedCount++;
-                    var pauseTime = failedCount > 5 ? 1.Seconds() : (failedCount * 100).Milliseconds();
-
-                    logger.LogError(e, "Error while trying to retrieve messages from SQS Queue {Uri}",
-                        queue.Uri);
-                    await Task.Delay(pauseTime);
-                }
-            }
-        }, _cancellation.Token);
+        // GH-3236: the receive loop is now a shared BackgroundReceiveLoop — it owns the task, the
+        // catch -> log -> exponential-backoff -> continue policy, the idle delay when a poll returns nothing, the
+        // heartbeat, and safe teardown. The listener just provides one poll-and-process iteration and reports the
+        // loop's health through IReportReceiveLoopHealth.
+        _loop = new BackgroundReceiveLoop(_queue.Uri, logger, pollOnceAsync, runtime.Cancellation);
+        _loop.Start();
     }
+
+    private async Task<bool> pollOnceAsync(CancellationToken token)
+    {
+        var request = new ReceiveMessageRequest(_queue.QueueUrl);
+        _queue.ConfigureRequest(request);
+
+        var results = await _transport.Client!.ReceiveMessageAsync(request, token);
+
+        if (results.Messages == null || !results.Messages.Any())
+        {
+            // No work — the loop applies its idle delay before polling again.
+            return false;
+        }
+
+        var envelopes = new List<Envelope>(results.Messages.Count);
+        foreach (var message in results.Messages)
+        {
+            try
+            {
+                envelopes.Add(buildEnvelope(message));
+            }
+            catch (Exception e)
+            {
+                if (_deadLetterQueue != null)
+                {
+                    try
+                    {
+                        await _transport.Client.SendMessageAsync(new SendMessageRequest(
+                            _deadLetterQueue.QueueUrl,
+                            message.Body));
+                    }
+                    catch (Exception exception)
+                    {
+                        _logger.LogError(exception,
+                            "Error while trying to directly send a dead letter message {Id} from {Uri}",
+                            message.MessageId, _queue.Uri);
+                    }
+                }
+
+                _logger.LogError(e, "Error while reading message {Id} from {Uri}", message.MessageId, _queue.Uri);
+            }
+        }
+
+        // ReSharper disable once CoVariantArrayConversion
+        if (envelopes.Any())
+        {
+            await _receiver.ReceivedAsync(this, envelopes.ToArray());
+        }
+
+        return true;
+    }
+
+    public ReceiveLoopStatus ReceiveLoopStatus => _loop.ReceiveLoopStatus;
+
+    public DateTimeOffset? LastReceiveLoopActivityAt => _loop.LastReceiveLoopActivityAt;
 
     public ValueTask CompleteAsync(Envelope envelope)
     {
@@ -160,36 +160,57 @@ internal class SqsListener : IListener, ISupportDeadLetterQueue
         }
     }
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
-        if (!_cancellation.IsCancellationRequested)
-        {
-            _cancellation.Cancel();
-        }
-
+        await _loop.DisposeAsync();
+        await flushPendingDeletesAsync();
         _requeueBlock.Dispose();
         _deadLetterBlock?.Dispose();
-        _task.SafeDispose();
-        return ValueTask.CompletedTask;
+        _singleDeleteBlock.Dispose();
+
+        if (_deleteBatching != null)
+        {
+            await _deleteBatching.DisposeAsync();
+        }
+
+        if (_deleteBlock != null)
+        {
+            await _deleteBlock.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// Push any accumulated-but-unsent deletes at SQS. Anything still in flight simply reappears
+    /// after its visibility timeout.
+    /// </summary>
+    private async Task flushPendingDeletesAsync()
+    {
+        if (_deleteBatching == null)
+        {
+            return;
+        }
+
+        try
+        {
+            _deleteBatching.TriggerBatch();
+            _deleteBatching.Complete();
+            await _deleteBatching.WaitForCompletionAsync().WaitAsync(_drainTimeout);
+        }
+        catch (Exception e)
+        {
+            _logger.LogDebug(e, "Error flushing pending SQS deletes for {Uri}", _queue.Uri);
+        }
     }
 
     public Uri Address => _queue.Uri;
 
     public async ValueTask StopAsync()
     {
-        _cancellation.Cancel();
+        await _loop.StopAsync(_drainTimeout);
 
-        try
-        {
-            await _task.WaitAsync(_drainTimeout);
-        }
-        catch (Exception e)
-        {
-            if (e is not TaskCanceledException)
-            {
-                _logger.LogDebug(e, "Error waiting for SQS polling task to complete during shutdown for {Uri}", _queue.Uri);
-            }
-        }
+        // Don't leave completed messages sitting in the batch window while this listener is paused
+        // -- they'd reappear at the visibility timeout and be handled twice.
+        _deleteBatching?.TriggerBatch();
     }
 
     public async Task<bool> TryRequeueAsync(Envelope envelope)
@@ -214,13 +235,83 @@ internal class SqsListener : IListener, ISupportDeadLetterQueue
     private AmazonSqsEnvelope buildEnvelope(Message message)
     {
         var envelope = new AmazonSqsEnvelope(message);
-        _mapper.ReadEnvelopeData(envelope, message.Body, message.MessageAttributes);
+
+        // SQS only returns MessageAttributes when they were explicitly requested, and
+        // brokers/SDKs may hand back a null collection when a message carries none (as is
+        // the case for MassTransit/NServiceBus messages that keep their metadata in the body).
+        // Guarantee a non-null dictionary so ISqsEnvelopeMapper implementations can read freely.
+        var attributes = message.MessageAttributes ?? new Dictionary<string, MessageAttributeValue>();
+        _mapper.ReadEnvelopeData(envelope, message.Body, attributes);
 
         return envelope;
     }
 
     public Task CompleteAsync(Message sqsMessage)
     {
-        return _transport.Client!.DeleteMessageAsync(_queue.QueueUrl, sqsMessage.ReceiptHandle);
+        if (_deleteBatching == null)
+        {
+            return _transport.Client!.DeleteMessageAsync(_queue.QueueUrl, sqsMessage.ReceiptHandle);
+        }
+
+        return _deleteBatching.PostAsync(sqsMessage).AsTask();
+    }
+
+    /// <summary>
+    /// Delete up to <c>DeleteMessageBatchSize</c> messages in one request. DeleteMessageBatch is
+    /// not transactional -- SQS can reject individual entries inside an otherwise successful
+    /// response -- so each failed entry falls back to a retried single delete. A delete that never
+    /// lands only means the message reappears after its visibility timeout, which the durable inbox
+    /// deduplicates.
+    /// </summary>
+    private async Task deleteBatchAsync(Message[] batch)
+    {
+        var entries = new List<DeleteMessageBatchRequestEntry>(batch.Length);
+        for (var i = 0; i < batch.Length; i++)
+        {
+            entries.Add(new DeleteMessageBatchRequestEntry(i.ToString(), batch[i].ReceiptHandle));
+        }
+
+        DeleteMessageBatchResponse response;
+        try
+        {
+            response = await _transport.Client!.DeleteMessageBatchAsync(
+                new DeleteMessageBatchRequest(_queue.QueueUrl, entries));
+        }
+        catch (Exception e)
+        {
+            _logger.LogError(e,
+                "Error deleting a batch of {Count} messages from {Uri}; falling back to individual deletes",
+                batch.Length, _queue.Uri);
+
+            foreach (var message in batch)
+            {
+                await _singleDeleteBlock.PostAsync(message);
+            }
+
+            return;
+        }
+
+        if (response.Failed == null || response.Failed.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var entry in response.Failed)
+        {
+            if (int.TryParse(entry.Id, out var index) && index >= 0 && index < batch.Length)
+            {
+                _logger.LogWarning(
+                    "SQS batch delete from {Uri} failed for entry {Id}: {Code} - {Message} (SenderFault: {SenderFault}). Retrying as a single delete",
+                    _queue.Uri, entry.Id, entry.Code, entry.Message, entry.SenderFault);
+
+                await _singleDeleteBlock.PostAsync(batch[index]);
+            }
+            else
+            {
+                _logger.LogError(
+                    "SQS batch delete from {Uri} reported a failed entry with unrecognized Id {Id}: {Code} - {Message}",
+                    _queue.Uri, entry.Id, entry.Code, entry.Message);
+            }
+        }
     }
 }

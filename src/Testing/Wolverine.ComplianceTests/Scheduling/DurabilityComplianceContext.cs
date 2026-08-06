@@ -20,12 +20,12 @@ public abstract class DurabilityComplianceContext<TTriggerHandler, TItemCreatedH
     private IHost theReceiver = null!;
     private IHost theSender = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         var receiverPort = PortFinder.GetAvailablePort();
         var senderPort = PortFinder.GetAvailablePort();
         
-        theSender = WolverineHost.For(senderRegistry =>
+        theSender = await WolverineHost.ForAsync(senderRegistry =>
         {
             senderRegistry.Durability.Mode = DurabilityMode.Solo;
             senderRegistry.Durability.ScheduledJobFirstExecution = 0.Seconds(); // Start immediately!
@@ -53,7 +53,7 @@ public abstract class DurabilityComplianceContext<TTriggerHandler, TItemCreatedH
 
         await theSender.ClearAllPersistedWolverineDataAsync();
 
-        theReceiver = WolverineHost.For(receiverRegistry =>
+        theReceiver = await WolverineHost.ForAsync(receiverRegistry =>
         {
             receiverRegistry.Durability.Mode = DurabilityMode.Solo;
             receiverRegistry.Services.AddSingleton<ILogger>(NullLogger.Instance);
@@ -76,7 +76,7 @@ public abstract class DurabilityComplianceContext<TTriggerHandler, TItemCreatedH
         await buildAdditionalObjects();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         if (theReceiver != null)
         {
@@ -170,14 +170,13 @@ public abstract class DurabilityComplianceContext<TTriggerHandler, TItemCreatedH
 
         await send(c => c.SendAsync(item));
 
-        var outgoing = loadAllOutgoingEnvelopes(theSender).SingleOrDefault();
+        var outgoing = (await loadAllOutgoingEnvelopes(theSender)).SingleOrDefault();
 
         outgoing.ShouldNotBeNull();
         outgoing.MessageType.ShouldBe(typeof(ItemCreated).ToMessageTypeName());
     }
 
-    protected abstract IReadOnlyList<Envelope> loadAllOutgoingEnvelopes(IHost sender);
-
+    protected abstract Task<IReadOnlyList<Envelope>> loadAllOutgoingEnvelopes(IHost sender);
 
     [Fact]
     public async Task SendScheduledMessage()

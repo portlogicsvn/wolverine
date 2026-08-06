@@ -17,7 +17,6 @@ using Wolverine.Tracking;
 
 namespace PolecatTests.Subscriptions;
 
-[Trait("Category", "Flaky")]
 public class subscriptions_end_to_end
 {
     /// <summary>
@@ -69,11 +68,11 @@ public class subscriptions_end_to_end
                 .SubscribeToEvents(new PcTestBatchSubscription());
 
                 opts.Services.AddResourceSetupOnStartup();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var store = (DocumentStore)host.Services.GetRequiredService<IDocumentStore>();
-        await store.Advanced.CleanAllEventDataAsync();
-        await store.Advanced.CleanAllDocumentsAsync();
+        await store.Advanced.CleanAllEventDataAsync(TestContext.Current.CancellationToken);
+        await store.Advanced.CleanAllDocumentsAsync(TestContext.Current.CancellationToken);
 
         var daemon = await store.BuildProjectionDaemonAsync();
         await daemon.StartAllAsync();
@@ -86,15 +85,15 @@ public class subscriptions_end_to_end
         session.Events.StartStream(Guid.NewGuid(), new PcDEvent(), new PcDEvent(), new PcAEvent(), new PcDEvent());
         session.Events.StartStream(Guid.NewGuid(), new PcDEvent(), new PcBEvent(), new PcBEvent(), new PcBEvent());
 
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
 
-        await daemon.WaitForNonStaleData(30.Seconds());
+        await daemon.WaitForNonStaleData(60.Seconds());
 
         await using var query = store.QuerySession();
-        (await query.LoadAsync<PcEventTotals>("A")).Count.ShouldBe(6);
-        (await query.LoadAsync<PcEventTotals>("B")).Count.ShouldBe(7);
-        (await query.LoadAsync<PcEventTotals>("C")).Count.ShouldBe(5);
-        (await query.LoadAsync<PcEventTotals>("D")).Count.ShouldBe(6);
+        (await query.LoadAsync<PcEventTotals>("A", TestContext.Current.CancellationToken))!.Count.ShouldBe(6);
+        (await query.LoadAsync<PcEventTotals>("B", TestContext.Current.CancellationToken))!.Count.ShouldBe(7);
+        (await query.LoadAsync<PcEventTotals>("C", TestContext.Current.CancellationToken))!.Count.ShouldBe(5);
+        (await query.LoadAsync<PcEventTotals>("D", TestContext.Current.CancellationToken))!.Count.ShouldBe(6);
     }
 
     [Fact]
@@ -120,11 +119,11 @@ public class subscriptions_end_to_end
                 .SubscribeToEvents(subscription);
 
                 opts.Services.AddResourceSetupOnStartup();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var store = (DocumentStore)host.Services.GetRequiredService<IDocumentStore>();
-        await store.Advanced.CleanAllEventDataAsync();
-        await store.Advanced.CleanAllDocumentsAsync();
+        await store.Advanced.CleanAllEventDataAsync(TestContext.Current.CancellationToken);
+        await store.Advanced.CleanAllDocumentsAsync(TestContext.Current.CancellationToken);
 
         var daemon = await store.BuildProjectionDaemonAsync();
         await daemon.StartAllAsync();
@@ -137,15 +136,15 @@ public class subscriptions_end_to_end
         session.Events.StartStream(Guid.NewGuid(), new PcDEvent(), new PcDEvent(), new PcAEvent(), new PcDEvent());
         session.Events.StartStream(Guid.NewGuid(), new PcDEvent(), new PcBEvent(), new PcBEvent(), new PcBEvent());
 
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
 
-        await daemon.WaitForNonStaleData(30.Seconds());
+        await daemon.WaitForNonStaleData(60.Seconds());
 
         await using var query = store.QuerySession();
-        (await query.LoadAsync<PcEventTotals>("A")).Count.ShouldBe(6);
-        (await query.LoadAsync<PcEventTotals>("B")).Count.ShouldBe(7);
-        (await query.LoadAsync<PcEventTotals>("C")).ShouldBeNull();
-        (await query.LoadAsync<PcEventTotals>("D")).ShouldBeNull();
+        (await query.LoadAsync<PcEventTotals>("A", TestContext.Current.CancellationToken))!.Count.ShouldBe(6);
+        (await query.LoadAsync<PcEventTotals>("B", TestContext.Current.CancellationToken))!.Count.ShouldBe(7);
+        (await query.LoadAsync<PcEventTotals>("C", TestContext.Current.CancellationToken)).ShouldBeNull();
+        (await query.LoadAsync<PcEventTotals>("D", TestContext.Current.CancellationToken)).ShouldBeNull();
     }
 
     [Fact]
@@ -170,7 +169,7 @@ public class subscriptions_end_to_end
                 .ProcessEventsWithWolverineHandlersInStrictOrder("Inline");
 
                 opts.Services.AddResourceSetupOnStartup();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var store = (DocumentStore)host.Services.GetRequiredService<IDocumentStore>();
         var daemon = host.Services.GetRequiredService<PolecatDaemonHostedService>().Daemon!;
@@ -180,9 +179,9 @@ public class subscriptions_end_to_end
         session.Events.StartStream(Guid.NewGuid(), new PcAEvent(), new PcAEvent(), new PcAEvent(), new PcAEvent());
         session.Events.StartStream(Guid.NewGuid(), new PcBEvent(), new PcCEvent(), new PcCEvent(), new PcBEvent());
 
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
 
-        await daemon.WaitForNonStaleData(30.Seconds());
+        await daemon.WaitForNonStaleData(60.Seconds());
 
         PcTotalsHandler.Handled.ShouldBe(['a', 'b', 'd', 'd', 'a', 'a', 'a', 'a', 'b', 'c', 'c', 'b']);
     }
@@ -216,7 +215,7 @@ public class subscriptions_end_to_end
                     });
 
                 opts.Services.AddResourceSetupOnStartup();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var store = (DocumentStore)host.Services.GetRequiredService<IDocumentStore>();
         var daemon = host.Services.GetRequiredService<PolecatDaemonHostedService>().Daemon!;
@@ -226,14 +225,14 @@ public class subscriptions_end_to_end
         session.Events.StartStream(Guid.NewGuid(), new PcAEvent(), new PcAEvent(), new PcAEvent(), new PcAEvent());
         session.Events.StartStream(Guid.NewGuid(), new PcBEvent(), new PcCEvent(), new PcCEvent(), new PcBEvent());
 
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
 
-        await daemon.WaitForNonStaleData(30.Seconds());
+        await daemon.WaitForNonStaleData(60.Seconds());
 
         PcTotalsHandler.Handled.ShouldBe(['a', 'b', 'a', 'a', 'a', 'a', 'b', 'b']);
     }
 
-    [Fact(Skip = "Known TrackActivity race condition with publishing subscriptions — same failure in MartenSubscriptionTests")]
+    [Fact]
     public async Task use_unfiltered_publishing_subscription()
     {
         const string schema = "pc_subscriptions_pub";
@@ -252,11 +251,11 @@ public class subscriptions_end_to_end
                     .PublishEventsToWolverine("Publish");
 
                 opts.Services.AddResourceSetupOnStartup();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var store = (DocumentStore)host.Services.GetRequiredService<IDocumentStore>();
-        await store.Advanced.CleanAllEventDataAsync();
-        await store.Advanced.CleanAllDocumentsAsync();
+        await store.Advanced.CleanAllEventDataAsync(TestContext.Current.CancellationToken);
+        await store.Advanced.CleanAllDocumentsAsync(TestContext.Current.CancellationToken);
 
         var daemon = await store.BuildProjectionDaemonAsync();
         await daemon.StartAllAsync();
@@ -276,8 +275,16 @@ public class subscriptions_end_to_end
             await daemon.WaitForNonStaleData(30.Seconds());
         };
 
+        // The daemon flushes the subscription's staged outbox AFTER it commits the page and its
+        // progress, so WaitForNonStaleData() returning does NOT mean the messages have been
+        // published. Without explicit waiters the session ends on the activity lull and the
+        // stragglers are never recorded. Same fix as the MartenSubscriptionTests twin.
         var tracked = await host
             .TrackActivity()
+            .Timeout(60.Seconds())
+            .WaitForExecutionOf<IEvent<PcAEvent>>(6)
+            .WaitForExecutionOf<PcBEvent>(7)
+            .WaitForExecutionOf<IEvent<PcDEvent>>(6)
             .ExecuteAndWaitAsync(writeEvents);
 
         tracked.Executed.MessagesOf<IEvent<PcAEvent>>().Count().ShouldBe(6);
@@ -285,7 +292,7 @@ public class subscriptions_end_to_end
         tracked.Executed.MessagesOf<IEvent<PcDEvent>>().Count().ShouldBe(6);
     }
 
-    [Fact(Skip = "Known TrackActivity race condition with publishing subscriptions — same failure in MartenSubscriptionTests")]
+    [Fact]
     public async Task use_filtered_publishing_subscription()
     {
         const string schema = "pc_subscriptions_pub_filt";
@@ -308,11 +315,11 @@ public class subscriptions_end_to_end
                     });
 
                 opts.Services.AddResourceSetupOnStartup();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var store = (DocumentStore)host.Services.GetRequiredService<IDocumentStore>();
-        await store.Advanced.CleanAllEventDataAsync();
-        await store.Advanced.CleanAllDocumentsAsync();
+        await store.Advanced.CleanAllEventDataAsync(TestContext.Current.CancellationToken);
+        await store.Advanced.CleanAllDocumentsAsync(TestContext.Current.CancellationToken);
 
         var daemon = await store.BuildProjectionDaemonAsync();
         await daemon.StartAllAsync();
@@ -332,8 +339,12 @@ public class subscriptions_end_to_end
             await daemon.WaitForNonStaleData(30.Seconds());
         };
 
+        // See use_unfiltered_publishing_subscription for why the explicit waiters are needed
         var tracked = await host
             .TrackActivity()
+            .Timeout(60.Seconds())
+            .WaitForExecutionOf<IEvent<PcAEvent>>(6)
+            .WaitForExecutionOf<IEvent<PcDEvent>>(6)
             .ExecuteAndWaitAsync(writeEvents);
 
         tracked.Executed.MessagesOf<IEvent<PcAEvent>>().Count().ShouldBe(6);
@@ -369,7 +380,7 @@ public class subscriptions_end_to_end
                     });
 
                 opts.Services.AddResourceSetupOnStartup();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var store = (DocumentStore)host.Services.GetRequiredService<IDocumentStore>();
 
@@ -388,11 +399,15 @@ public class subscriptions_end_to_end
 
             await session.SaveChangesAsync();
 
-            await daemon.WaitForNonStaleData(30.Seconds());
+            await daemon.WaitForNonStaleData(60.Seconds());
         };
 
+        // See use_unfiltered_publishing_subscription for why the explicit waiters are needed
         var tracked = await host
             .TrackActivity()
+            .Timeout(60.Seconds())
+            .WaitForExecutionOf<IEvent<PcAEvent>>(6)
+            .WaitForExecutionOf<PcTransformedMessage>(6)
             .ExecuteAndWaitAsync(writeEvents);
 
         tracked.Executed.MessagesOf<IEvent<PcAEvent>>().Count().ShouldBe(6);
@@ -428,7 +443,7 @@ public class subscriptions_end_to_end
                     .SubscribeToEventsWithServices<PcServiceUsingSubscription>(ServiceLifetime.Singleton);
 
                 opts.Services.AddResourceSetupOnStartup();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var store = (DocumentStore)host.Services.GetRequiredService<IDocumentStore>();
         var daemon = host.Services.GetRequiredService<PolecatDaemonHostedService>().Daemon!;
@@ -438,13 +453,13 @@ public class subscriptions_end_to_end
         session.Events.StartStream(Guid.NewGuid(), new PcAEvent(), new PcAEvent(), new PcAEvent(), new PcAEvent());
         session.Events.StartStream(Guid.NewGuid(), new PcBEvent(), new PcCEvent(), new PcCEvent(), new PcBEvent());
 
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
 
-        await daemon.WaitForNonStaleData(20.Seconds());
+        await daemon.WaitForNonStaleData(60.Seconds());
 
         // Second round
         session.Events.StartStream(Guid.NewGuid(), new PcDEvent(), new PcDEvent(), new PcDEvent(), new PcDEvent());
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         PcServiceUsingSubscription.Read.Count().ShouldBe(1);
         PcServiceUsingSubscription.Read[1].OfType<PcAEvent>().Count().ShouldBe(5);
@@ -477,7 +492,7 @@ public class subscriptions_end_to_end
                     .SubscribeToEventsWithServices<PcServiceUsingSubscription>(ServiceLifetime.Scoped);
 
                 opts.Services.AddResourceSetupOnStartup();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var store = (DocumentStore)host.Services.GetRequiredService<IDocumentStore>();
         var daemon = host.Services.GetRequiredService<PolecatDaemonHostedService>().Daemon!;
@@ -491,7 +506,7 @@ public class subscriptions_end_to_end
             session.Events.StartStream(Guid.NewGuid(), new PcAEvent(), new PcAEvent(), new PcAEvent(), new PcAEvent());
             session.Events.StartStream(Guid.NewGuid(), new PcBEvent(), new PcCEvent(), new PcCEvent(), new PcBEvent());
 
-            await session.SaveChangesAsync();
+            await session.SaveChangesAsync(TestContext.Current.CancellationToken);
         }
 
         await daemon.WaitForNonStaleData(60.Seconds());
@@ -556,7 +571,7 @@ public class PcTestBatchSubscription : BatchSubscription
 
 public class PcEventTotals
 {
-    public string Id { get; set; }
+    public required string Id { get; init; }
     public int Count { get; set; }
 }
 

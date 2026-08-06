@@ -13,6 +13,21 @@ public partial class AssignmentGrid
 {
     private readonly Dictionary<Uri, Agent> _agents = new();
     private readonly List<Node> _nodes = new();
+    private readonly List<DuplicateAgentReport> _duplicateAgentReports = new();
+
+    /// <summary>
+    /// Reports of the same agent URI being claimed-as-running by more than
+    /// one <see cref="WolverineNode"/> when this grid was assembled. The
+    /// leader uses these to emit <c>StopRemoteAgent</c> commands so the
+    /// duplicates are healed even after a stale-leader split-brain. See
+    /// GH-2602.
+    /// </summary>
+    internal IReadOnlyList<DuplicateAgentReport> DuplicateAgentReports => _duplicateAgentReports;
+
+    internal void RecordDuplicateAgent(Uri agentUri, Node existingNode, Node newNode)
+    {
+        _duplicateAgentReports.Add(new DuplicateAgentReport(agentUri, existingNode, newNode));
+    }
 
     /// <summary>
     ///     The identity of all currently unassigned agents
@@ -42,6 +57,17 @@ public partial class AssignmentGrid
     public IReadOnlyList<Agent> AvailableAgentsForScheme(string scheme)
     {
         return _agents.Values.Where(x => x.Uri.Scheme.EqualsIgnoreCase(scheme) && !x.IsPaused).ToList();
+    }
+
+    /// <summary>
+    ///     Same as <see cref="AvailableAgentsForScheme(string)" />, restricted to the agents matching
+    ///     <paramref name="filter" />. Used when one scheme's agents are distributed in independent passes
+    ///     (e.g. per event store; see <see cref="EventSubscriptionAgentFamily.EvaluateAssignmentsAsync" />).
+    /// </summary>
+    public IReadOnlyList<Agent> AvailableAgentsForScheme(string scheme, Func<Uri, bool> filter)
+    {
+        return _agents.Values
+            .Where(x => x.Uri.Scheme.EqualsIgnoreCase(scheme) && !x.IsPaused && filter(x.Uri)).ToList();
     }
 
     /// <summary>
@@ -101,7 +127,16 @@ public partial class AssignmentGrid
     /// <returns></returns>
     public IReadOnlyList<Agent> MatchAgentsToCapableNodesFor(string scheme)
     {
-        var agents = AvailableAgentsForScheme(scheme);
+        return MatchAgentsToCapableNodesFor(scheme, _ => true);
+    }
+
+    /// <summary>
+    /// Match up the agents for a particular scheme, restricted by <paramref name="filter" />, to any
+    /// nodes that could run that agent. This is meant for blue/green development
+    /// </summary>
+    public IReadOnlyList<Agent> MatchAgentsToCapableNodesFor(string scheme, Func<Uri, bool> filter)
+    {
+        var agents = AvailableAgentsForScheme(scheme, filter);
         foreach (var agent in agents)
         {
             agent.CandidateNodes.Clear();
@@ -240,8 +275,17 @@ public partial class AssignmentGrid
 
         foreach (var agentUri in restrictions.FindPausedAgentUris())
         {
-            var agent = AgentFor(agentUri);
-            if (agent == null) continue;
+            // A paused-agent restriction can legitimately reference a URI that is NOT a distributable
+            // grid agent — e.g. a receiving-endpoint listener paused application-wide (CritterWatch #533).
+            // Such a URI honors its pause directly in ListeningAgent.StartAsync() via FindPausedAgentUris(),
+            // not through the assignment grid, so it simply has no Agent here. AgentFor(uri) does a dictionary
+            // indexer lookup that THROWS KeyNotFoundException for a missing key (the `agent == null` guard
+            // below was dead code), which poisoned every subsequent EvaluateAssignmentsAsync cycle once such
+            // a restriction was persisted. Skip URIs that aren't grid agents instead.
+            if (!_agents.TryGetValue(agentUri, out var agent))
+            {
+                continue;
+            }
 
             agent.IsPaused = true;
             if (agent.AssignedNode != null)

@@ -28,6 +28,10 @@ leader by the matching row in the `wolverine_node_assignments` table that refers
 If you are frequently stopping and starting a local process -- especially if you are doing that through a debugger -- you
 may want to utilize the `Solo` durability mode explained below:
 
+::: tip
+Running on PostgreSQL and seeing frequent **"Lost advisory-lock connection"**, **"stepping down from leadership"**, or **"Detected duplicate agent wolverine://leader/"** log lines in a steady-state cluster? The leader election itself is healthy — it's detecting and recovering from server-side session loss correctly — but the underlying database connection is being dropped by something in the network path (managed-PG idle eviction, k8s service mesh, NAT/conntrack, connection pooler in transaction-pooling mode, etc.). See [Connection Stability for Leader Election](postgresql#connection-stability-for-leader-election) for the configuration knobs that fix it.
+:::
+
 
 ## Solo Mode
 
@@ -66,7 +70,7 @@ builder.UseWolverine(opts =>
 using var host = builder.Build();
 await host.StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/DurabilityModes.cs#L55-L82' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_configuring_the_solo_mode' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/DurabilityModes.cs#L53-L79' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_configuring_the_solo_mode' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Running your Wolverine application like this means that Wolverine is able to more quickly start the transactional inbox
@@ -108,5 +112,103 @@ using var host = await Host.CreateDefaultBuilder()
         opts.Durability.UpdateMetricsPeriod = 10.Seconds();
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/PersistenceTests/Samples/DocumentationSamples.cs#L211-L228' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_configuring_persistence_metrics' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/PersistenceTests/Samples/DocumentationSamples.cs#L203-L219' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_configuring_persistence_metrics' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
+
+### Metrics polling with many tenant databases <Badge type="tip" text="6.18" />
+
+The counts behind these metrics come from polling each message database, which matters at high database
+counts: with database-per-tenant multi-tenancy, hundreds of tenant databases means hundreds of queries
+every `UpdateMetricsPeriod`.
+
+Two things bound that cost:
+
+1. **Each node only polls the databases it owns.** A database's metrics are gathered by its durability
+   agent, and Wolverine's agent distribution assigns that agent to exactly one node. Databases join and
+   leave a node's sweep automatically as agents are redistributed.
+2. **Each node polls one database at a time.** Rather than a timer per database all firing together, a
+   single sweeper per node walks that node's databases sequentially, spreading them across the
+   `UpdateMetricsPeriod` window. **At most one metrics query — and one pooled connection for it — is in
+   flight per node, regardless of how many databases that node owns** (see
+   [GH-3375](https://github.com/JasperFx/wolverine/issues/3375)).
+
+::: tip
+Before 6.18 every database ran its own in-phase poller, so the metrics polling itself could become
+significant connection pressure at high database counts — hundreds of near-simultaneous queries each
+pinning a connection, plus open/close churn if your connection strings use a short
+`Connection Idle Lifetime`. If you are on an older version and see that pattern, upgrading is the fix.
+:::
+
+Each database is still polled once per `UpdateMetricsPeriod`; the sweeper changes how the queries are
+spaced, not how often any one database is sampled. If you want to reduce the cost further:
+
+1. **Disable the durability metrics** entirely with `opts.Durability.DurabilityMetricsEnabled = false`
+   if you don't consume the inbox/outbox/scheduled gauges. Nothing else in Wolverine depends on them —
+   this only turns off the observability polling, never the durability agents themselves.
+2. **Raise `opts.Durability.UpdateMetricsPeriod`** (default: 5 seconds) to something like 1–5 minutes.
+   Queue-depth gauges at tenant-database granularity rarely need 5-second resolution, and the polling
+   cost scales directly with the frequency. Raising it also widens the window the sweeper spaces a
+   node's databases across.
+
+## Scheduled Message Polling <Badge type="tip" text="6.20" />
+
+A durable scheduled message is just a persisted envelope with a future `execution_time`, so something has
+to periodically ask each message database "is anything due yet?". That polling happens every
+`opts.Durability.ScheduledJobPollingTime` (default: 5 seconds), and **which node does the polling depends
+on the database's role**:
+
+| Store | Polled by | Starts |
+|-------|-----------|--------|
+| Main and ancillary stores | **Every node** | Immediately at startup |
+| Tenant databases (database-per-tenant) | **Only the node that owns that database's durability agent** | Once agent assignment completes |
+
+Either way a due message executes exactly once. Where every node polls, the poll takes a per-database lock
+first, so only one node does the work; the rest find the lock taken and move on.
+
+### Why tenant databases are polled by only one node
+
+Before 6.20, *every* node polled *every* tenant database. The lock meant the work was only done once, but it
+didn't stop the connection: each losing node still opened a connection, started a transaction, failed to
+take the lock, and rolled back — every 5 seconds, against every tenant database. With hundreds of tenant
+databases that parks a connection per database per node, and adding a node *multiplied* the polling load
+rather than dividing it (see [GH-3376](https://github.com/JasperFx/wolverine/issues/3376)).
+
+Tenant scheduled polling now rides the per-database durability agent, which Wolverine's agent distribution
+assigns to exactly one node. The tenant polling load is now spread across your nodes instead of duplicated
+on each of them, and adding a node divides it.
+
+Main and ancillary stores deliberately keep polling from every node. There are only a handful of them and
+every node already holds connections to them anyway — for heartbeats, leader election, and the control
+queues — so there is nothing to save, and polling from every node means scheduled messages start flowing
+the moment a host boots rather than waiting on leader election.
+
+### What this means for your deployment
+
+* **Connection footprint from scheduled polling scales with the number of databases, not `databases × nodes`.**
+* **Tenant scheduled polling pauses briefly during failover.** If a node goes down, its tenant databases
+  aren't polled until their durability agents are reassigned to a surviving node. Nothing is lost — the
+  messages are still persisted, and execute once the new owner picks them up. This is the same behavior
+  the durable inbox/outbox recovery already has. Main and ancillary stores are unaffected.
+* **Tenant databases added at runtime** get scheduled polling automatically as soon as their durability
+  agent is assigned.
+* **`Solo` mode** runs every agent on the single node, so that node polls every database.
+* **Hosts with `opts.Durability.DurabilityAgentEnabled = false`** have no agents at all, so they keep
+  polling every database from every node regardless of role.
+
+The tenant durability agents are ordinary Wolverine agents, so you can see who owns what the same way you
+inspect any other assignment — they use the `wolverinedb://` URI scheme. If tenant scheduled messages seem
+late, confirm the database's agent is actually assigned and running somewhere before looking at
+`ScheduledJobPollingTime`.
+
+If your scheduled message latency requirements are loose, raising `ScheduledJobPollingTime` is still the
+cheapest way to cut the remaining polling cost:
+
+```cs
+using var host = await Host.CreateDefaultBuilder()
+    .UseWolverine(opts =>
+    {
+        // The default is 5 seconds. Raising this trades scheduled message
+        // latency for fewer polling queries against every message database.
+        opts.Durability.ScheduledJobPollingTime = 1.Minutes();
+    }).StartAsync();
+```

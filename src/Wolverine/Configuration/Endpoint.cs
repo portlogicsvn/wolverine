@@ -1,7 +1,6 @@
 #nullable enable
 
 using System.Text.Json;
-using System.Threading.Tasks.Dataflow;
 using ImTools;
 using JasperFx.CommandLine.Descriptions;
 using JasperFx.Core;
@@ -152,13 +151,23 @@ public abstract class Endpoint<TMapper, TConcreteMapper> : Endpoint
     }
 
     protected abstract TConcreteMapper buildMapper(IWolverineRuntime runtime);
-    
-    
+
+
     /// <summary>
     /// When set, overrides the built in envelope mapping with a custom
     /// implementation
     /// </summary>
     public TMapper? EnvelopeMapper { get; set; }
+
+    /// <summary>
+    /// True when the user has explicitly wired a custom mapper instance or factory in
+    /// place of the per-transport default <see cref="buildMapper"/>. Drives the
+    /// <c>"Custom"</c> value on <see cref="Capabilities.EndpointDescriptor.InteropMode"/>
+    /// so monitoring tools (e.g. CritterWatch) can flag endpoints that are using a
+    /// non-default envelope shape. See #2641.
+    /// </summary>
+    protected internal override bool HasCustomEnvelopeMapper =>
+        EnvelopeMapper is not null || _mapperFactory is not null;
 }
 
 /// <summary>
@@ -183,6 +192,17 @@ public abstract class Endpoint : ICircuitParameters, IDescribesProperties
         Uri = uri;
         EndpointName = uri.ToString();
     }
+
+    /// <summary>
+    /// Short, human-readable name of the underlying broker object kind this endpoint
+    /// represents — e.g. <c>"queue"</c>, <c>"exchange"</c>, <c>"topic"</c>,
+    /// <c>"subscription"</c>, <c>"stream"</c>. Each transport-specific subclass sets
+    /// this value in its constructor; transports whose role is only knowable at
+    /// runtime (e.g. <c>NatsEndpoint</c> choosing between Core <c>subject</c> and
+    /// JetStream <c>stream</c>) override the property. Surfaced to CritterWatch and
+    /// other diagnostic UIs to drive endpoint display. See GH-2601.
+    /// </summary>
+    public virtual string BrokerRole { get; protected set; } = "endpoint";
 
     /// <summary>
     /// Controls the maximum number of messages that could be processed at one time.
@@ -250,7 +270,7 @@ public abstract class Endpoint : ICircuitParameters, IDescribesProperties
 
     /// <summary>
     /// For endpoints that send or receive messages in batches, this governs the maximum
-    /// number of messages that will be received or sent in one batch
+    /// number of messages that will be received or sent in one batch. Defaults to 100.
     /// </summary>
     public int MessageBatchSize { get; set; } = 100;
 
@@ -259,6 +279,13 @@ public abstract class Endpoint : ICircuitParameters, IDescribesProperties
     /// of concurrent outgoing batches
     /// </summary>
     public int MessageBatchMaxDegreeOfParallelism { get; set; } = 1;
+
+    /// <summary>
+    /// For endpoints that send messages in batches, this is the maximum time the
+    /// sender will wait to accumulate a full batch before flushing what it has.
+    /// Defaults to 250ms.
+    /// </summary>
+    public TimeSpan MessageBatchTimeout { get; set; } = TimeSpan.FromMilliseconds(250);
 
     /// <summary>
     ///     Mark whether or not the receiver for this listener should use
@@ -302,6 +329,17 @@ public abstract class Endpoint : ICircuitParameters, IDescribesProperties
     /// </summary>
     [IgnoreDescription]
     internal IWireTap? WireTap { get; set; }
+
+    /// <summary>
+    /// Used by <see cref="Capabilities.EndpointDescriptor"/> to surface a <c>"Custom"</c>
+    /// interop mode when the user has wired a non-default envelope mapper for this
+    /// endpoint. The base implementation returns <c>false</c> so non-typed endpoints
+    /// (local queues, the database control transports, TCP, etc.) are reported as
+    /// using the framework default. The generic <see cref="Endpoint{TMapper, TConcreteMapper}"/>
+    /// overrides this. See #2641.
+    /// </summary>
+    [IgnoreDescription]
+    protected internal virtual bool HasCustomEnvelopeMapper => false;
 
     /// <summary>
     ///     Get or override the default message serializer for just this endpoint
@@ -417,12 +455,26 @@ public abstract class Endpoint : ICircuitParameters, IDescribesProperties
             { nameof(EndpointName), EndpointName },
             { nameof(Mode), Mode },
             { nameof(PingIntervalForCircuitResume), PingIntervalForCircuitResume },
-            { nameof(FailuresBeforeCircuitBreaks), PingIntervalForCircuitResume }
+            { nameof(FailuresBeforeCircuitBreaks), FailuresBeforeCircuitBreaks }
         };
 
         if (Mode == EndpointMode.BufferedInMemory)
         {
             dict.Add(nameof(MaximumEnvelopeRetryStorage), MaximumEnvelopeRetryStorage);
+        }
+
+        if (ShouldEnforceBackPressure())
+        {
+            dict.Add($"{nameof(BufferingLimits)}.{nameof(BufferingLimits.Maximum)}", BufferingLimits.Maximum);
+            dict.Add($"{nameof(BufferingLimits)}.{nameof(BufferingLimits.Restart)}", BufferingLimits.Restart);
+        }
+
+        if (CircuitBreakerOptions != null)
+        {
+            dict.Add($"{nameof(CircuitBreakerOptions)}.{nameof(CircuitBreakerOptions.FailurePercentageThreshold)}",
+                CircuitBreakerOptions.FailurePercentageThreshold);
+            dict.Add($"{nameof(CircuitBreakerOptions)}.{nameof(CircuitBreakerOptions.PauseTime)}",
+                CircuitBreakerOptions.PauseTime);
         }
 
         return dict;
@@ -435,7 +487,7 @@ public abstract class Endpoint : ICircuitParameters, IDescribesProperties
             return route;
         }
 
-        route = new MessageRoute(messageType, this, runtime);
+        route = MessageRoute.For(messageType, this, runtime);
 
         Routes = Routes.AddOrUpdate(messageType, route);
 
@@ -469,6 +521,21 @@ public abstract class Endpoint : ICircuitParameters, IDescribesProperties
             WireTap = ResolveWireTap(runtime);
         }
 
+        // Pre-populate the endpoint-local serializer cache with every globally-
+        // registered serializer (keyed by content-type). This eliminates the
+        // first-miss hot-path mutation in TryFindSerializer (formerly an
+        // ImHashMap.AddOrUpdate on every previously-unseen content-type), making
+        // steady-state lookups pure reads. Endpoint-level overrides registered
+        // via RegisterSerializer prior to Compile() are preserved — they take
+        // precedence because TryAdd skips entries already in the map.
+        foreach (var pair in runtime.Options.ToSerializerDictionary())
+        {
+            if (!_serializers.Contains(pair.Key))
+            {
+                _serializers = _serializers.AddOrUpdate(pair.Key, pair.Value);
+            }
+        }
+
         _hasCompiled = true;
     }
 
@@ -485,7 +552,14 @@ public abstract class Endpoint : ICircuitParameters, IDescribesProperties
 
     internal bool ShouldSendMessage(Type messageType)
     {
-        return Subscriptions.Any(x => x.Matches(messageType));
+        // Subscriptions added by an IMessageRoutingConvention's PreregisterSenders pass
+        // (GH-2588) are NOT explicit publish rules — they exist solely so endpoint
+        // policies like UseDurableOutboxOnAllSendingEndpoints can see Subscriptions.Any()
+        // at Compile() time. ExplicitRouting and the diagnostics command both call this
+        // method to identify user-wired publish rules; counting conventional subscriptions
+        // here would short-circuit past LocalRouting / MessageRoutingConventions and break
+        // routing precedence for handled messages.
+        return Subscriptions.Any(x => !x.IsFromConvention && x.Matches(messageType));
     }
 
     protected virtual bool supportsMode(EndpointMode mode)
@@ -528,10 +602,14 @@ public abstract class Endpoint : ICircuitParameters, IDescribesProperties
             return serializer;
         }
 
-        serializer = Runtime?.Options.TryFindSerializer(contentType);
-        _serializers = _serializers!.AddOrUpdate(contentType, serializer)!;
-
-        return serializer;
+        // Compile() pre-seeds _serializers with every globally-registered content-
+        // type, so reaching this fallback means the message arrived with a content-
+        // type that wasn't registered at bootstrap. Read from the global registry
+        // without mutating the endpoint cache — under sustained traffic with an
+        // unregistered content-type that would otherwise be a hot-path write on
+        // every call, but in practice this branch fires rarely (and the global
+        // lookup is itself O(1) against a small dictionary).
+        return Runtime?.Options.TryFindSerializer(contentType);
     }
 
     /// <summary>
@@ -614,6 +692,18 @@ public abstract class Endpoint : ICircuitParameters, IDescribesProperties
         deadLetterSender = default;
         return false;
     }
+
+    /// <summary>
+    /// A transport-agnostic declaration of where this endpoint's dead letters effectively go —
+    /// Wolverine's durable store (<see cref="DeadLetterStorageMode.Durable"/>), a native broker dead
+    /// letter queue (<see cref="DeadLetterStorageMode.Native"/>), or a native queue bridged back into
+    /// durable storage (<see cref="DeadLetterStorageMode.NativeWithRecovery"/>). Monitoring tools read
+    /// this through <see cref="Capabilities.EndpointDescriptor.DeadLetterStorage"/> to detect
+    /// endpoints whose dead letters are native and un-bridged. The default is
+    /// <see cref="DeadLetterStorageMode.Durable"/>; transports with a native dead letter queue
+    /// override this.
+    /// </summary>
+    public virtual DeadLetterStorageMode DeadLetterStorage => DeadLetterStorageMode.Durable;
 
     internal bool ShouldAutoStartAsListener(DurabilitySettings durability)
     {

@@ -1,4 +1,5 @@
 using IntegrationTests;
+using JasperFx.Events.Projections;
 using JasperFx;
 using JasperFx.CodeGeneration;
 using JasperFx.Events;
@@ -17,11 +18,11 @@ namespace PolecatTests.AggregateHandlerWorkflow;
 
 public class version_source_override : IAsyncLifetime
 {
-    private IHost theHost;
-    private IDocumentStore theStore;
+    private IHost theHost = null!;
+    private IDocumentStore theStore = null!;
     private Guid theStreamId;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         theHost = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -43,7 +44,7 @@ public class version_source_override : IAsyncLifetime
         await ((DocumentStore)theStore).Database.ApplyAllConfiguredChangesToDatabaseAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await theHost.StopAsync();
         theHost.Dispose();
@@ -61,7 +62,9 @@ public class version_source_override : IAsyncLifetime
     private async Task<VersionSourceAggregate> LoadAggregate()
     {
         await using var session = theStore.LightweightSession();
-        return await session.LoadAsync<VersionSourceAggregate>(theStreamId);
+        var aggregate = await session.LoadAsync<VersionSourceAggregate>(theStreamId);
+        aggregate.ShouldNotBeNull();
+        return aggregate;
     }
 
     [Fact]
@@ -110,7 +113,6 @@ public class version_source_override : IAsyncLifetime
 }
 
 #region Types
-
 public class VersionSourceAggregate
 {
     public VersionSourceAggregate()
@@ -133,7 +135,6 @@ public record VersionSourceIncremented;
 #endregion
 
 #region Commands
-
 public record IncrementWithCustomVersion(Guid VersionSourceAggregateId, long ExpectedVersion);
 
 public record IncrementWithParamVersionSource(Guid VersionSourceAggregateId, long MyVersion);
@@ -141,7 +142,6 @@ public record IncrementWithParamVersionSource(Guid VersionSourceAggregateId, lon
 #endregion
 
 #region Handlers
-
 [AggregateHandler(VersionSource = nameof(IncrementWithCustomVersion.ExpectedVersion))]
 public static class CustomVersionSourceHandler
 {

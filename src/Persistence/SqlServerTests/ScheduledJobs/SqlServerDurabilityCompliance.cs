@@ -50,7 +50,7 @@ public class SqlServerDurabilityCompliance : DurabilityComplianceContext<Trigger
     protected override async Task<ItemCreated> loadItemAsync(IHost receiver, Guid id)
     {
         await using var conn = new SqlConnection(Servers.SqlServerConnectionString);
-        conn.Open();
+        await conn.OpenAsync();
 
         var name = (string?)(await conn
             .CreateCommand("select name from receiver.item_created where id = @id")
@@ -73,7 +73,6 @@ public class SqlServerDurabilityCompliance : DurabilityComplianceContext<Trigger
         Func<MessageContext, ValueTask> action)
     {
         #region sample_basic_sql_server_outbox_sample
-
         await using (var conn = new SqlConnection(Servers.SqlServerConnectionString))
         {
             await conn.OpenAsync();
@@ -95,10 +94,10 @@ public class SqlServerDurabilityCompliance : DurabilityComplianceContext<Trigger
         #endregion
     }
 
-    protected override IReadOnlyList<Envelope> loadAllOutgoingEnvelopes(IHost sender)
+    protected override Task<IReadOnlyList<Envelope>> loadAllOutgoingEnvelopes(IHost sender)
     {
         return sender.Get<IMessageStore>().As<SqlServerMessageStore>()
-            .Admin.AllOutgoingAsync().GetAwaiter().GetResult();
+            .Admin.AllOutgoingAsync();
     }
 }
 
@@ -116,8 +115,7 @@ public class TriggerMessageReceiver
     }
 }
 
-#region sample_UsingSqlTransaction
-
+#region sample_usingsqltransaction
 public class ItemCreatedHandler
 {
     [Transactional]
@@ -138,8 +136,7 @@ public class ItemCreatedHandler
 
 public class CreateItemHandler
 {
-    #region sample_SqlServerOutboxWithSqlTransaction
-
+    #region sample_sqlserveroutboxwithsqltransaction
     [Transactional]
     public async Task<ItemCreatedEvent> Handle(CreateItemCommand command, SqlTransaction tx)
     {

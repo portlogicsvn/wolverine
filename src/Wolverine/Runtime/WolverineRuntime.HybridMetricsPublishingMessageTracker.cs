@@ -46,9 +46,11 @@ public partial class WolverineRuntime
         public void ExecutionFinished(Envelope envelope)
         {
             var executionTime = envelope.StopTiming();
-            if (executionTime > 0)
+            if (executionTime >= 0)
             {
-                _sink.Post(new RecordExecutionTime(executionTime, envelope.TenantId!));
+                // RecordExecutionTime stays whole-ms (it's on the CritterWatch wire); rounding
+                // instead of the old truncate-then-drop keeps sub-millisecond executions counted
+                _sink.Post(new RecordExecutionTime((long)Math.Round(executionTime), envelope.TenantId!));
             }
 
             _runtime.ExecutionFinished(envelope);
@@ -62,17 +64,25 @@ public partial class WolverineRuntime
 
         public void MessageSucceeded(Envelope envelope)
         {
-            var time = DateTimeOffset.UtcNow.Subtract(envelope.SentAt.ToUniversalTime()).TotalMilliseconds;
-            _sink.Post(new RecordEffectiveTime(time, envelope.TenantId!));
-            
+            if (envelope.SentAt != default)
+            {
+                var time = DateTimeOffset.UtcNow.Subtract(envelope.SentAt.ToUniversalTime()).TotalMilliseconds;
+                _sink.Post(new RecordEffectiveTime(time, envelope.TenantId!));
+            }
+
             _runtime.MessageSucceeded(envelope);
         }
 
         public void MessageFailed(Envelope envelope, Exception ex)
         {
-            var time = DateTimeOffset.UtcNow.Subtract(envelope.SentAt.ToUniversalTime()).TotalMilliseconds;
-            _sink.Post(new RecordEffectiveTime(time, envelope.TenantId!));
-            _sink.Post(new RecordDeadLetter(ex.GetType().FullNameInCode(), envelope.TenantId!));
+            if (envelope.SentAt != default)
+            {
+                var time = DateTimeOffset.UtcNow.Subtract(envelope.SentAt.ToUniversalTime()).TotalMilliseconds;
+                _sink.Post(new RecordEffectiveTime(time, envelope.TenantId!));
+            }
+            // Deliberately NOT posting RecordDeadLetter here — see the identical
+            // note in WolverineRuntime.DirectMetrics.MessageFailed (CritterWatch
+            // GH-721): only MovedToErrorQueue marks a real dead letter.
 
             _runtime.MessageFailed(envelope, ex);
         }

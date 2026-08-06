@@ -32,7 +32,7 @@ public static class MultiTenantMessageHandler
 
 public class MultiTenantedRabbitFixture : IAsyncLifetime
 {
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         await declareVirtualHost("vh1");
         await declareVirtualHost("vh2");
@@ -78,7 +78,7 @@ public class MultiTenantedRabbitFixture : IAsyncLifetime
             {
                 opts.Policies.DisableConventionalLocalRouting();
                 opts.ServiceName = "one";
-                opts.UseRabbitMq(f => f.VirtualHost = "vh1").DisableDeadLetterQueueing();
+                opts.UseRabbitMq(f => f.VirtualHost = "vh1").AutoPurgeOnStartup().DisableDeadLetterQueueing();
                 opts.ListenToRabbitQueue("multi_incoming");
                 
                 opts.Services.AddResourceSetupOnStartup();
@@ -91,7 +91,7 @@ public class MultiTenantedRabbitFixture : IAsyncLifetime
             {
                 opts.Policies.DisableConventionalLocalRouting();
                 opts.ServiceName = "two";
-                opts.UseRabbitMq(f => f.VirtualHost = "vh2").DisableDeadLetterQueueing();
+                opts.UseRabbitMq(f => f.VirtualHost = "vh2").AutoPurgeOnStartup().DisableDeadLetterQueueing();
                 opts.ListenToRabbitQueue("multi_incoming");
                 
                 opts.Services.AddResourceSetupOnStartup();
@@ -102,7 +102,7 @@ public class MultiTenantedRabbitFixture : IAsyncLifetime
             {
                 opts.Policies.DisableConventionalLocalRouting();
                 opts.ServiceName = "three";
-                opts.UseRabbitMq(f => f.VirtualHost = "vh3").DisableDeadLetterQueueing();
+                opts.UseRabbitMq(f => f.VirtualHost = "vh3").AutoPurgeOnStartup().DisableDeadLetterQueueing();
                 opts.ListenToRabbitQueue("multi_incoming");
                 
                 opts.Services.AddResourceSetupOnStartup();
@@ -117,7 +117,7 @@ public class MultiTenantedRabbitFixture : IAsyncLifetime
 
     public IHost Main { get; private set; } = null!;
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await Main.StopAsync();
         Main.Dispose();
@@ -144,7 +144,37 @@ public class MultiTenantedRabbitFixture : IAsyncLifetime
     }
 }
 
-[Trait("Category", "Flaky")]
+// GH-3763: untagged 2026-08-03, but NOT yet clean -- read this before assuming it is.
+//
+// The previous note said untagging "would put a guaranteed red in CIRabbitMQ". That is no longer true:
+// measured twice, CIRabbitMQ is GREEN at 472 passed with send_message_to_a_specific_tenant failing its
+// first attempt and passing on the supervisor's retry. So it is now visible debt in the retry ledger
+// (GH-3787) rather than 7 tests running nowhere, which is the trade this file is making on purpose.
+//
+// Two collisions were found and fixed in this pass, and neither was sufficient:
+//   - RabbitTesting handed out queue and exchange names from a static counter that restarts at zero in
+//     every worker PROCESS, so classes in different processes declared and bound the same names. See
+//     the note on RabbitTesting in end_to_end.cs.
+//   - Main purged on startup but the three tenant hosts did not, so a MultiTenantMessage left in
+//     multi_incoming on vh1/vh2/vh3 by an earlier run could be received alongside the new one and make
+//     SingleRecord throw.
+//
+// What remains: the class still passes 7/7 alone and still costs exactly one retry in-suite, every run.
+// The remaining interference is unidentified.
+//
+// The next step this note used to ask for -- "dump the tracked session on the FIRST attempt rather than
+// infer from the assertion" -- has since been built and no longer needs doing by hand. GH-3787's retry
+// ledger records the first failing attempt's error and stack for every retried test, so the dump
+// arrives on its own. From main run 30856898284:
+//
+//     System.Exception : No messages of type Wolverine.RabbitMQ.Tests.MultiTenantResponse were received
+//     Activity detected: | Service (Node Id) | Message Id | Message Type | ...
+//
+// So the request never produced its response, rather than the response going somewhere unexpected.
+// That is consistent with the standing suspicion recorded above -- the fixture's Queue1,
+// multi_response, global_response and multi_incoming are fixed names in the shared default vhost -- but
+// it does not yet prove it. The full tracked-session table and the stack are in the per-run
+// test-ledger-CIRabbitMQ artifact; read one before theorising further.
 public class multi_tenancy_through_virtual_hosts : IClassFixture<MultiTenantedRabbitFixture>
 {
     private readonly MultiTenantedRabbitFixture _fixture;
@@ -267,7 +297,6 @@ public static class MultiTenantedRabbitMqSamples
     public static async Task Configure()
     {
         #region sample_configuring_rabbit_mq_for_tenancy
-
         var builder = Host.CreateApplicationBuilder();
 
         builder.UseWolverine(opts =>
@@ -325,7 +354,6 @@ public static class MultiTenantedRabbitMqSamples
     }
 
     #region sample_send_message_to_specific_tenant
-
     public static async Task send_message_to_specific_tenant(IMessageBus bus)
     {
         // Send a message tagged to a specific tenant id

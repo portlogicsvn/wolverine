@@ -4,12 +4,13 @@ using Azure.Messaging.ServiceBus;
 using Azure.Messaging.ServiceBus.Administration;
 using JasperFx.Core;
 using JasperFx.Core.Reflection;
+using JasperFx.Descriptors;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using Wolverine.Configuration;
 using Wolverine.Runtime;
+using Wolverine.Newtonsoft;
 using Wolverine.Runtime.Interop.MassTransit;
-using Wolverine.Runtime.Serialization;
 using Wolverine.Transports;
 using Wolverine.Transports.Sending;
 using Wolverine.Util;
@@ -34,8 +35,10 @@ public class AzureServiceBusQueue : AzureServiceBusEndpoint, IBrokerQueue, IMass
         {
             DeadLetteringOnMessageExpiration = false
         };
+        BrokerRole = "queue";
     }
 
+    [ChildDescription]
     public CreateQueueOptions Options { get; }
 
     public string QueueName { get; }
@@ -106,7 +109,7 @@ public class AzureServiceBusQueue : AzureServiceBusEndpoint, IBrokerQueue, IMass
 
     private async Task purgeWithSessions(ServiceBusClient client)
     {
-        var cancellation = new CancellationTokenSource();
+        using var cancellation = new CancellationTokenSource();
         cancellation.CancelAfter(2000);
 
         var stopwatch = new Stopwatch();
@@ -215,7 +218,22 @@ public class AzureServiceBusQueue : AzureServiceBusEndpoint, IBrokerQueue, IMass
         deadLetterSender = default;
         return false;
     }
+
+    // Buffered/durable queues move failures to the managed dead letter queue; inline queues use the
+    // native $DeadLetterQueue sub-queue. Either way it's a native broker destination unless dead
+    // lettering was explicitly disabled (DeadLetterQueueName set to null), which falls back to
+    // Wolverine's durable storage.
+    public override DeadLetterStorageMode DeadLetterStorage => DeadLetterQueueName.IsNotEmpty()
+        ? DeadLetterStorageMode.Native
+        : DeadLetterStorageMode.Durable;
     
+    // NServiceBus interop: NSB writes the .NET assembly-qualified type name
+    // to the message header; NServiceBusInterop.ResolveMessageType turns that
+    // into a Wolverine message type name. Type resolution from a runtime string
+    // is fundamentally not AOT-clean — the trimmer can't know which types may
+    // appear — so the reflection and its IL2057 suppression live there, next to
+    // the call. AOT-clean apps using NSB interop preserve their NSB-side message
+    // types via TrimmerRootDescriptor.
     internal void UseNServiceBusInterop()
     {
         // NServiceBus.EnclosedMessageTypes
@@ -243,7 +261,7 @@ public class AzureServiceBusQueue : AzureServiceBusEndpoint, IBrokerQueue, IMass
                 if (serviceBusReceivedMessage.ApplicationProperties.TryGetValue("NServiceBus.ReplyToAddress",
                         out var raw))
                 {
-                    var queueName = (raw is byte[] b ? Encoding.Default.GetString(b) : raw.ToString())!;
+                    var queueName = (raw is byte[] b ? Encoding.UTF8.GetString(b) : raw.ToString())!;
                     e.ReplyUri = new Uri($"{Parent.Protocol}://queue/{queueName}");
                 }
             }
@@ -253,20 +271,19 @@ public class AzureServiceBusQueue : AzureServiceBusEndpoint, IBrokerQueue, IMass
             m.MapProperty(x => x.MessageType!, (e, m) =>
             {
                 // Incoming
-                if (m.ApplicationProperties.TryGetValue("NServiceBus.EnclosedMessageTypes", out var raw))
+                if (m.ApplicationProperties.TryGetValue(NServiceBusInterop.EnclosedMessageTypesHeader, out var raw))
                 {
-                    var typeName = (raw is byte[] b ? Encoding.Default.GetString(b) : raw.ToString())!;
-                    if (typeName.IsNotEmpty())
+                    var header = raw is byte[] b ? Encoding.UTF8.GetString(b) : raw?.ToString();
+                    if (NServiceBusInterop.ResolveMessageType(header) is string messageType)
                     {
-                        var messageType = Type.GetType(typeName);
-                        e.MessageType = messageType!.ToMessageTypeName();
+                        e.MessageType = messageType;
                     }
                 }
             },
                 (e, m) =>
             {
                 // Outgoing, use the interop strategy here
-                m.ApplicationProperties["NServiceBus.EnclosedMessageTypes"] = e.Message!.GetType().ToMessageTypeName();
+                m.ApplicationProperties[NServiceBusInterop.EnclosedMessageTypesHeader] = e.Message!.GetType().ToMessageTypeName();
             });
         });
     }

@@ -12,9 +12,9 @@ namespace PolecatTests.Sagas;
 
 public class multiple_sagas_for_same_message : IAsyncLifetime
 {
-    private IHost _host;
+    private IHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -37,9 +37,10 @@ public class multiple_sagas_for_same_message : IAsyncLifetime
             .ApplyAllConfiguredChangesToDatabaseAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _host.StopAsync();
+        _host.Dispose();
     }
 
     [Fact]
@@ -51,11 +52,11 @@ public class multiple_sagas_for_same_message : IAsyncLifetime
 
         await using var session = _host.Services.GetRequiredService<IDocumentStore>().QuerySession();
 
-        var shipping = await session.LoadAsync<PcShippingSaga>(id);
+        var shipping = await session.LoadAsync<PcShippingSaga>(id, TestContext.Current.CancellationToken);
         shipping.ShouldNotBeNull();
         shipping.ProductName.ShouldBe("Widget");
 
-        var billing = await session.LoadAsync<PcBillingSaga>(id);
+        var billing = await session.LoadAsync<PcBillingSaga>(id, TestContext.Current.CancellationToken);
         billing.ShouldNotBeNull();
         billing.ProductName.ShouldBe("Widget");
     }
@@ -68,18 +69,18 @@ public class multiple_sagas_for_same_message : IAsyncLifetime
         await using var session = _host.Services.GetRequiredService<IDocumentStore>().QuerySession();
 
         await _host.SendMessageAndWaitAsync(new PcOrderPlaced(id, "Gadget"));
-        (await session.LoadAsync<PcShippingSaga>(id)).ShouldNotBeNull();
-        (await session.LoadAsync<PcBillingSaga>(id)).ShouldNotBeNull();
+        (await session.LoadAsync<PcShippingSaga>(id, TestContext.Current.CancellationToken)).ShouldNotBeNull();
+        (await session.LoadAsync<PcBillingSaga>(id, TestContext.Current.CancellationToken)).ShouldNotBeNull();
 
         // Complete only the shipping saga
         await _host.SendMessageAndWaitAsync(new PcOrderShipped(id));
 
         // Shipping saga should be deleted (completed)
-        var shipping = await session.LoadAsync<PcShippingSaga>(id);
+        var shipping = await session.LoadAsync<PcShippingSaga>(id, TestContext.Current.CancellationToken);
         shipping.ShouldBeNull();
 
         // Billing saga should still exist
-        var billing = await session.LoadAsync<PcBillingSaga>(id);
+        var billing = await session.LoadAsync<PcBillingSaga>(id, TestContext.Current.CancellationToken);
         billing.ShouldNotBeNull();
         billing.ProductName.ShouldBe("Gadget");
 
@@ -87,7 +88,7 @@ public class multiple_sagas_for_same_message : IAsyncLifetime
         await _host.SendMessageAndWaitAsync(new PcPaymentReceived(id));
 
         await using var session2 = _host.Services.GetRequiredService<IDocumentStore>().QuerySession();
-        (await session2.LoadAsync<PcBillingSaga>(id)).ShouldBeNull();
+        (await session2.LoadAsync<PcBillingSaga>(id, TestContext.Current.CancellationToken)).ShouldBeNull();
     }
 }
 

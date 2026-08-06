@@ -27,7 +27,7 @@ builder.Host.UseWolverine(opts =>
 {
     // Setting up Postgresql-backed message storage
     // This requires a reference to Wolverine.Postgresql
-    opts.PersistMessagesWithPostgresql(connectionString);
+    opts.PersistMessagesWithPostgresql(connectionString!);
 
     // Other Wolverine configuration
 });
@@ -44,7 +44,7 @@ var app = builder.Build();
 // the message storage
 return await app.RunJasperFxCommands(args);
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/PersistenceTests/Samples/DocumentationSamples.cs#L164-L190' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_setup_postgresql_storage' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/PersistenceTests/Samples/DocumentationSamples.cs#L158-L183' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_setup_postgresql_storage' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Optimizing the Message Store <Badge type="tip" text="5.3" />
@@ -62,8 +62,80 @@ var host = await Host.CreateDefaultBuilder()
     {
         opts.Durability.EnableInboxPartitioning = true;
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/PostgresqlTests/compliance_using_table_partitioning.cs#L26-L34' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_enabling_inbox_partitioning' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/PostgresqlTests/compliance_using_table_partitioning.cs#L26-L33' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_enabling_inbox_partitioning' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
+
+## Connection Stability for Leader Election
+
+::: tip
+The single most impactful change you can make for cluster stability in cloud or Kubernetes environments is appending `Keepalive=30;Tcp Keepalive=true` to your Wolverine PostgreSQL connection string. Everything else in this section is context for *why*.
+:::
+
+Wolverine's [leader election](leadership-and-troubleshooting) holds a **session-level PostgreSQL advisory lock**. That lock identifies the cluster leader; only the node holding it evaluates the assignment grid and dispatches `AssignAgent` / `ReassignAgent` commands. Note that the leader *assigns* the durability agents rather than running them all itself — each message database's durability agent is assigned to exactly one node, which need not be the leader (see [Scheduled Message Polling](leadership-and-troubleshooting#scheduled-message-polling)). Session-level advisory locks live and die with the Postgres backend session — the moment the leader's session is terminated server-side (TCP RST, idle-connection cull, `pg_terminate_backend`, managed-PG failover, Azure Flexible Server maintenance, k8s service-mesh idle timeout, NAT/conntrack eviction, ELB idle close, etc.) the lock is released and another node can legitimately acquire it.
+
+Wolverine pings the lock-holding connection every `Durability.HealthCheckPollingTime` (default 10 seconds) with `SELECT 1` to detect server-side session loss. When the ping fails the current leader emits:
+
+```
+Lost advisory-lock connection for database <name>; clearing held lock ids <ids>
+Node <NodeNumber> stepping down from leadership: the leadership advisory lock was released server-side
+```
+
+A new election runs on the next tick. If the new leader's `EvaluateAssignmentsAsync` cycle observes both the freshly-elected leader and the ex-leader as still claiming the `wolverine://leader/` agent in the assignment grid (transient window between step-down and the ex-leader's row being cleared), the split-brain healer fires:
+
+```
+Detected duplicate agent wolverine://leader/ reported running on Node X and Node Y
+— sending StopRemoteAgent to the older copy to heal split-brain residue.
+```
+
+**Seeing these log lines occasionally is normal.** Seeing them every minute means the connection between your app pods and PostgreSQL is being dropped at sub-`HealthCheckPollingTime` intervals — Wolverine is detecting and recovering from those drops correctly, but the steady state is wrong.
+
+### Configure TCP keepalives on the Wolverine connection string
+
+Linux's default `tcp_keepalive_time = 7200s` (two hours) is longer than any cloud network path will tolerate. Tell Npgsql to set its own keepalive interval:
+
+```csharp
+var connectionString = "Host=...;Database=...;Username=...;Password=...;"
+                     + "Keepalive=30;Tcp Keepalive=true";
+
+builder.Host.UseWolverine(opts =>
+{
+    opts.PersistMessagesWithPostgresql(connectionString);
+});
+```
+
+30 seconds is a good default — short enough to survive every common cloud idle timeout (Azure Flexible Server's 30-min default, AWS NAT Gateway's 350s, k8s service mesh's typical 60–90s) without flooding the network. If you can pair it with server-side `tcp_keepalives_idle = 30` in `postgresql.conf`, even better, but the client-side setting is sufficient on its own.
+
+### Avoid PgBouncer / RDS Proxy in transaction-pooling mode
+
+Session-level advisory locks **require session identity**. Transaction-pooling poolers (PgBouncer's `pool_mode = transaction`, RDS Proxy's transaction mode, etc.) multiplex multiple application connections onto a smaller pool of backend sessions on a per-transaction basis, so the backend session that took the lock isn't the same one that later checks it. This *will* break leader election — usually quietly, with split-brain symptoms.
+
+If you need pooling between Wolverine and PostgreSQL, use **session pooling** (`pool_mode = session`). Or — preferred for Wolverine specifically — bypass the pooler entirely and connect directly to the database. The connection count Wolverine itself uses for advisory locks and durability operations is modest; pooling rarely pays off for the Wolverine ↔ PG hop in particular.
+
+### Match managed-PG idle eviction to `HealthCheckPollingTime`
+
+If you can configure your managed-PG service's idle-connection eviction (`idle_in_transaction_session_timeout`, vendor-specific connection-idle parameters), make sure the eviction window is **longer** than `Durability.HealthCheckPollingTime`. The 10-second default ping easily survives any reasonable idle timeout, but in environments with very aggressive eviction (some Azure Flex / RDS proxy configurations evict at 15–30s) you may need:
+
+```csharp
+opts.Durability.HealthCheckPollingTime = 5.Seconds();
+```
+
+The trade-off is more `SELECT 1` round-trips per node per minute, which is negligible.
+
+### Kubernetes service mesh and NetworkPolicy
+
+Istio, Linkerd, and other sidecars commonly default to a 60–90 second TCP idle timeout on outbound connections. Bump the idle timeout for the Wolverine ↔ PG hop above the longest legitimate gap between Wolverine database operations. With the keepalive recommendations above the gap is at most ~10 seconds, so any value over a couple of minutes is fine. If you've recently migrated from VMs to k8s and are now seeing leadership churn (very common report), the service mesh idle timeout is almost always the culprit.
+
+### Defensive retry for transient pool poisoning
+
+Heavy connection churn from rapid leadership cycling can occasionally leave the Npgsql pool with a half-disposed connector that surfaces later as `System.ObjectDisposedException: 'System.Threading.ManualResetEventSlim'` from inside `NpgsqlConnector.ResetCancellation`. This is downstream of the connection-stability issue, not a separate bug, and goes away once you've stabilised the leadership churn. Until then, broaden your `OnException` policy to catch it so the durability agent doesn't spam:
+
+```csharp
+opts.Policies.OnException<NpgsqlException>(ex => ex.IsTransient)
+    .Or<ObjectDisposedException>()           // defensive: stale pool entries during connection churn
+    .RetryOnce()
+    .Then.RetryWithCooldown(1.Seconds(), 3.Seconds())
+    .AndPauseProcessing(10.Seconds());
+```
 
 ## PostgreSQL Messaging Transport <Badge type="tip" text="2.5" />
 
@@ -83,7 +155,7 @@ builder.UseWolverine(opts =>
 {
     var connectionString = builder.Configuration.GetConnectionString("postgres");
     opts.UsePostgresqlPersistenceAndTransport(
-            connectionString, 
+            connectionString!,
             
             // This argument is the database schema for the envelope storage
             // If separate logical services are targeting the same physical database,
@@ -118,13 +190,16 @@ builder.UseWolverine(opts =>
 
         // Optionally specify how many messages to
         // fetch into the listener at any one time
-        .MaximumMessagesToReceive(50);
+        .MaximumMessagesToReceive(50)
+
+        // Override how often to poll for new messages when the queue is idle.
+        .PollingInterval(1.Seconds());
 });
 
 using var host = builder.Build();
 await host.StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/PostgresqlTests/DocumentationSamples.cs#L12-L61' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_postgres_transport' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/PostgresqlTests/DocumentationSamples.cs#L13-L64' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_postgres_transport' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 The PostgreSQL transport is strictly queue-based at this point. The queues are configured as durable by default, meaning
@@ -135,7 +210,7 @@ that they are utilizing the transactional inbox and outbox. The PostgreSQL queue
 ```cs
 opts.ListenToPostgresqlQueue("sender").BufferedInMemory();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/PostgresqlTests/Transport/compliance_tests.cs#L65-L69' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_setting_postgres_queue_to_buffered' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/PostgresqlTests/Transport/compliance_tests.cs#L65-L68' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_setting_postgres_queue_to_buffered' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Using this option just means that the PostgreSQL queues can be used for both sending or receiving with no integration
@@ -169,11 +244,177 @@ opts.ListenToPostgresqlQueue("inbound").PollingInterval(2.Seconds());
 
 When not set, the queue falls back to the global `DurabilitySettings.ScheduledJobPollingTime`.
 
+### Dequeue Performance <Badge type="tip" text="6.16" />
+
+The PostgreSQL queue tables carry a btree index on the dequeue ordering column so that the
+`ORDER BY ... LIMIT n FOR UPDATE SKIP LOCKED` pull each poll performs is an ordered index scan rather
+than a scan + sort of the whole table. This is applied automatically — no configuration is required.
+
+Unlike the [Sql Server transport's `OptimizeQueueThroughput()`](./sqlserver.html#optimizing-queue-throughput),
+there is no clustered-storage opt-in for PostgreSQL: PostgreSQL tables are heaps (there is no clustered
+index to align with the dequeue order), so the index above already captures essentially all of the
+available benefit. For very high-churn queues the main operational lever is PostgreSQL autovacuum —
+busy queue tables accumulate dead tuples from the constant insert/delete cycle, so ensure autovacuum
+is keeping up (and consider per-table autovacuum tuning) rather than reaching for a storage-layout change.
+
 ::: info Control queue
 Wolverine has an internal control queue (`dbcontrol`) used for internal operations.
 This queue is hardcoded to poll every second and should not be changed to ensure the stability of the application.
 :::
 
+### Global Partitioning <Badge type="tip" text="6.24" />
+
+PostgreSQL queues can be used as the external transport for
+[global partitioned messaging](/guide/messaging/partitioning#global-partitioning). This gives you
+cluster-wide sequential processing by group id with **no extra infrastructure** — the shards are
+just more tables in the database you already have.
+
+Use `UseShardedPostgresqlQueues()` inside a `GlobalPartitioned()` configuration:
+
+```cs
+using var host = await Host.CreateDefaultBuilder()
+    .UseWolverine(opts =>
+    {
+        opts.UsePostgresqlPersistenceAndTransport(connectionString)
+            .AutoProvision();
+
+        opts.MessagePartitioning.ByMessage<IOrderMessage>(x => x.OrderId.ToString());
+
+        opts.MessagePartitioning.GlobalPartitioned(topology =>
+        {
+            // Creates PostgreSQL queues named "orders1" through "orders4"
+            // with matching companion local queues for sequential processing
+            topology.UseShardedPostgresqlQueues("orders", 4);
+            topology.MessagesImplementing<IOrderMessage>();
+        });
+    }).StartAsync();
+```
+
+That creates queues named `orders1` through `orders4` — each backed by its own
+`wolverine_queue_orders{n}` / `wolverine_queue_orders{n}_scheduled` table pair — with companion
+local queues `global-orders1` through `global-orders4`. Each shard queue is marked exclusive, so
+only one node in the cluster listens to it at a time.
+
+If you only want the *publishing* half — sharded queues with no companion local queues, so every
+message really does round-trip through the database — use the `MessagePartitioningRules` variant
+instead:
+
+```cs
+opts.MessagePartitioning.PublishToShardedPostgresqlQueues("orders", 4, topology =>
+{
+    topology.MessagesImplementing<IOrderMessage>();
+    topology.MaxDegreeOfParallelism = PartitionSlots.Five;
+});
+```
+
+::: info Long base names
+PostgreSQL truncates identifiers at `NAMEDATALEN` (63 characters by default). Wolverine runs every
+queue table name through Weasel's deterministic shortening helper, so a long sharded base name still
+produces distinct, in-range table names for each shard.
+:::
+
+::: warning Multi-tenancy
+Under [database-per-tenant storage](#multi-tenancy) the shard queue tables are provisioned in
+**every** tenant database and slot routing is unchanged — a group id maps to the same slot number
+regardless of tenant. Listening is then assigned per `(queue, database)` pair by the sticky listener
+agent family rather than per queue.
+:::
+
+### Resetting in Tests
+
+`RebuildAsync()` / `ClearAllAsync()` on the message store clear envelope storage only — they leave
+this transport's queue and scheduled-message tables alone. To wipe both in an integration test
+harness, call [`IHost.ClearAllWolverineStorageAsync()`](/guide/testing.html#resetting-all-wolverine-storage-in-tests),
+which leaves the queue tables built but empty across every tenant database.
+
+## NServiceBus Interoperability <Badge type="tip" text="6.0" />
+
+Wolverine can exchange messages with an [NServiceBus](https://particular.net/nservicebus) endpoint that uses the
+[PostgreSQL transport](https://docs.particular.net/transports/sql/) by reading and writing the NServiceBus queue
+tables directly — the same database-backed interop available for [SQL Server](/guide/durability/sqlserver.html#nservicebus-interoperability).
+One table per queue with a JSON `Headers` column and a raw `Body` column; Wolverine's own durable inbox/outbox still
+lives in its PostgreSQL message store, only the *queue* tables belong to NServiceBus.
+
+Because NServiceBus normally owns and provisions its own tables, `AutoProvision` is **off by default** for these endpoints.
+
+```cs
+using Wolverine.Postgresql.Transport.NServiceBus;
+
+builder.UseWolverine(opts =>
+{
+    // Wolverine's durable inbox/outbox lives in PostgreSQL
+    opts.PersistMessagesWithPostgresql(connectionString, "wolverine");
+
+    // Opt into the NServiceBus PostgreSQL interop transport (autoProvision: true only if you
+    // want Wolverine to create the queue tables itself; NServiceBus usually owns them).
+    opts.UseNServiceBusPostgresqlInterop(autoProvision: false);
+
+    // Send Wolverine messages to the "nsb" NServiceBus endpoint table
+    opts.PublishMessage<OrderPlaced>().ToNServiceBusPostgresqlQueue("nsb");
+
+    // Listen for messages NServiceBus sends to Wolverine's own "wolverine" table,
+    // and use it as the reply address Wolverine stamps onto outgoing messages
+    opts.ListenToNServiceBusPostgresqlQueue("wolverine").UseForReplies();
+
+    // Let NServiceBus send interface-typed messages that Wolverine binds to concrete types
+    opts.Policies.RegisterInteropMessageAssembly(typeof(IOrderContract).Assembly);
+});
+```
+
+The queue tables are modeled and migrated through Weasel like every other Wolverine transport table, and the destructive
+receive uses `FOR UPDATE SKIP LOCKED` ordered by the NServiceBus `seq` column. A few PostgreSQL-specific notes:
+
+* NServiceBus uses lowercase column names; Wolverine's send/receive SQL matches them with unquoted identifiers.
+* NServiceBus addresses queues as the schema-qualified `"schema"."table"`; Wolverine maps the reply address back to the
+  bare queue name so request/reply works in both directions.
+
+Tenant propagation works exactly as it does for SQL Server: NServiceBus carries the tenant id in a message
+header, and Wolverine maps it to and from `Envelope.TenantId` when you add `MapTenantIdToHeader` /
+`MapTenantIdFromHeader` to the endpoints. See the
+[SQL Server multi-tenancy section](/guide/durability/sqlserver.html#multi-tenancy) for the full explanation and sample.
+
+The [SQL Server NServiceBus interoperability guide](/guide/durability/sqlserver.html#nservicebus-interoperability)
+shows the complete bidirectional setup inline — the shared message contracts, the NServiceBus host configuration, and
+a handler — all of which applies here apart from swapping the `*SqlServer*` configuration calls for the `*Postgresql*`
+ones shown above. See the [interop tutorial](/tutorials/interop) for the bigger picture.
+
+## MassTransit Interoperability <Badge type="tip" text="6.0" />
+
+Wolverine can also interoperate with a [MassTransit](https://masstransit.io) application that uses the
+[PostgreSQL SQL transport](https://masstransit.io/documentation/transports/sql). Unlike NServiceBus' documented
+table contract, MassTransit's SQL transport is a function-driven, two-table model
+(`transport.message` + `transport.message_delivery`) that MassTransit **owns and migrates itself**, so Wolverine
+interoperates by calling MassTransit's stored functions — `send_message` to publish, `fetch_messages` to lease, and
+`delete_message`/`unlock_message` to ack/nack — rather than reading and writing a table directly. MassTransit must be
+running (or have run) to migrate the `transport` schema; Wolverine never provisions it (beyond optionally calling
+`create_queue_v2` for a queue it listens to).
+
+```cs
+using Wolverine.Postgresql.Transport.MassTransit;
+
+builder.UseWolverine(opts =>
+{
+    // Wolverine's durable inbox/outbox lives in PostgreSQL
+    opts.PersistMessagesWithPostgresql(connectionString, "wolverine");
+
+    // Opt into the MassTransit PostgreSQL interop transport. autoProvision: true makes Wolverine
+    // call create_queue_v2 for its own listening queues.
+    opts.UseMassTransitPostgresqlInterop(autoProvision: true);
+
+    // Send Wolverine messages to a MassTransit queue
+    opts.PublishMessage<OrderPlaced>().ToMassTransitPostgresqlQueue("masstransit");
+
+    // Listen to the queue MassTransit sends to, and use it for replies
+    opts.ListenToMassTransitPostgresqlQueue("wolverine").UseForReplies();
+
+    opts.Policies.RegisterInteropMessageAssembly(typeof(IOrderContract).Assembly);
+});
+```
+
+Wolverine writes the bare message JSON into the `body` column and the envelope fields into the message columns,
+emitting the MassTransit `urn:message:{Namespace}:{TypeName}` message type. Incoming messages are leased through
+`fetch_messages` and acked/nacked with the `(message_delivery_id, lock_id)` pair MassTransit hands back. Message
+types are resolved against the assemblies you register with `RegisterInteropMessageAssembly`.
 
 ## Multi-Tenancy
 
@@ -202,15 +443,15 @@ builder.UseWolverine(opts =>
 {
     // First, you do have to have a "main" PostgreSQL database for messaging persistence
     // that will store information about running nodes, agents, and non-tenanted operations
-    opts.PersistMessagesWithPostgresql(configuration.GetConnectionString("main"))
+    opts.PersistMessagesWithPostgresql(configuration.GetConnectionString("main")!)
 
         // Add known tenants at bootstrapping time
         .RegisterStaticTenants(tenants =>
         {
             // Add connection strings for the expected tenant ids
-            tenants.Register("tenant1", configuration.GetConnectionString("tenant1"));
-            tenants.Register("tenant2", configuration.GetConnectionString("tenant2"));
-            tenants.Register("tenant3", configuration.GetConnectionString("tenant3"));
+            tenants.Register("tenant1", configuration.GetConnectionString("tenant1")!);
+            tenants.Register("tenant2", configuration.GetConnectionString("tenant2")!);
+            tenants.Register("tenant3", configuration.GetConnectionString("tenant3")!);
         });
     
     opts.Services.AddDbContextWithWolverineManagedMultiTenancy<ItemsDbContext>((builder, connectionString, _) =>
@@ -219,7 +460,7 @@ builder.UseWolverine(opts =>
     }, AutoCreate.CreateOrUpdate);
 });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/EfCoreTests.MultiTenancy/MultiTenancyDocumentationSamples.cs#L24-L51' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_static_tenant_registry_with_postgresql' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/EfCoreTests.MultiTenancy/MultiTenancyDocumentationSamples.cs#L24-L50' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_static_tenant_registry_with_postgresql' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Since the underlying [Npgsql library](https://www.npgsql.org/) supports the `DbDataSource` concept, and you might need to use this for a variety of reasons, you can also
@@ -228,7 +469,7 @@ by saying that you might be using Aspire to configure PostgreSQL and both the ma
 Aspire will register `NpgsqlDataSource` services as `Singleton` scoped in your IoC container. We can build an `IWolverineExtension`
 that utilizes the IoC container to register Wolverine like so:
 
-<!-- snippet: sample_OurFancyPostgreSQLMultiTenancy -->
+<!-- snippet: sample_ourfancypostgresqlmultitenancy -->
 <a id='snippet-sample_ourfancypostgresqlmultitenancy'></a>
 ```cs
 public class OurFancyPostgreSQLMultiTenancy : IWolverineExtension
@@ -252,7 +493,7 @@ public class OurFancyPostgreSQLMultiTenancy : IWolverineExtension
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/EfCoreTests.MultiTenancy/MultiTenancyDocumentationSamples.cs#L165-L188' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_ourfancypostgresqlmultitenancy' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/EfCoreTests.MultiTenancy/MultiTenancyDocumentationSamples.cs#L160-L182' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_ourfancypostgresqlmultitenancy' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 And add that to the greater application like so:
@@ -267,7 +508,7 @@ var host = Host.CreateDefaultBuilder()
         services.AddSingleton<IWolverineExtension, OurFancyPostgreSQLMultiTenancy>();
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/EfCoreTests.MultiTenancy/MultiTenancyDocumentationSamples.cs#L152-L161' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_adding_our_fancy_postgresql_multi_tenancy' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/EfCoreTests.MultiTenancy/MultiTenancyDocumentationSamples.cs#L148-L156' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_adding_our_fancy_postgresql_multi_tenancy' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ::: warning
@@ -291,7 +532,7 @@ builder.UseWolverine(opts =>
 {
     // You need a main database no matter what that will hold information about the Wolverine system itself
     // and..
-    opts.PersistMessagesWithPostgresql(configuration.GetConnectionString("wolverine"))
+    opts.PersistMessagesWithPostgresql(configuration.GetConnectionString("wolverine")!)
 
         // ...also a table holding the tenant id to connection string information
         .UseMasterTableTenancy(seed =>
@@ -299,14 +540,14 @@ builder.UseWolverine(opts =>
             // These registrations are 100% just to seed data for local development
             // Maybe you want to omit this during production?
             // Or do something programmatic by looping through data in the IConfiguration?
-            seed.Register("tenant1", configuration.GetConnectionString("tenant1"));
-            seed.Register("tenant2", configuration.GetConnectionString("tenant2"));
-            seed.Register("tenant3", configuration.GetConnectionString("tenant3"));
+            seed.Register("tenant1", configuration.GetConnectionString("tenant1")!);
+            seed.Register("tenant2", configuration.GetConnectionString("tenant2")!);
+            seed.Register("tenant3", configuration.GetConnectionString("tenant3")!);
         });
 
 });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/EfCoreTests.MultiTenancy/MultiTenancyDocumentationSamples.cs#L95-L119' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_postgresql_backed_master_table_tenancy' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/EfCoreTests.MultiTenancy/MultiTenancyDocumentationSamples.cs#L93-L116' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_postgresql_backed_master_table_tenancy' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ::: info
@@ -321,7 +562,7 @@ Here's some more important background on the multi-tenancy support:
 * The lightweight saga support for PostgreSQL absolutely works with this model of multi-tenancy
 * Wolverine is able to manage all of its database tables including the tenant table itself (`wolverine_tenants`) across both the
   main database and all the tenant databases including schema migrations
-* Wolverine's transactional middleware is aware of the multi-tenancy and can connect to the correct database based on the `IMesageContext.TenantId`
+* Wolverine's transactional middleware is aware of the multi-tenancy and can connect to the correct database based on the `IMessageContext.TenantId`
   or utilize the tenant id detection in Wolverine.HTTP as well
 * You can "plug in" a custom implementation of `ITenantSource<string>` to manage tenant id to connection string assignments in whatever way works for your deployed system
 
@@ -335,4 +576,63 @@ See the details on [Lightweight Saga Storage](/guide/durability/sagas.html#light
 The PostgreSQL message persistence and transport is automatically included with the `AddMarten().IntegrateWithWolverine()`
 configuration syntax.
 
+### Aligning the migration advisory lock with Marten
 
+Wolverine takes a session-scoped PostgreSQL advisory lock around `MigrateAsync` to serialize schema migrations
+across concurrent processes (preventing duplicate `CREATE SCHEMA IF NOT EXISTS` races that surface as
+`23505` errors against `pg_namespace_nspname_index`). The default lock id is `4006`. Marten uses `4004`
+by default for its own migrations.
+
+When `IntegrateWithWolverine()` is in use, both frameworks target the same schema. To make them serialize
+against the *same* advisory lock — useful when many test fixtures or service replicas boot in parallel —
+align the two ids:
+
+```csharp
+services.AddMarten(opts =>
+{
+    opts.Connection(connectionString);
+    opts.ApplyChangesLockId = 4004; // default
+})
+.IntegrateWithWolverine();
+
+builder.Host.UseWolverine(opts =>
+{
+    opts.PersistMessagesWithPostgresql(connectionString)
+        // Reuse Marten's lock so Marten and Wolverine migrations serialize together
+        .OverrideMigrationLockId(4004);
+});
+```
+
+
+
+### Advisory locks and Marten's async-daemon gap detection
+
+Marten's async daemon (9.16.1+) will not skip a stale event-sequence gap while any Postgres session
+that *might* have reserved those sequence numbers is still alive — concretely, any session whose open
+transaction predates the gap ([marten#4953](https://github.com/JasperFx/marten/issues/4953)). A
+session that parks inside an open transaction for the life of the process therefore looks like a
+permanent "possible reserver" and can hold the high-water mark — and every async projection — behind a
+genuinely dead gap indefinitely.
+
+Wolverine's long-held locks are deliberately shaped to stay out of that candidate set:
+
+- **Leader election and node coordination** hold *session-scoped* advisory locks on a dedicated,
+  transaction-free connection. In `pg_stat_activity` those sessions read `state = 'idle'` with a NULL
+  `xact_start`, so Marten's liveness probe never counts them.
+- Those sessions are tagged `application_name = 'wolverine-advisory-lock:<database>'` so a
+  `pg_stat_activity` scan attributes them at a glance.
+- The *transaction-scoped* advisory lock used by the scheduled-message poll lives only for the few
+  statements of each poll cycle and commits promptly.
+
+Two rules for combined Marten + Wolverine deployments:
+
+1. **Don't rely on `idle_in_transaction_session_timeout` as a dead-gap backstop.** Older guidance
+   suggested it; if you have any component holding a transaction-scoped lock in a long-lived open
+   transaction, that setting kills the session (and the lock with it). Prefer upgrading Marten to
+   9.16.1+ and, where needed, its `SkipStaleGapsDespiteLiveTransactionsAfter` setting.
+2. **Never add keepalive queries inside a long-lived open transaction** in your own code. A periodic
+   `select 1` bumps `pg_stat_activity.state_change`, which makes the session look active to Marten's
+   liveness fence and re-promotes it to candidate reserver — permanently defeating the mitigation. If a
+   session must hold an open transaction, it should stay completely silent; better yet, hold long-lived
+   exclusivity as a session-scoped lock on a connection with no transaction at all, the way Wolverine's
+   `AdvisoryLock` does.

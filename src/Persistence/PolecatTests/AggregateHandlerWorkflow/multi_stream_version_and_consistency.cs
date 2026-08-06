@@ -1,4 +1,5 @@
 using IntegrationTests;
+using JasperFx.Events.Projections;
 using JasperFx;
 using JasperFx.CodeGeneration;
 using JasperFx.Events;
@@ -17,12 +18,12 @@ namespace PolecatTests.AggregateHandlerWorkflow;
 
 public class multi_stream_version_and_consistency : IAsyncLifetime
 {
-    private IHost theHost;
-    private IDocumentStore theStore;
+    private IHost theHost = null!;
+    private IDocumentStore theStore = null!;
     private Guid fromAccountId;
     private Guid toAccountId;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         theHost = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -44,7 +45,7 @@ public class multi_stream_version_and_consistency : IAsyncLifetime
         await ((DocumentStore)theStore).Database.ApplyAllConfiguredChangesToDatabaseAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await theHost.StopAsync();
         theHost.Dispose();
@@ -58,7 +59,7 @@ public class multi_stream_version_and_consistency : IAsyncLifetime
         await session.SaveChangesAsync();
     }
 
-    private async Task<BankAccount> LoadAccount(Guid id)
+    private async Task<BankAccount?> LoadAccount(Guid id)
     {
         await using var session = theStore.LightweightSession();
         return await session.LoadAsync<BankAccount>(id);
@@ -74,8 +75,8 @@ public class multi_stream_version_and_consistency : IAsyncLifetime
 
         var from = await LoadAccount(fromAccountId);
         var to = await LoadAccount(toAccountId);
-        from.Balance.ShouldBe(900);
-        to.Balance.ShouldBe(600);
+        from!.Balance.ShouldBe(900);
+        to!.Balance.ShouldBe(600);
     }
 
     [Fact]
@@ -99,8 +100,8 @@ public class multi_stream_version_and_consistency : IAsyncLifetime
 
         var from = await LoadAccount(fromAccountId);
         var to = await LoadAccount(toAccountId);
-        from.Balance.ShouldBe(900);
-        to.Balance.ShouldBe(600);
+        from!.Balance.ShouldBe(900);
+        to!.Balance.ShouldBe(600);
     }
 
     [Fact]
@@ -134,8 +135,8 @@ public class multi_stream_version_and_consistency : IAsyncLifetime
 
         var from = await LoadAccount(fromAccountId);
         var to = await LoadAccount(toAccountId);
-        from.Balance.ShouldBe(0);
-        to.Balance.ShouldBe(500);
+        from!.Balance.ShouldBe(0);
+        to!.Balance.ShouldBe(500);
     }
 }
 
@@ -160,7 +161,6 @@ public record FundsDeposited(decimal Amount);
 #endregion
 
 #region Commands
-
 public record TransferFunds(Guid BankAccountId, Guid ToAccountId, decimal Amount, long Version);
 
 public record TransferFundsWithDualVersion(
@@ -175,7 +175,6 @@ public record TransferWithConsistencyCheckNoConcurrentModification(
 #endregion
 
 #region Handlers
-
 public static class TransferFundsHandler
 {
     public static void Handle(
@@ -183,7 +182,7 @@ public static class TransferFundsHandler
         [WriteAggregate] IEventStream<BankAccount> fromAccount,
         [WriteAggregate(nameof(TransferFunds.ToAccountId))] IEventStream<BankAccount> toAccount)
     {
-        if (fromAccount.Aggregate.Balance >= command.Amount)
+        if (fromAccount.Aggregate!.Balance >= command.Amount)
         {
             fromAccount.AppendOne(new FundsWithdrawn(command.Amount));
             toAccount.AppendOne(new FundsDeposited(command.Amount));
@@ -202,7 +201,7 @@ public static class TransferFundsWithDualVersionHandler
             VersionSource = nameof(TransferFundsWithDualVersion.ToVersion))]
         IEventStream<BankAccount> toAccount)
     {
-        if (fromAccount.Aggregate.Balance >= command.Amount)
+        if (fromAccount.Aggregate!.Balance >= command.Amount)
         {
             fromAccount.AppendOne(new FundsWithdrawn(command.Amount));
             toAccount.AppendOne(new FundsDeposited(command.Amount));
@@ -225,7 +224,7 @@ public static class TransferWithConsistencyCheckHandler
         sneakySession.Events.Append(command.FromAccountId, new FundsDeposited(1));
         await sneakySession.SaveChangesAsync();
 
-        if (fromAccount.Aggregate.Balance >= command.Amount)
+        if (fromAccount.Aggregate!.Balance >= command.Amount)
         {
             fromAccount.AppendOne(new FundsWithdrawn(command.Amount));
             toAccount.AppendOne(new FundsDeposited(command.Amount));
@@ -243,7 +242,7 @@ public static class TransferWithConsistencyCheckNoConcurrentModificationHandler
         [WriteAggregate(nameof(TransferWithConsistencyCheckNoConcurrentModification.ToAccountId))]
         IEventStream<BankAccount> toAccount)
     {
-        if (fromAccount.Aggregate.Balance >= command.Amount)
+        if (fromAccount.Aggregate!.Balance >= command.Amount)
         {
             fromAccount.AppendOne(new FundsWithdrawn(command.Amount));
             toAccount.AppendOne(new FundsDeposited(command.Amount));

@@ -1,10 +1,10 @@
 # Database Migrations
 
-Wolverine uses [Weasel](https://github.com/JasperFx/weasel) for schema management of EF Core `DbContext` types rather than EF Core's own migration system. This approach provides a consistent schema management experience across the entire "critter stack" (Wolverine + Marten) and avoids issues with EF Core's `Database.EnsureCreatedAsync()` bypassing migration history.
+Wolverine uses [Weasel](https://weasel.jasperfx.net/) for schema management of EF Core `DbContext` types rather than EF Core's own migration system. This approach provides a consistent schema management experience across the entire "critter stack" (Wolverine + Marten) and avoids issues with EF Core's `Database.EnsureCreatedAsync()` bypassing migration history. See the [Weasel EF Core migration docs](https://weasel.jasperfx.net/efcore/migrations.html) for the underlying diff engine, provider-specific behavior, and opt-outs.
 
 ## How It Works
 
-When you register a `DbContext` with Wolverine using `AddDbContextWithWolverineIntegration<T>()` or call `UseEntityFrameworkCoreWolverineManagedMigrations()`, Wolverine will:
+When you register a `DbContext` with Wolverine using `AddDbContextWithWolverineIntegration<T>()` and call `UseEntityFrameworkCoreWolverineManagedMigrations()`, Wolverine will:
 
 1. **Read the EF Core model** — Wolverine inspects your `DbContext`'s entity types, properties, and relationships to build a Weasel schema representation
 2. **Compare against the actual database** — Weasel connects to the database and compares the expected schema with the current state
@@ -105,4 +105,4 @@ dotnet run -- resources list
 dotnet run -- resources clear
 ```
 
-These commands manage both Wolverine's internal tables and your EF Core entity tables together.
+These commands manage both Wolverine's internal tables and your EF Core entity tables together. For the finer-grained Weasel commands (`db-apply`, `db-assert`, `db-patch`, `db-dump`, `db-list`) — useful for CI deploy gates and exporting DDL — see the [Weasel CLI reference](https://weasel.jasperfx.net/cli/).

@@ -1,4 +1,4 @@
-﻿using JasperFx.Core.Reflection;
+using JasperFx.Core.Reflection;
 using Microsoft.Extensions.Hosting;
 using Wolverine;
 using Wolverine.Runtime.Handlers;
@@ -24,13 +24,18 @@ public class SagaTestHarness<T> : IDisposable
         _host?.Dispose();
     }
 
-    protected void withApplication()
+    protected async Task withApplication()
     {
-        _host = SagaHost.BuildHost<T>();
+        _host = await SagaHost.BuildHostAsync<T>();
     }
 
-    protected string codeFor<TMessage>()
+    protected async Task<string> codeFor<TMessage>()
     {
+        if (_host == null)
+        {
+            await withApplication();
+        }
+
         return _host!.Get<HandlerGraph>().HandlerFor<TMessage>()!.As<MessageHandler>().Chain!.SourceCode!;
     }
 
@@ -38,7 +43,7 @@ public class SagaTestHarness<T> : IDisposable
     {
         if (_host == null)
         {
-            withApplication();
+            await withApplication();
         }
 
         await _host!.InvokeMessageAndWaitAsync(message!);
@@ -48,7 +53,7 @@ public class SagaTestHarness<T> : IDisposable
     {
         if (_host == null)
         {
-            withApplication();
+            await withApplication();
         }
 
         await _host!.ExecuteAndWaitValueTaskAsync(x => x.SendAsync(message!));
@@ -59,22 +64,22 @@ public class SagaTestHarness<T> : IDisposable
         return _host.SendMessageAndWaitAsync(message, new DeliveryOptions { SagaId = sagaId.ToString() }, 10000);
     }
 
-    protected Task<T> LoadState(Guid id)
+    protected Task<T?> LoadState(Guid id)
     {
         return SagaHost.LoadState<T>(id);
     }
 
-    protected Task<T> LoadState(string id)
+    protected Task<T?> LoadState(string id)
     {
         return SagaHost.LoadState<T>(id);
     }
 
-    protected Task<T> LoadState(int id)
+    protected Task<T?> LoadState(int id)
     {
         return SagaHost.LoadState<T>(id);
     }
 
-    protected Task<T> LoadState(long id)
+    protected Task<T?> LoadState(long id)
     {
         return SagaHost.LoadState<T>(id);
     }

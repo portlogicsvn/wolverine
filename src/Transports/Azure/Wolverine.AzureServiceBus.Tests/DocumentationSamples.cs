@@ -12,7 +12,6 @@ public class DocumentationSamples
     public async Task bootstrapping()
     {
         #region sample_basic_connection_to_azure_service_bus
-
         var builder = Host.CreateApplicationBuilder();
         builder.UseWolverine(opts =>
         {
@@ -44,10 +43,250 @@ public class DocumentationSamples
         #endregion
     }
 
+    public async Task bootstrapping_with_the_emulator()
+    {
+        #region sample_using_azure_service_bus_emulator
+
+        var builder = Host.CreateApplicationBuilder();
+        builder.UseWolverine(opts =>
+        {
+            // Connect to a locally running Azure Service Bus emulator using the
+            // standard emulator ports (AMQP on 5672, management on 5300)
+            opts.UseAzureServiceBusEmulator()
+
+                // The emulator starts out empty, so let Wolverine build
+                // any queues, topics, or subscriptions it needs
+                .AutoProvision()
+                .AutoPurgeOnStartup();
+
+            opts.ListenToAzureServiceBusQueue("my-queue");
+            opts.PublishAllMessages().ToAzureServiceBusQueue("my-queue");
+        });
+
+        using var host = builder.Build();
+        await host.StartAsync();
+
+        #endregion
+    }
+
+    public async Task bootstrapping_with_the_emulator_and_explicit_connection_strings()
+    {
+        #region sample_using_azure_service_bus_emulator_with_connection_strings
+
+        var builder = Host.CreateApplicationBuilder();
+        builder.UseWolverine(opts =>
+        {
+            // If you've mapped the emulator to non-standard ports, pass both the
+            // messaging (AMQP) and management (HTTP) connection strings explicitly
+            opts.UseAzureServiceBusEmulator(
+                    "Endpoint=sb://localhost:5673;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;",
+                    "Endpoint=sb://localhost:5300;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;")
+                .AutoProvision()
+                .AutoPurgeOnStartup();
+        });
+
+        using var host = builder.Build();
+        await host.StartAsync();
+
+        #endregion
+    }
+
+    public async Task bootstrapping_with_the_emulator_and_cleanup()
+    {
+        #region sample_using_azure_service_bus_emulator_with_cleanup
+
+        var builder = Host.CreateApplicationBuilder();
+        builder.UseWolverine(opts =>
+        {
+            opts.UseAzureServiceBusEmulator()
+
+                // CAUTION! This deletes *every* queue and topic in the connected
+                // namespace at startup. It is opt in, and is only meant for the
+                // emulator or a throwaway namespace. Never turn this on against
+                // a real Azure Service Bus namespace you care about
+                .DeleteAllExistingObjectsOnStartup()
+
+                .AutoProvision();
+        });
+
+        using var host = builder.Build();
+        await host.StartAsync();
+
+        #endregion
+    }
+
+    public async Task named_broker_with_a_separate_management_connection_string()
+    {
+        #region sample_named_azure_service_bus_broker_management_connection_string
+
+        var builder = Host.CreateApplicationBuilder();
+        builder.UseWolverine(opts =>
+        {
+            var name = new BrokerName("secondary");
+
+            // AddNamedAzureServiceBusBroker() only takes the messaging (AMQP)
+            // connection string, because a real Azure Service Bus namespace uses
+            // one connection string for both messaging and management
+            opts.AddNamedAzureServiceBusBroker(name,
+                    builder.Configuration.GetConnectionString("azureservicebus-secondary")!)
+                .AutoProvision();
+
+            // Against an emulator -- or anywhere else the management (HTTP) endpoint
+            // is not derivable from the messaging endpoint -- reach the named transport
+            // and set the management connection string explicitly. Without this, anything
+            // that talks to the management API (AutoProvision, AutoPurgeOnStartup,
+            // resource setup) will try to guess the management endpoint and fail
+            opts.Transports.GetOrCreate<AzureServiceBusTransport>(name)
+                .ManagementConnectionString =
+                AzureServiceBusEmulatorExtensions.DefaultEmulatorManagementConnectionString;
+        });
+
+        using var host = builder.Build();
+        await host.StartAsync();
+
+        #endregion
+    }
+
+    public async Task azure_service_bus_session_identifiers()
+    {
+        #region sample_using_azure_service_bus_session_identifiers
+
+        using var host = await Host.CreateDefaultBuilder()
+            .UseWolverine(opts =>
+            {
+                opts.UseAzureServiceBusEmulator()
+                    .AutoProvision().AutoPurgeOnStartup();
+
+                opts.ListenToAzureServiceBusQueue("send_and_receive");
+                opts.PublishMessage<AsbMessage1>().ToAzureServiceBusQueue("send_and_receive");
+
+                opts.ListenToAzureServiceBusQueue("fifo1")
+
+                    // Require session identifiers with this queue
+                    .RequireSessions()
+
+                    // This controls the Wolverine handling to force it to process
+                    // messages sequentially
+                    .Sequential();
+
+                opts.PublishMessage<AsbMessage2>()
+                    .ToAzureServiceBusQueue("fifo1");
+
+                opts.PublishMessage<AsbMessage3>().ToAzureServiceBusTopic("asb3").SendInline();
+                opts.ListenToAzureServiceBusSubscription("asb3")
+                    .FromTopic("asb3")
+
+                    // Require sessions on this subscription
+                    .RequireSessions(1)
+
+                    .ProcessInline();
+            }).StartAsync();
+
+        #endregion
+    }
+
+    public async Task pin_session_identifiers()
+    {
+        #region sample_pinning_azure_service_bus_session_identifiers
+
+        using var host = await Host.CreateDefaultBuilder()
+            .UseWolverine(opts =>
+            {
+                opts.UseAzureServiceBus("some connection string").AutoProvision();
+
+                // Two competing consumers share ONE queue, but each only ever locks its own
+                // session id -- on a shared entity the session id becomes a broker-enforced
+                // routing key, so neither consumer ever sees the other's messages.
+                opts.ListenToAzureServiceBusQueue("shared-orders")
+                    .RequireSessionsWithOnlyTheseIdentifiers("A");
+
+                // (running on a different node)
+                // opts.ListenToAzureServiceBusQueue("shared-orders")
+                //     .RequireSessionsWithOnlyTheseIdentifiers("B");
+
+                opts.PublishMessage<OrderPlaced>().ToAzureServiceBusQueue("shared-orders");
+            }).StartAsync();
+
+        // The producer selects the target consumer with the session id (GroupId)
+        var bus = host.MessageBus();
+        await bus.PublishAsync(new OrderPlaced("1"), new DeliveryOptions { GroupId = "A" }); // only "A" receives
+        await bus.PublishAsync(new OrderPlaced("2"), new DeliveryOptions { GroupId = "B" }); // only "B" receives
+
+        #endregion
+    }
+
+    public async Task configure_session_processor_options()
+    {
+        #region sample_configuring_azure_service_bus_session_processor
+
+        using var host = await Host.CreateDefaultBuilder()
+            .UseWolverine(opts =>
+            {
+                opts.UseAzureServiceBus("some connection string").AutoProvision();
+
+                // The general hook for any ServiceBusSessionProcessorOptions knob
+                opts.ListenToAzureServiceBusQueue("orders")
+                    .ConfigureSessionProcessor(o =>
+                    {
+                        o.MaxConcurrentSessions = 8;
+                        o.MaxAutoLockRenewalDuration = TimeSpan.FromMinutes(10);
+                        o.SessionIdleTimeout = TimeSpan.FromSeconds(30);
+                    });
+            }).StartAsync();
+
+        #endregion
+    }
+
+    public async Task disable_system_queues()
+    {
+        #region sample_disable_system_queues_in_azure_service_bus
+
+        using var host = await Host.CreateDefaultBuilder()
+            .UseWolverine(opts =>
+            {
+                opts.UseAzureServiceBus("some connection string")
+                    .AutoProvision().AutoPurgeOnStartup()
+                    .SystemQueuesAreEnabled(false);
+
+                opts.ListenToAzureServiceBusQueue("send_and_receive");
+
+                opts.PublishAllMessages().ToAzureServiceBusQueue("send_and_receive");
+            }).StartAsync();
+
+        #endregion
+    }
+
+    public async Task topic_and_subscription_conventional_routing()
+    {
+        using var host = await Host.CreateDefaultBuilder()
+            .UseWolverine(opts =>
+            {
+                #region sample_using_topic_and_subscription_conventional_routing_with_azure_service_bus
+
+                opts.UseAzureServiceBusEmulator()
+                    .UseTopicAndSubscriptionConventionalRouting(convention =>
+                    {
+                        // Optionally control every aspect of the convention and
+                        // its applicability to types
+                        // as well as overriding any listener, sender, topic, or subscription
+                        // options
+
+                        // Can't use the full name because of limitations on name length
+                        convention.SubscriptionNameForListener(t => t.Name.ToLowerInvariant());
+                        convention.TopicNameForListener(t => t.Name.ToLowerInvariant());
+                        convention.TopicNameForSender(t => t.Name.ToLowerInvariant());
+                    })
+
+                    .AutoProvision()
+                    .AutoPurgeOnStartup();
+
+                #endregion
+            }).StartAsync();
+    }
+
     public async Task configuring_queues()
     {
         #region sample_configuring_azure_service_bus_queues
-
         var builder = Host.CreateApplicationBuilder();
         builder.UseWolverine(opts =>
         {
@@ -87,7 +326,6 @@ public class DocumentationSamples
     public async Task configuring_a_listener()
     {
         #region sample_configuring_an_azure_service_bus_listener
-
         var builder = Host.CreateApplicationBuilder();
         builder.UseWolverine(opts =>
         {
@@ -122,6 +360,77 @@ public class DocumentationSamples
         #endregion
     }
 
+    public async Task configuring_processor_options()
+    {
+        #region sample_configuring_azure_service_bus_processor_options
+        var builder = Host.CreateApplicationBuilder();
+        builder.UseWolverine(opts =>
+        {
+            // One way or another, you're probably pulling the Azure Service Bus
+            // connection string out of configuration
+            var azureServiceBusConnectionString = builder
+                .Configuration
+                .GetConnectionString("azure-service-bus")!;
+
+            opts.UseAzureServiceBus(azureServiceBusConnectionString).AutoProvision();
+
+            opts.ListenToAzureServiceBusQueue("incoming")
+
+                // Inline listeners create an Azure Service Bus ServiceBusProcessor. By default the
+                // Azure SDK only renews the message lock for five minutes, so an inline handler that
+                // runs longer than that loses its lock and the message is redelivered. Raise the
+                // renewal window here so long-running inline handlers keep their lock.
+                .ConfigureProcessor(processorOptions =>
+                {
+                    processorOptions.MaxAutoLockRenewalDuration = TimeSpan.FromMinutes(30);
+                })
+
+                // Run the handler inline against the ServiceBusProcessor
+                .ProcessInline();
+        });
+
+        using var host = builder.Build();
+        await host.StartAsync();
+
+        #endregion
+    }
+
+    public async Task configuring_prefetch_count()
+    {
+        #region sample_configuring_azure_service_bus_prefetch_count
+        var builder = Host.CreateApplicationBuilder();
+        builder.UseWolverine(opts =>
+        {
+            // One way or another, you're probably pulling the Azure Service Bus
+            // connection string out of configuration
+            var azureServiceBusConnectionString = builder
+                .Configuration
+                .GetConnectionString("azure-service-bus")!;
+
+            opts.UseAzureServiceBus(azureServiceBusConnectionString).AutoProvision()
+
+                // Optionally set a transport-wide default prefetch count that every
+                // Azure Service Bus listener will inherit unless overridden
+                .PrefetchCount(50);
+
+            opts.ListenToAzureServiceBusQueue("incoming")
+
+                // Have the Azure Service Bus client eagerly buffer up to 100 messages
+                // on the client for just this queue, overriding the transport default.
+                // Size this relative to MaximumMessagesToReceive and how fast your
+                // handlers actually are -- prefetched messages age against the message
+                // lock duration while they wait in the client buffer!
+                .PrefetchCount(100)
+                .MaximumMessagesToReceive(100)
+                .BufferedInMemory();
+        });
+
+        using var host = builder.Build();
+        await host.StartAsync();
+
+        #endregion
+    }
+
     public async Task configure_buffered_listener()
     {
         var builder = Host.CreateApplicationBuilder();
@@ -137,7 +446,6 @@ public class DocumentationSamples
             opts.UseAzureServiceBus(azureServiceBusConnectionString).AutoProvision();
 
             #region sample_buffered_in_memory
-
             // I overrode the buffering limits just to show
             // that they exist for "back pressure"
             opts.ListenToAzureServiceBusQueue("incoming")
@@ -147,7 +455,6 @@ public class DocumentationSamples
 
 
             #region sample_all_outgoing_are_durable
-
             opts.Policies.UseDurableOutboxOnAllSendingEndpoints();
 
             #endregion
@@ -172,7 +479,6 @@ public class DocumentationSamples
             opts.UseAzureServiceBus(azureServiceBusConnectionString).AutoProvision();
 
             #region sample_configuring_azure_service_bus_subscription_filter
-
             opts.ListenToAzureServiceBusSubscription(
                     "subscription1",
                     configureSubscriptionRule: rule =>
@@ -191,7 +497,6 @@ public class DocumentationSamples
     public async Task configure_control_queues()
     {
         #region sample_enabling_azure_service_bus_control_queues
-
         var builder = Host.CreateApplicationBuilder();
         builder.UseWolverine(opts =>
         {
@@ -234,7 +539,6 @@ public class DocumentationSamples
             opts.UseAzureServiceBus(azureServiceBusConnectionString).AutoProvision();
 
             #region sample_durable_endpoint
-
             // I overrode the buffering limits just to show
             // that they exist for "back pressure"
 opts.ListenToAzureServiceBusQueue("incoming")
@@ -253,7 +557,6 @@ opts.ListenToAzureServiceBusQueue("incoming")
     public async Task publishing_to_queue()
     {
         #region sample_publishing_to_specific_azure_service_bus_queue
-
         var builder = Host.CreateApplicationBuilder();
         builder.UseWolverine(opts =>
         {
@@ -282,7 +585,6 @@ opts.ListenToAzureServiceBusQueue("incoming")
     public async Task delivery_expiration_rules_per_subscriber()
     {
         #region sample_delivery_expiration_rules_per_subscriber
-
         var builder = Host.CreateApplicationBuilder();
         builder.UseWolverine(opts =>
         {
@@ -314,7 +616,6 @@ opts.ListenToAzureServiceBusQueue("incoming")
     public async Task conventional_listener_configuration()
     {
         #region sample_conventional_listener_configuration_for_azure_service_bus
-
         var builder = Host.CreateApplicationBuilder();
         builder.UseWolverine(opts =>
         {
@@ -341,7 +642,6 @@ opts.ListenToAzureServiceBusQueue("incoming")
     public async Task conventional_subscriber_configuration()
     {
         #region sample_conventional_subscriber_configuration_for_azure_service_bus
-
         var builder = Host.CreateApplicationBuilder();
         builder.UseWolverine(opts =>
         {
@@ -368,7 +668,6 @@ opts.ListenToAzureServiceBusQueue("incoming")
     public async Task conventional_routing_no_local_routing()
     {
         #region sample_using_conventional_broker_routing_with_local_routing_turned_off
-
         var builder = Host.CreateApplicationBuilder();
         builder.UseWolverine(opts =>
         {
@@ -397,7 +696,6 @@ opts.ListenToAzureServiceBusQueue("incoming")
     public async Task conventional_routing()
     {
         #region sample_conventional_routing_for_azure_service_bus
-
         var builder = Host.CreateApplicationBuilder();
         builder.UseWolverine(opts =>
         {
@@ -445,7 +743,6 @@ opts.ListenToAzureServiceBusQueue("incoming")
     }
 
     #region sample_message_expiration_by_message
-
     public async Task message_expiration(IMessageBus bus)
     {
         // Disregard the message if it isn't sent and/or processed within 3 seconds from now
@@ -464,7 +761,6 @@ opts.ListenToAzureServiceBusQueue("incoming")
     public static async Task custom_mapping()
     {
         #region sample_customized_envelope_mapping
-
         var builder = Host.CreateApplicationBuilder();
         builder.UseWolverine(opts =>
         {
@@ -493,6 +789,10 @@ opts.ListenToAzureServiceBusQueue("incoming")
                     mapper.MapProperty(x => x.ReplyUri!,
                         (e, msg) => e.ReplyUri = new Uri($"asb://queue/{msg.ReplyTo}"),
                         (e, msg) => msg.ReplyTo = "response");
+
+                    // customize the incoming mapping
+                    mapper.MapIncomingProperty(x => x.ReplyUri!,
+                        (e, msg) => e.ReplyUri = new Uri($"asb://queue/{msg.ReplyTo}"));
                     
                 });
 
@@ -507,7 +807,6 @@ opts.ListenToAzureServiceBusQueue("incoming")
     public static async Task nservicebus()
     {
         #region sample_opting_into_nservicebus
-
         var builder = Host.CreateApplicationBuilder();
         builder.UseWolverine(opts =>
         {
@@ -535,6 +834,112 @@ opts.ListenToAzureServiceBusQueue("incoming")
         using var host = builder.Build();
         await host.StartAsync();
     }
+
+    public async Task configure_inline_dlq()
+    {
+        #region sample_asb_inline_dlq
+
+        var builder = Host.CreateApplicationBuilder();
+        builder.UseWolverine(opts =>
+        {
+            var azureServiceBusConnectionString = builder
+                .Configuration
+                .GetConnectionString("azure-service-bus")!;
+
+            opts.UseAzureServiceBus(azureServiceBusConnectionString).AutoProvision();
+
+            // Inline endpoints use Azure Service Bus's *native* dead letter
+            // subqueue of the source queue. There's no Wolverine inbox, so
+            // dead lettering is handled entirely by Azure Service Bus.
+            opts.ListenToAzureServiceBusQueue("inline-queue")
+                .ProcessInline();
+        });
+
+        using var host = builder.Build();
+        await host.StartAsync();
+
+        #endregion
+    }
+
+    public async Task configure_buffered_dlq()
+    {
+        #region sample_asb_buffered_dlq
+
+        var builder = Host.CreateApplicationBuilder();
+        builder.UseWolverine(opts =>
+        {
+            var azureServiceBusConnectionString = builder
+                .Configuration
+                .GetConnectionString("azure-service-bus")!;
+
+            opts.UseAzureServiceBus(azureServiceBusConnectionString).AutoProvision();
+
+            // Buffered endpoints move failed messages to a Wolverine-managed
+            // dead letter queue. The default name is "wolverine-dead-letter-queue",
+            // but you can override it per endpoint.
+            opts.ListenToAzureServiceBusQueue("buffered-queue")
+                .BufferedInMemory()
+                .ConfigureDeadLetterQueue("my-custom-dlq");
+        });
+
+        using var host = builder.Build();
+        await host.StartAsync();
+
+        #endregion
+    }
+
+    public async Task configure_durable_dlq()
+    {
+        #region sample_asb_durable_dlq
+
+        var builder = Host.CreateApplicationBuilder();
+        builder.UseWolverine(opts =>
+        {
+            var azureServiceBusConnectionString = builder
+                .Configuration
+                .GetConnectionString("azure-service-bus")!;
+
+            opts.UseAzureServiceBus(azureServiceBusConnectionString).AutoProvision();
+
+            // Durable endpoints behave like buffered endpoints for dead lettering,
+            // but add Wolverine's durable inbox persistence for reliability.
+            opts.ListenToAzureServiceBusQueue("durable-queue")
+                .UseDurableInbox()
+                .ConfigureDeadLetterQueue("my-custom-dlq");
+        });
+
+        using var host = builder.Build();
+        await host.StartAsync();
+
+        #endregion
+    }
+
+    public async Task disable_dlq()
+    {
+        #region sample_disable_asb_dlq
+
+        var builder = Host.CreateApplicationBuilder();
+        builder.UseWolverine(opts =>
+        {
+            var azureServiceBusConnectionString = builder
+                .Configuration
+                .GetConnectionString("azure-service-bus")!;
+
+            opts.UseAzureServiceBus(azureServiceBusConnectionString).AutoProvision();
+
+            // Disable Wolverine-managed dead letter queueing for this endpoint.
+            // Failed messages fall back to Wolverine's regular error handling.
+            opts.ListenToAzureServiceBusQueue("no-dlq")
+                .DisableDeadLetterQueueing();
+        });
+
+        using var host = builder.Build();
+        await host.StartAsync();
+
+        #endregion
+    }
 }
+
+public record OrderPlaced(string OrderId);
 
 public interface IInterfaceMessage;

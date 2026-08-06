@@ -23,7 +23,7 @@ public class with_one_postgresql_context : IAsyncLifetime
 {
     private IHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         using var conn = new NpgsqlConnection(Servers.PostgresConnectionString);
         await conn.OpenAsync();
@@ -50,7 +50,7 @@ public class with_one_postgresql_context : IAsyncLifetime
             }).StartAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _host.StopAsync();
         _host.Dispose();
@@ -74,8 +74,8 @@ public class with_one_postgresql_context : IAsyncLifetime
         {
             BlogId = 1,
             Url = "http://codebetter.com"
-        });
-        await context.SaveChangesAsync();
+        }, TestContext.Current.CancellationToken);
+        await context.SaveChangesAsync(TestContext.Current.CancellationToken);
     }
 
     [Fact]

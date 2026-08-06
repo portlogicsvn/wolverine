@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using JasperFx.Events.Projections;
 using IntegrationTests;
 using JasperFx.CodeGeneration;
 using JasperFx.Core;
@@ -18,11 +19,11 @@ namespace PolecatTests.AggregateHandlerWorkflow;
 
 public class aggregate_handler_workflow : IAsyncLifetime
 {
-    private IHost theHost;
-    private IDocumentStore theStore;
+    private IHost theHost = null!;
+    private IDocumentStore theStore = null!;
     private Guid theStreamId;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         theHost = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -43,7 +44,7 @@ public class aggregate_handler_workflow : IAsyncLifetime
         await ((DocumentStore)theStore).Database.ApplyAllConfiguredChangesToDatabaseAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await theHost.StopAsync();
         theHost.Dispose();
@@ -61,7 +62,9 @@ public class aggregate_handler_workflow : IAsyncLifetime
     internal async Task<LetterAggregate> LoadAggregate()
     {
         await using var session = theStore.LightweightSession();
-        return await session.LoadAsync<LetterAggregate>(theStreamId);
+        var aggregate = await session.LoadAsync<LetterAggregate>(theStreamId);
+        aggregate.ShouldNotBeNull();
+        return aggregate;
     }
 
     internal async Task OnAggregate(Action<LetterAggregate> assertions)
@@ -93,9 +96,30 @@ public class aggregate_handler_workflow : IAsyncLifetime
         var handler = theHost.GetRuntime().Handlers.HandlerFor<RaiseABC>();
         var chain = theHost.GetRuntime().Handlers.ChainFor<RaiseABC>();
 
-        chain.AuditedMembers.Single().MemberName.ShouldBe(nameof(RaiseABC.LetterAggregateId));
+        chain!.AuditedMembers.Single().MemberName.ShouldBe(nameof(RaiseABC.LetterAggregateId));
 
-        chain.SourceCode.ShouldContain("System.Diagnostics.Activity.Current?.SetTag(\"letter.aggregate.id\", raiseABC.LetterAggregateId);");
+        chain.SourceCode!.ShouldContain("System.Diagnostics.Activity.Current?.SetTag(\"letter.aggregate.id\", raiseABC.LetterAggregateId);");
+    }
+
+    [Fact]
+    public void generates_wolverine_stream_id_otel_tag()
+    {
+        // Resolving the handler triggers chain compilation; without this the
+        // chain's generated SourceCode is null and the assertion below NREs.
+        // Mirrors the equivalent Marten test (MartenTests/AggregateHandlerWorkflow).
+        var handler = theHost.GetRuntime().Handlers.HandlerFor<RaiseABC>();
+        var chain = theHost.GetRuntime().Handlers.ChainFor<RaiseABC>();
+
+        chain!.SourceCode!.ShouldContain($"SetTag(\"{Wolverine.Runtime.WolverineTracing.StreamId}\"");
+    }
+
+    [Fact]
+    public void generates_wolverine_stream_type_otel_tag()
+    {
+        var handler = theHost.GetRuntime().Handlers.HandlerFor<RaiseABC>();
+        var chain = theHost.GetRuntime().Handlers.ChainFor<RaiseABC>();
+
+        chain!.SourceCode!.ShouldContain($"SetTag(\"{Wolverine.Runtime.WolverineTracing.StreamType}\", \"{typeof(LetterAggregate).FullName}\"");
     }
 
     [Fact]
@@ -104,7 +128,7 @@ public class aggregate_handler_workflow : IAsyncLifetime
         await GivenAggregate();
 
         var (tracked, response) = await theHost.InvokeMessageAndWaitAsync<Response>(new RaiseABC(theStreamId));
-        response.ACount.ShouldBe(1);
+        response!.ACount.ShouldBe(1);
         response.BCount.ShouldBe(1);
         response.CCount.ShouldBe(1);
 
@@ -139,7 +163,7 @@ public class aggregate_handler_workflow : IAsyncLifetime
         await GivenAggregate();
 
         var (tracked, response) = await theHost.InvokeMessageAndWaitAsync<Response>(new RaiseAABCC(theStreamId));
-        response.ACount.ShouldBe(2);
+        response!.ACount.ShouldBe(2);
         response.BCount.ShouldBe(1);
         response.CCount.ShouldBe(2);
 
@@ -158,7 +182,7 @@ public class aggregate_handler_workflow : IAsyncLifetime
 
         var (tracked, response) = await theHost.InvokeMessageAndWaitAsync<Response>(new RaiseBBCCC(theStreamId));
 
-        response.ACount.ShouldBe(5);
+        response!.ACount.ShouldBe(5);
 
         await OnAggregate(a =>
         {
@@ -177,7 +201,7 @@ public class aggregate_handler_workflow : IAsyncLifetime
         await GivenAggregate();
 
         var (tracked, response) = await theHost.InvokeMessageAndWaitAsync<Response>(new RaiseAAA(theStreamId));
-        response.CCount.ShouldBe(11);
+        response!.CCount.ShouldBe(11);
 
         await OnAggregate(a =>
         {
@@ -218,7 +242,7 @@ public class aggregate_handler_workflow : IAsyncLifetime
         await using (var session = theStore.LightweightSession())
         {
             session.Events.StartStream<PcAggregate>(streamId, new AEvent(), new BEvent());
-            await session.SaveChangesAsync();
+            await session.SaveChangesAsync(TestContext.Current.CancellationToken);
         }
 
         var tracked = await theHost.SendMessageAndWaitAsync(new PcEvent3(streamId));
@@ -228,7 +252,7 @@ public class aggregate_handler_workflow : IAsyncLifetime
 
         await using (var session = theStore.LightweightSession())
         {
-            var events = await session.Events.FetchStreamAsync(streamId);
+            var events = await session.Events.FetchStreamAsync(streamId, token: TestContext.Current.CancellationToken);
             events.OfType<IEvent<OutgoingMessages>>().Any().ShouldBeFalse();
         }
     }
@@ -240,7 +264,7 @@ public class aggregate_handler_workflow : IAsyncLifetime
         await using (var session = theStore.LightweightSession())
         {
             session.Events.StartStream<PcAggregate>(streamId, new AEvent(), new BEvent());
-            await session.SaveChangesAsync();
+            await session.SaveChangesAsync(TestContext.Current.CancellationToken);
         }
 
         var (tracked, updated)
@@ -248,7 +272,7 @@ public class aggregate_handler_workflow : IAsyncLifetime
 
         tracked.Sent.AllMessages().ShouldBeEmpty();
 
-        updated.ACount.ShouldBe(3);
+        updated!.ACount.ShouldBe(3);
         updated.BCount.ShouldBe(4);
     }
 
@@ -261,7 +285,7 @@ public class aggregate_handler_workflow : IAsyncLifetime
         {
             session.Events.StartStream<PcAggregate>(streamId, new AEvent(), new CEvent());
             session.Events.StartStream<PcAggregate>(streamId2, new CEvent(), new CEvent());
-            await session.SaveChangesAsync();
+            await session.SaveChangesAsync(TestContext.Current.CancellationToken);
         }
 
         await theHost.InvokeMessageAndWaitAsync(new RaiseIfValidated(streamId));
@@ -269,11 +293,11 @@ public class aggregate_handler_workflow : IAsyncLifetime
 
         await using (var session = theStore.LightweightSession())
         {
-            var existing1 = await session.LoadAsync<LetterAggregate>(streamId);
-            existing1.BCount.ShouldBe(0);
+            var existing1 = await session.LoadAsync<LetterAggregate>(streamId, TestContext.Current.CancellationToken);
+            existing1!.BCount.ShouldBe(0);
 
-            var existing2 = await session.LoadAsync<LetterAggregate>(streamId2);
-            existing2.BCount.ShouldBe(1);
+            var existing2 = await session.LoadAsync<LetterAggregate>(streamId2, TestContext.Current.CancellationToken);
+            existing2!.BCount.ShouldBe(1);
         }
     }
 }
@@ -313,8 +337,8 @@ public static class PcOutgoing1Handler
 
 public record PcOutgoing1
 {
-    public PcEvent3 Event { get; set; }
-    public PcAggregate Aggregate { get; set; }
+    public required PcEvent3 Event { get; init; }
+    public required PcAggregate Aggregate { get; init; }
 }
 
 public record LetterMessage1;

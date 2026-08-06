@@ -15,12 +15,10 @@ using Wolverine.EntityFrameworkCore;
 using Wolverine.Runtime.Handlers;
 using Wolverine.SqlServer;
 using Wolverine.Tracking;
-using Xunit.Abstractions;
-
+using Xunit;
 namespace EfCoreTests;
 
 [Collection("sqlserver")]
-[Trait("Category", "Flaky")]
 public class Optimistic_concurrency_with_ef_core
 {
     private readonly ITestOutputHelper _output;
@@ -33,36 +31,55 @@ public class Optimistic_concurrency_with_ef_core
     [Fact]
     public async Task detect_concurrency_exception_as_SagaConcurrencyException()
     {
-        using var host = await Host.CreateDefaultBuilder()
-            .UseWolverine(opt =>
-            {
-                opt.DisableConventionalDiscovery().IncludeType(typeof(ConcurrencyTestSaga));
-                
-                opt.Services.AddDbContextWithWolverineIntegration<OptConcurrencyDbContext>(o =>
-                {
-                    o.UseSqlServer(Servers.SqlServerConnectionString);
-                });
-
-                opt.PersistMessagesWithSqlServer(Servers.SqlServerConnectionString);
-                opt.UseEntityFrameworkCoreTransactions();
-                opt.UseEntityFrameworkCoreWolverineManagedMigrations();
-                opt.Services.AddResourceSetupOnStartup(StartupAction.ResetState);
-                opt.Policies.UseDurableLocalQueues();
-                opt.Policies.AutoApplyTransactions();
-            }).StartAsync();
-
-        using var scope = host.Services.CreateScope();
-        var dbContext = scope.ServiceProvider.GetRequiredService<OptConcurrencyDbContext>();
-
-        await dbContext.ConcurrencyTestSagas.AddAsync(new()
+        try
         {
-            Id = Guid.NewGuid(),
-            Value = "initial value",
-            Version = 0,
-        });
-        await dbContext.SaveChangesAsync();
+            using var host = await Host.CreateDefaultBuilder()
+                .UseWolverine(opt =>
+                {
+                    opt.DisableConventionalDiscovery().IncludeType(typeof(ConcurrencyTestSaga));
 
-        await Should.ThrowAsync<SagaConcurrencyException>(() => host.InvokeMessageAndWaitAsync(new UpdateConcurrencyTestSaga(Guid.NewGuid(), "updated value")));
+                    opt.Services.AddDbContextWithWolverineIntegration<OptConcurrencyDbContext>(o =>
+                    {
+                        o.UseSqlServer(Servers.SqlServerConnectionString);
+                    });
+
+                    opt.PersistMessagesWithSqlServer(Servers.SqlServerConnectionString, "opt_concurrency");
+                    opt.UseEntityFrameworkCoreTransactions();
+                    opt.UseEntityFrameworkCoreWolverineManagedMigrations();
+                    opt.Services.AddResourceSetupOnStartup(StartupAction.ResetState);
+                    opt.Policies.UseDurableLocalQueues();
+                    opt.Policies.AutoApplyTransactions();
+                }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
+
+            using var scope = host.Services.CreateScope();
+            var dbContext = scope.ServiceProvider.GetRequiredService<OptConcurrencyDbContext>();
+
+            // The saga's Id and the message's Id must match — Wolverine looks up the
+            // saga by the message's correlation Id (the `Id` field on
+            // UpdateConcurrencyTestSaga). Without a matching row the load throws
+            // UnknownSagaException before the handler can fake a concurrent update,
+            // which is what was making this test unconditionally fail (it was tagged
+            // [Flaky] but the failure was deterministic, not racy). With matching
+            // ids the saga loads, the handler's `OriginalValue = 999` trick simulates
+            // a stale read, SaveChangesAsync raises DbUpdateConcurrencyException, and
+            // EFCorePersistenceFrameProvider.WrapSagaConcurrencyException rethrows it
+            // as SagaConcurrencyException.
+            var sagaId = Guid.NewGuid();
+            await dbContext.ConcurrencyTestSagas.AddAsync(new()
+            {
+                Id = sagaId,
+                Value = "initial value",
+                Version = 0,
+            }, TestContext.Current.CancellationToken);
+            await dbContext.SaveChangesAsync(TestContext.Current.CancellationToken);
+
+            await Should.ThrowAsync<SagaConcurrencyException>(() =>
+                host.InvokeMessageAndWaitAsync(new UpdateConcurrencyTestSaga(sagaId, "updated value")));
+        }
+        finally
+        {
+            Microsoft.Data.SqlClient.SqlConnection.ClearAllPools();
+        }
     }
 }
 
@@ -90,7 +107,10 @@ public class ConcurrencyTestSaga : Saga
     public string Value { get; set; } = null!;
     public void Handle(UpdateConcurrencyTestSaga order, OptConcurrencyDbContext ctx)
     {
-        // Fake 999 updates of the saga while this event is being handled
+        // Fake 999 updates of the saga while this event is being handled. Literal must
+        // be `int` so the boxed value unboxes cleanly inside EF Core's concurrency-token
+        // comparator: Saga.Version is `int` (it aligns with JasperFx 2.0 rc's
+        // IRevisioned.Version, an int).
         ctx.ConcurrencyTestSagas.Entry(this).Property("Version").OriginalValue = 999;
 
         Value = order.NewValue;

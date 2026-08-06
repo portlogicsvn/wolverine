@@ -25,7 +25,7 @@ public class using_async_extensions
 
                 opts.Services.AddAsyncWolverineExtension<SampleAsyncExtension>();
 
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var runtime = (WolverineRuntime)host.Services.GetRequiredService<IWolverineRuntime>();
         var queue = runtime.Options.Transports.TryGetEndpoint(new Uri("local://module1-high-priority"));
@@ -40,7 +40,6 @@ public class using_async_extensions
         featureManager.IsEnabledAsync("Module1").Returns(false);
 
         #region sample_registering_async_extension
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -50,7 +49,7 @@ public class using_async_extensions
                 // Adding the async extension to the underlying IoC container
                 opts.Services.AddAsyncWolverineExtension<SampleAsyncExtension>();
 
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         #endregion
 
@@ -61,8 +60,7 @@ public class using_async_extensions
     }
 }
 
-#region sample_async_Wolverine_extension
-
+#region sample_async_wolverine_extension
 public class SampleAsyncExtension : IAsyncWolverineExtension
 {
     private readonly IFeatureManager _features;

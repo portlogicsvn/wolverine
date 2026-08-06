@@ -17,7 +17,7 @@ public class PrefixedComplianceFixture : TransportComplianceFixture, IAsyncLifet
         IsSenderOnlyTransport = true;
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         var number = ++Number;
         OutboundAddress = new Uri($"{AmazonSnsTransport.SnsProtocol}://boo-prefix-topic-" + number);
@@ -55,10 +55,6 @@ public class PrefixedComplianceFixture : TransportComplianceFixture, IAsyncLifet
         });
     }
 
-    public new async Task DisposeAsync()
-    {
-        await base.DisposeAsync();
-    }
 }
 
 public class PrefixedSendingAndReceivingCompliance : TransportCompliance<PrefixedComplianceFixture>

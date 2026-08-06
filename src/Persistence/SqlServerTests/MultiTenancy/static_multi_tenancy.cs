@@ -11,8 +11,7 @@ using Wolverine.Persistence.Durability;
 using Wolverine.SqlServer;
 using Wolverine.SqlServer.Persistence;
 using Wolverine.RDBMS;
-using Xunit.Abstractions;
-
+using Xunit;
 namespace SqlServerTests.MultiTenancy;
 
 public class static_multi_tenancy : MultiTenancyContext
@@ -46,11 +45,11 @@ public class static_multi_tenancy : MultiTenancyContext
         var store = theHost.Services.GetRequiredService<IMessageStore>()
             .ShouldBeOfType<MultiTenantedMessageStore>();
 
-        store.Main.Describe().DatabaseName.ShouldBe("master");
+        store.Main.Describe().DatabaseName.ShouldBe(Servers.SqlServerDatabaseName);
 
-        (await store.Source.FindAsync("red")).Describe().DatabaseName.ShouldBe("db1");
-        (await store.Source.FindAsync("blue")).Describe().DatabaseName.ShouldBe("db2");
-        (await store.Source.FindAsync("green")).Describe().DatabaseName.ShouldBe("db3");
+        (await store.Source.FindAsync("red")).Describe().DatabaseName.ShouldBe(LaneDatabases.Name("db1"));
+        (await store.Source.FindAsync("blue")).Describe().DatabaseName.ShouldBe(LaneDatabases.Name("db2"));
+        (await store.Source.FindAsync("green")).Describe().DatabaseName.ShouldBe(LaneDatabases.Name("db3"));
     }
 
     [Fact]
@@ -82,7 +81,7 @@ public class static_multi_tenancy : MultiTenancyContext
     {
         var store = theHost.Services.GetRequiredService<IMessageStore>()
             .ShouldBeOfType<MultiTenantedMessageStore>();
-        var tables = await store.Main.As<SqlServerMessageStore>().SchemaTables();
+        var tables = await store.Main.As<SqlServerMessageStore>().SchemaTables(TestContext.Current.CancellationToken);
 
         var expected = @"
 static_multi_tenancy2.blues
@@ -120,7 +119,7 @@ static_multi_tenancy2.wolverine_outgoing_envelopes
         foreach (var tenantId in new string[] { "red", "blue", "green" })
         {
             var messageStore = await store.Source.FindAsync(tenantId);
-            var tables = await messageStore.As<SqlServerMessageStore>().SchemaTables();
+            var tables = await messageStore.As<SqlServerMessageStore>().SchemaTables(TestContext.Current.CancellationToken);
 
             tables.OrderBy(x => x.QualifiedName).Select(x => x.QualifiedName).ToArray()
                 .ShouldBe(expected);
@@ -133,12 +132,17 @@ static_multi_tenancy2.wolverine_outgoing_envelopes
         var store = theHost.Services.GetRequiredService<IMessageStore>()
             .ShouldBeOfType<MultiTenantedMessageStore>();
 
-        var expected = @"
-wolverinedb://sqlserver/localhost/master/static_multi_tenancy2
-wolverinedb://sqlserver/localhost/db1/static_multi_tenancy2
-wolverinedb://sqlserver/localhost/db3/static_multi_tenancy2
-wolverinedb://sqlserver/localhost/db2/static_multi_tenancy2
-".ReadLines().Where(x => x.IsNotEmpty()).Select(x => new Uri(x)).OrderBy(x => x.ToString()).ToArray();
+        // Built from the configured catalog + lane-scoped sibling names, never the literals —
+        // each worker lane runs against its own catalog under parallelized CI. Re-sorted because
+        // the ordering of variable names is not the ordering of the literals they replaced.
+        var expected = new[]
+            {
+                $"wolverinedb://sqlserver/localhost/{Servers.SqlServerDatabaseName}/static_multi_tenancy2",
+                $"wolverinedb://sqlserver/localhost/{LaneDatabases.Name("db1")}/static_multi_tenancy2",
+                $"wolverinedb://sqlserver/localhost/{LaneDatabases.Name("db3")}/static_multi_tenancy2",
+                $"wolverinedb://sqlserver/localhost/{LaneDatabases.Name("db2")}/static_multi_tenancy2"
+            }
+            .Select(x => new Uri(x)).OrderBy(x => x.ToString()).ToArray();
 
 
         var agents = await store.AllKnownAgentsAsync();

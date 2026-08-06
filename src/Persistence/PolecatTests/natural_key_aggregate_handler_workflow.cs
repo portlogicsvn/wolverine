@@ -1,7 +1,9 @@
 using IntegrationTests;
+using JasperFx.Events.Projections;
 using JasperFx;
 using JasperFx.CodeGeneration;
 using JasperFx.Events.Aggregation;
+using JasperFx.Events;
 using Polecat.Events;
 using JasperFx.Resources;
 using Microsoft.Extensions.DependencyInjection;
@@ -21,7 +23,7 @@ public class natural_key_aggregate_handler_workflow : IAsyncLifetime
     private IHost _host = null!;
     private IDocumentStore _store = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -46,7 +48,7 @@ public class natural_key_aggregate_handler_workflow : IAsyncLifetime
         await store.Database.ApplyAllConfiguredChangesToDatabaseAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _host.StopAsync();
         _host.Dispose();
@@ -61,13 +63,13 @@ public class natural_key_aggregate_handler_workflow : IAsyncLifetime
         await using var session = _store.LightweightSession();
         session.Events.StartStream(streamId,
             new PcNkOrderCreated(orderNumber, "Alice"));
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         await _host.TrackActivity()
             .SendMessageAndWaitAsync(new AddPcNkOrderItem(orderNumber, "Widget", 9.99m));
 
         await using var verify = _store.LightweightSession();
-        var aggregate = await verify.LoadAsync<PcNkOrderAggregate>(streamId);
+        var aggregate = await verify.LoadAsync<PcNkOrderAggregate>(streamId, TestContext.Current.CancellationToken);
 
         aggregate.ShouldNotBeNull();
         aggregate!.TotalAmount.ShouldBe(9.99m);
@@ -83,14 +85,14 @@ public class natural_key_aggregate_handler_workflow : IAsyncLifetime
         await using var session = _store.LightweightSession();
         session.Events.StartStream(streamId,
             new PcNkOrderCreated(orderNumber, "Bob"));
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         await _host.TrackActivity()
             .SendMessageAndWaitAsync(new AddPcNkOrderItems(orderNumber,
                 [("Gadget", 19.99m), ("Doohickey", 5.50m)]));
 
         await using var verify = _store.LightweightSession();
-        var aggregate = await verify.LoadAsync<PcNkOrderAggregate>(streamId);
+        var aggregate = await verify.LoadAsync<PcNkOrderAggregate>(streamId, TestContext.Current.CancellationToken);
 
         aggregate.ShouldNotBeNull();
         aggregate!.TotalAmount.ShouldBe(25.49m);
@@ -106,13 +108,13 @@ public class natural_key_aggregate_handler_workflow : IAsyncLifetime
         session.Events.StartStream(streamId,
             new PcNkOrderCreated(orderNumber, "Charlie"),
             new PcNkItemAdded("Widget", 10.00m));
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         await _host.TrackActivity()
             .SendMessageAndWaitAsync(new CompletePcNkOrder(orderNumber));
 
         await using var verify = _store.LightweightSession();
-        var aggregate = await verify.LoadAsync<PcNkOrderAggregate>(streamId);
+        var aggregate = await verify.LoadAsync<PcNkOrderAggregate>(streamId, TestContext.Current.CancellationToken);
 
         aggregate.ShouldNotBeNull();
         aggregate!.IsComplete.ShouldBeTrue();
@@ -121,7 +123,6 @@ public class natural_key_aggregate_handler_workflow : IAsyncLifetime
 }
 
 #region sample_wolverine_polecat_natural_key_aggregate
-
 public record PcNkOrderNumber(string Value);
 
 public class PcNkOrderAggregate
@@ -160,7 +161,6 @@ public record PcNkOrderCompleted;
 #endregion
 
 #region sample_wolverine_polecat_natural_key_commands
-
 public record AddPcNkOrderItem(PcNkOrderNumber OrderNum, string ItemName, decimal Price);
 public record AddPcNkOrderItems(PcNkOrderNumber OrderNum, (string Name, decimal Price)[] Items);
 public record CompletePcNkOrder(PcNkOrderNumber OrderNum);
@@ -168,7 +168,6 @@ public record CompletePcNkOrder(PcNkOrderNumber OrderNum);
 #endregion
 
 #region sample_wolverine_polecat_natural_key_handlers
-
 public static class PcNkOrderHandler
 {
     public static PcNkItemAdded Handle(AddPcNkOrderItem command,

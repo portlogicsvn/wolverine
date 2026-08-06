@@ -47,9 +47,16 @@ public partial class MultiTenantedMessageStore : IAgentFamily
 
     public ValueTask EvaluateAssignmentsAsync(AssignmentGrid assignments)
     {
-        assignments.DistributeEvenly(Scheme);
+        // GH-3785: same cross-family database affinity as MessageStoreCollection — see the note there.
+        var preference = DurabilityProjectionAffinity.BuildPreference(assignments);
+        assignments.DistributeEvenlyWithAffinity(Scheme, preference.NodeFor);
+
+        preference.ReportTo(_logger, ref _lastAffinityReport);
+
         return ValueTask.CompletedTask;
     }
+
+    private (int Known, int Considered, int Matched) _lastAffinityReport;
 
     private class DummyAgent : IAgent
     {

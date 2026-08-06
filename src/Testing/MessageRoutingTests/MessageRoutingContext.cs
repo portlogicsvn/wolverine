@@ -19,7 +19,7 @@ public class MessageRoutingContext : IAsyncLifetime
 {
     private IHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(configure).StartAsync();
@@ -55,7 +55,7 @@ public class MessageRoutingContext : IAsyncLifetime
         actual.ShouldBe(expected);
     }
 
-    async Task IAsyncLifetime.DisposeAsync()
+    async ValueTask IAsyncDisposable.DisposeAsync()
     {
         if (_host != null)
         {
@@ -83,8 +83,7 @@ public class MessageRoutingContext : IAsyncLifetime
         envelopes.Any().ShouldBeFalse();
     }
 
-    #region sample_PreviewRouting_programmatically
-
+    #region sample_previewrouting_programmatically
     public static void PreviewRouting(IHost host)
     {
         // In test projects, you would probably have access to the IHost for 

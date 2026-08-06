@@ -1,4 +1,3 @@
-using Azure.Messaging.ServiceBus.Administration;
 using IntegrationTests;
 using JasperFx.Core;
 using Microsoft.Extensions.Hosting;
@@ -17,37 +16,21 @@ public static class Bug1933MessageHandler
     }
 }
 
-[Trait("Category", "Flaky")]
 public class Bug_1933_multi_tenant_conventional_routing : IAsyncLifetime
 {
-    public Task InitializeAsync() => Task.CompletedTask;
-
-    public async Task DisposeAsync()
+    public async ValueTask InitializeAsync() =>await  ValueTask.CompletedTask;
+    public async ValueTask DisposeAsync()
     {
         await AzureServiceBusTesting.DeleteAllEmulatorObjectsAsync();
 
         try
         {
-            await DeleteTenantEmulatorObjectsAsync();
+            await AzureServiceBusTesting.DeleteAllEmulatorObjectsAsync(
+                Servers.AzureServiceBusConnectionString);
         }
         catch
         {
             // Tenant emulator cleanup is best-effort
-        }
-    }
-
-    private static async Task DeleteTenantEmulatorObjectsAsync()
-    {
-        var client = new ServiceBusAdministrationClient(Servers.AzureServiceBusConnectionString);
-
-        await foreach (var topic in client.GetTopicsAsync())
-        {
-            await client.DeleteTopicAsync(topic.Name);
-        }
-
-        await foreach (var queue in client.GetQueuesAsync())
-        {
-            await client.DeleteQueueAsync(queue.Name);
         }
     }
 
@@ -66,11 +49,14 @@ public class Bug_1933_multi_tenant_conventional_routing : IAsyncLifetime
                     .AddTenantByConnectionString("test", Servers.AzureServiceBusConnectionString)
                     .UseConventionalRouting();
 
-                // Set the tenant's management connection string for the emulator
+                // Set the tenant's management connection string for the emulator. This has to be the
+                // *management* endpoint -- pointing it at the AMQP endpoint made every tenant
+                // provisioning call hang until its own timeout, which is where this test's old
+                // 4m+ runtime came from.
                 var transport = opts.Transports.GetOrCreate<AzureServiceBusTransport>();
                 transport.Tenants["test"].Transport.ManagementConnectionString =
-                    Servers.AzureServiceBusConnectionString;
-            }).StartAsync();
+                    Servers.AzureServiceBusManagementConnectionString;
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var message = new Bug1933Message("Hello from default namespace");
 
@@ -97,7 +83,7 @@ public class Bug_1933_multi_tenant_conventional_routing : IAsyncLifetime
                 opts.UseAzureServiceBusTesting()
                     .AutoPurgeOnStartup()
                     .UseConventionalRouting();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var message = new Bug1933Message("Hello from default namespace");
 

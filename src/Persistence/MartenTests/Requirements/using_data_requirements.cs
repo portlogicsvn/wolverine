@@ -13,14 +13,22 @@ namespace MartenTests.Requirements;
 
 public class using_data_requirements : IAsyncLifetime
 {
-    private IHost _host;
-    private IDocumentStore _store;
+    private IHost _host = null!;
+    private IDocumentStore _store = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery()
+                    .IncludeType(typeof(CreateThingHandler))
+                    .IncludeType(typeof(CreateThing2Handler))
+                    .IncludeType(typeof(CreateThingByAttributeHandler))
+                    .IncludeType(typeof(CreateThingByAttributeExplicitHandler))
+                    .IncludeType(typeof(EnsureNoDuplicateThingHandler))
+                    .IncludeType(typeof(CreateThing3Handler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Services
                     .AddMarten(Servers.PostgresConnectionString)
                     .IntegrateWithWolverine();
@@ -34,7 +42,7 @@ public class using_data_requirements : IAsyncLifetime
         await _store.Advanced.Clean.DeleteDocumentsByTypeAsync(typeof(Thing));
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _host.StopAsync();
         _host.Dispose();
@@ -49,7 +57,7 @@ public class using_data_requirements : IAsyncLifetime
         using (var session = _store.LightweightSession())
         {
             session.Store(new ThingCategory { Id = "widgets" });
-            await session.SaveChangesAsync();
+            await session.SaveChangesAsync(TestContext.Current.CancellationToken);
         }
 
         // Act
@@ -58,7 +66,7 @@ public class using_data_requirements : IAsyncLifetime
         // Assert: Thing was created
         using (var session = _store.LightweightSession())
         {
-            var thing = await session.LoadAsync<Thing>("widget-1");
+            var thing = await session.LoadAsync<Thing>("widget-1", TestContext.Current.CancellationToken);
             thing.ShouldNotBeNull();
             thing.CategoryId.ShouldBe("widgets");
         }
@@ -85,7 +93,7 @@ public class using_data_requirements : IAsyncLifetime
         using (var session = _store.LightweightSession())
         {
             session.Store(new ThingCategory { Id = "gadgets" });
-            await session.SaveChangesAsync();
+            await session.SaveChangesAsync(TestContext.Current.CancellationToken);
         }
 
         // Act
@@ -94,7 +102,7 @@ public class using_data_requirements : IAsyncLifetime
         // Assert: Thing was created
         using (var session = _store.LightweightSession())
         {
-            var thing = await session.LoadAsync<Thing>("gadget-1");
+            var thing = await session.LoadAsync<Thing>("gadget-1", TestContext.Current.CancellationToken);
             thing.ShouldNotBeNull();
             thing.CategoryId.ShouldBe("gadgets");
         }
@@ -118,7 +126,7 @@ public class using_data_requirements : IAsyncLifetime
         {
             session.Store(new ThingCategory { Id = "dupes" });
             session.Store(new Thing { Id = "existing-thing", CategoryId = "dupes" });
-            await session.SaveChangesAsync();
+            await session.SaveChangesAsync(TestContext.Current.CancellationToken);
         }
 
         // MustNotExist should fail because thing already exists
@@ -139,7 +147,7 @@ public class using_data_requirements : IAsyncLifetime
         using (var session = _store.LightweightSession())
         {
             session.Store(new ThingCategory { Id = "tools" });
-            await session.SaveChangesAsync();
+            await session.SaveChangesAsync(TestContext.Current.CancellationToken);
         }
 
         // Act
@@ -148,7 +156,7 @@ public class using_data_requirements : IAsyncLifetime
         // Assert: Thing was created
         using (var session = _store.LightweightSession())
         {
-            var thing = await session.LoadAsync<Thing>("tool-1");
+            var thing = await session.LoadAsync<Thing>("tool-1", TestContext.Current.CancellationToken);
             thing.ShouldNotBeNull();
             thing.CategoryId.ShouldBe("tools");
         }
@@ -174,14 +182,14 @@ public class using_data_requirements : IAsyncLifetime
         using (var session = _store.LightweightSession())
         {
             session.Store(new ThingCategory { Id = "attr-cat" });
-            await session.SaveChangesAsync();
+            await session.SaveChangesAsync(TestContext.Current.CancellationToken);
         }
 
         await _host.InvokeMessageAndWaitAsync(new CreateThingByAttribute("attr-thing", "attr-cat"));
 
         using (var session = _store.LightweightSession())
         {
-            var thing = await session.LoadAsync<Thing>("attr-thing");
+            var thing = await session.LoadAsync<Thing>("attr-thing", TestContext.Current.CancellationToken);
             thing.ShouldNotBeNull();
             thing.CategoryId.ShouldBe("attr-cat");
         }
@@ -206,14 +214,14 @@ public class using_data_requirements : IAsyncLifetime
         using (var session = _store.LightweightSession())
         {
             session.Store(new ThingCategory { Id = "explicit-cat" });
-            await session.SaveChangesAsync();
+            await session.SaveChangesAsync(TestContext.Current.CancellationToken);
         }
 
         await _host.InvokeMessageAndWaitAsync(new CreateThingByAttributeExplicit("explicit-thing", "explicit-cat"));
 
         using (var session = _store.LightweightSession())
         {
-            var thing = await session.LoadAsync<Thing>("explicit-thing");
+            var thing = await session.LoadAsync<Thing>("explicit-thing", TestContext.Current.CancellationToken);
             thing.ShouldNotBeNull();
             thing.CategoryId.ShouldBe("explicit-cat");
         }
@@ -245,7 +253,7 @@ public class using_data_requirements : IAsyncLifetime
         using (var session = _store.LightweightSession())
         {
             session.Store(new Thing { Id = "already-here", CategoryId = "whatever" });
-            await session.SaveChangesAsync();
+            await session.SaveChangesAsync(TestContext.Current.CancellationToken);
         }
 
         await Should.ThrowAsync<RequiredDataMissingException>(async () =>
@@ -266,13 +274,13 @@ public record EnsureNoDuplicateThing(string ThingId);
 
 public class ThingCategory
 {
-    public string Id { get; set; }
+    public required string Id { get; init; }
 }
 
 public class Thing
 {
-    public string Id { get; set; }
-    public string CategoryId { get; set; }
+    public required string Id { get; init; }
+    public required string CategoryId { get; init; }
 }
 
 public static class CreateThingHandler

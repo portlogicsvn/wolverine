@@ -21,13 +21,13 @@ public class intrinsic_serialization_end_to_end
             .UseWolverine(opts =>
             {
                 opts.PublishAllMessages().ToPort(port);
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var receiver = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
                 opts.ListenAtPort(port);
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var tracked = await sender.TrackActivity()
             .AlsoTrack(receiver)
@@ -52,12 +52,12 @@ public class SerializedMessage : ISerializable
 
     public byte[] Write()
     {
-        return Encoding.Default.GetBytes(Name);
+        return Encoding.UTF8.GetBytes(Name);
     }
 
     public static object Read(byte[] bytes)
     {
-        var name = Encoding.Default.GetString(bytes);
+        var name = Encoding.UTF8.GetString(bytes);
         return new SerializedMessage { Name = name };
     }
 }

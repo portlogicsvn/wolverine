@@ -2,8 +2,7 @@ using JasperFx.Core;
 using Microsoft.Extensions.DependencyInjection;
 using Wolverine.ComplianceTests;
 using Wolverine.ComplianceTests.Compliance;
-using Xunit.Abstractions;
-
+using Xunit;
 namespace Wolverine.AmazonSqs.Tests;
 
 public class end_to_end_with_named_broker
@@ -20,7 +19,7 @@ public class end_to_end_with_named_broker
     public async Task send_message_to_and_receive_through_kafka_with_inline_receivers()
     {
         var queueName = Guid.NewGuid().ToString();
-        using var publisher = WolverineHost.For(opts =>
+        using var publisher = await WolverineHost.ForAsync(opts =>
         {
             opts.UseAmazonSqsTransportLocallyAsNamedBroker(theName).AutoProvision().AutoPurgeOnStartup();
 
@@ -30,7 +29,7 @@ public class end_to_end_with_named_broker
         });
 
 
-        using var receiver = WolverineHost.For(opts =>
+        using var receiver = await WolverineHost.ForAsync(opts =>
         {
             opts.UseAmazonSqsTransportLocallyAsNamedBroker(theName).AutoProvision();
 
@@ -47,7 +46,7 @@ public class end_to_end_with_named_broker
             {
                 await publisher.SendAsync(new ColorChosen { Name = "blue" });
             }
-        });
+        }, TestContext.Current.CancellationToken);
         
 
 

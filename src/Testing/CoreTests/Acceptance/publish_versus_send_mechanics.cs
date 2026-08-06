@@ -7,11 +7,15 @@ using Xunit;
 
 namespace CoreTests.Acceptance;
 
-public class publish_versus_send_mechanics : IntegrationContext
+public class publish_versus_send_mechanics : IntegrationContext, IAsyncLifetime
 {
     public publish_versus_send_mechanics(DefaultApp @default) : base(@default)
     {
-        with(opts =>
+    }
+
+    public async ValueTask InitializeAsync()
+    {
+        await with(opts =>
         {
             opts.DisableConventionalDiscovery();
 
@@ -23,6 +27,8 @@ public class publish_versus_send_mechanics : IntegrationContext
             opts.Publish(x => x.Message<Message2>().ToLocalQueue("two"));
         });
     }
+
+    ValueTask IAsyncDisposable.DisposeAsync() => ValueTask.CompletedTask;
 
     [Fact]
     public async Task publish_message_with_no_known_subscribers()

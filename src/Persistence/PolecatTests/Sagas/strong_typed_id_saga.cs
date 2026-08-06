@@ -17,9 +17,9 @@ public readonly partial struct PcOrderSagaId;
 
 public class PcOrderSagaWorkflow : Wolverine.Saga
 {
-    public PcOrderSagaId Id { get; set; }
+    public required PcOrderSagaId Id { get; init; }
 
-    public string CustomerName { get; set; }
+    public required string CustomerName { get; init; }
     public bool ItemsPicked { get; set; }
     public bool PaymentProcessed { get; set; }
     public bool Shipped { get; set; }
@@ -78,9 +78,9 @@ public class CompletePcOrderStep
 
 public class strong_typed_id_saga : IAsyncLifetime
 {
-    private IHost _host;
+    private IHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -98,7 +98,7 @@ public class strong_typed_id_saga : IAsyncLifetime
             .ApplyAllConfiguredChangesToDatabaseAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _host.StopAsync();
         _host.Dispose();
@@ -112,7 +112,7 @@ public class strong_typed_id_saga : IAsyncLifetime
         await _host.InvokeMessageAndWaitAsync(new StartPcOrderSaga(orderId, "Han Solo"));
 
         await using var session = _host.Services.GetRequiredService<IDocumentStore>().QuerySession();
-        var saga = await session.LoadAsync<PcOrderSagaWorkflow>(orderId.Value);
+        var saga = await session.LoadAsync<PcOrderSagaWorkflow>(orderId.Value, TestContext.Current.CancellationToken);
 
         saga.ShouldNotBeNull();
         saga.Id.ShouldBe(orderId);
@@ -128,7 +128,7 @@ public class strong_typed_id_saga : IAsyncLifetime
         await _host.InvokeMessageAndWaitAsync(new PickPcOrderItems(orderId));
 
         await using var session = _host.Services.GetRequiredService<IDocumentStore>().QuerySession();
-        var saga = await session.LoadAsync<PcOrderSagaWorkflow>(orderId.Value);
+        var saga = await session.LoadAsync<PcOrderSagaWorkflow>(orderId.Value, TestContext.Current.CancellationToken);
 
         saga.ShouldNotBeNull();
         saga.ItemsPicked.ShouldBeTrue();
@@ -145,7 +145,7 @@ public class strong_typed_id_saga : IAsyncLifetime
         await _host.InvokeMessageAndWaitAsync(new ShipPcOrder(orderId));
 
         await using var session = _host.Services.GetRequiredService<IDocumentStore>().QuerySession();
-        var saga = await session.LoadAsync<PcOrderSagaWorkflow>(orderId.Value);
+        var saga = await session.LoadAsync<PcOrderSagaWorkflow>(orderId.Value, TestContext.Current.CancellationToken);
 
         // Saga should be deleted when completed
         saga.ShouldBeNull();
@@ -160,7 +160,7 @@ public class strong_typed_id_saga : IAsyncLifetime
         await _host.InvokeMessageAndWaitAsync(new CancelPcOrderSaga(orderId));
 
         await using var session = _host.Services.GetRequiredService<IDocumentStore>().QuerySession();
-        var saga = await session.LoadAsync<PcOrderSagaWorkflow>(orderId.Value);
+        var saga = await session.LoadAsync<PcOrderSagaWorkflow>(orderId.Value, TestContext.Current.CancellationToken);
 
         // Saga should be deleted after cancel (MarkCompleted)
         saga.ShouldBeNull();
@@ -176,7 +176,7 @@ public class strong_typed_id_saga : IAsyncLifetime
         await _host.InvokeMessageAndWaitAsync(new ProcessPcOrderPayment(orderId));
 
         await using var session = _host.Services.GetRequiredService<IDocumentStore>().QuerySession();
-        var saga = await session.LoadAsync<PcOrderSagaWorkflow>(orderId.Value);
+        var saga = await session.LoadAsync<PcOrderSagaWorkflow>(orderId.Value, TestContext.Current.CancellationToken);
 
         saga.ShouldNotBeNull();
         saga.ItemsPicked.ShouldBeTrue();

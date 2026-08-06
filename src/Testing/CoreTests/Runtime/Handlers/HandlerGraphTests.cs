@@ -22,7 +22,7 @@ public class HandlerGraphTests
             .UseWolverine(opts =>
             {
                 opts.Policies.RegisterInteropMessageAssembly(typeof(IMessageAbstraction).Assembly);
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var graph = host.Services.GetRequiredService<HandlerGraph>();
 
@@ -46,7 +46,7 @@ public class HandlerGraphTests
             .UseWolverine(opts =>
             {
                 opts.RegisterMessageType(typeof(DummyMessage), "custom-alias");
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var graph = host.Services.GetRequiredService<HandlerGraph>();
 
@@ -54,6 +54,27 @@ public class HandlerGraphTests
 
         graph.TryFindMessageType("custom-alias", out var type).ShouldBeTrue();
         type.ShouldBe(typeof(DummyMessage));
+    }
+
+    [Fact]
+    public async Task register_message_type_with_multiple_aliases()
+    {
+        using var host = await Host.CreateDefaultBuilder()
+            .UseWolverine(opts =>
+            {
+                opts.RegisterMessageType(typeof(DummyMessage), "custom-alias-1");
+                opts.RegisterMessageType(typeof(DummyMessage), "custom-alias-2");
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
+
+        var graph = host.Services.GetRequiredService<HandlerGraph>();
+
+        graph.TryFindMessageType(typeof(DummyMessage).ToMessageTypeName(), out _).ShouldBeFalse();
+
+        graph.TryFindMessageType("custom-alias-1", out var firstType).ShouldBeTrue();
+        firstType.ShouldBe(typeof(DummyMessage));
+
+        graph.TryFindMessageType("custom-alias-2", out var secondType).ShouldBeTrue();
+        secondType.ShouldBe(typeof(DummyMessage));
     }
 
     [Fact]
@@ -78,7 +99,7 @@ public class HandlerGraphTests
 
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine()
-            .StartAsync();
+            .StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var graph = host.Services.GetRequiredService<HandlerGraph>();
         var runtime = host.Services.GetRequiredService<IWolverineRuntime>();

@@ -3,6 +3,8 @@ using JasperFx.Core.Reflection;
 using Polecat;
 using Wolverine.Persistence.Durability;
 using Wolverine.Runtime;
+using Wolverine.SqlServer.Persistence;
+using MultiTenantedMessageStore = Wolverine.Persistence.Durability.MultiTenantedMessageStore;
 
 namespace Wolverine.Polecat.Publishing;
 
@@ -11,6 +13,7 @@ public class OutboxedSessionFactory
     private readonly ISessionFactory _factory;
     private readonly IDocumentStore _store;
     private readonly bool _shouldPublishEvents;
+    private readonly bool _shouldTrackAppends;
 
     public OutboxedSessionFactory(ISessionFactory factory, IWolverineRuntime runtime, IDocumentStore store)
     {
@@ -18,6 +21,7 @@ public class OutboxedSessionFactory
         _store = store;
 
         _shouldPublishEvents = runtime.TryFindExtension<PolecatIntegration>()?.UseFastEventForwarding ?? false;
+        _shouldTrackAppends = runtime.Options.Tracking.EnableEventAppendTracking;
 
         MessageStore = runtime.Storage;
     }
@@ -88,9 +92,49 @@ public class OutboxedSessionFactory
             options.Listeners.Add(new PublishIncomingEventsBeforeCommit(context));
         }
 
-        options.Listeners.Add(new FlushOutgoingMessagesOnCommit(context, null!)); // store set after transaction creation
+        if (_shouldTrackAppends)
+        {
+            options.Listeners.Add(new NotifyObserverOfAppendedEvents(context));
+        }
+
+        // The FlushOutgoingMessagesOnCommit listener needs the SQL Server
+        // message store so it can mark the incoming envelope as Handled in
+        // the same transaction as the document changes. The factory's
+        // MessageStore property carries this from runtime.Storage at ctor
+        // time — earlier code passed `null!` here with a comment claiming a
+        // post-construction setter would fill it in, but no such setter
+        // exists on the listener (the field is readonly), and the result
+        // was a NullReferenceException the first time the listener tried
+        // to read messageStore.Role. See GH-2668.
+        options.Listeners.Add(new FlushOutgoingMessagesOnCommit(
+            context,
+            resolveSqlServerMessageStore()));
 
         return options;
+    }
+
+    /// <summary>
+    /// Resolve the SQL-Server-backed message store from the factory's
+    /// <see cref="MessageStore"/>. Mirrors the resolution in
+    /// <see cref="PolecatEnvelopeTransaction"/>'s constructor — for a
+    /// multi-tenanted runtime <c>runtime.Storage</c> is a
+    /// <see cref="MultiTenantedMessageStore"/> wrapper around the
+    /// SQL-Server-backed root, so a direct cast (the original GH-2668 fix)
+    /// would <c>InvalidCastException</c> in that mode. Throws a clear error
+    /// rather than NRE'ing in a Polecat session callback if the runtime
+    /// isn't SQL-Server-backed at all.
+    /// </summary>
+    private SqlServerMessageStore resolveSqlServerMessageStore()
+    {
+        return MessageStore switch
+        {
+            SqlServerMessageStore store => store,
+            MultiTenantedMessageStore { Main: SqlServerMessageStore mainStore } => mainStore,
+            _ => throw new InvalidOperationException(
+                "Wolverine.Polecat requires a SQL Server-backed message store. " +
+                $"The configured store was {MessageStore?.GetType().FullName ?? "null"}. " +
+                "Call PersistMessagesWithSqlServer(...) on WolverineOptions to wire one up.")
+        };
     }
 
     private void configureSession(MessageContext context, IDocumentSession session)

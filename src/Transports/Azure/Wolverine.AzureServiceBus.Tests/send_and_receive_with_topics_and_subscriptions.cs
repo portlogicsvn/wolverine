@@ -7,9 +7,10 @@ public class TopicsComplianceFixture : TransportComplianceFixture, IAsyncLifetim
 {
     public TopicsComplianceFixture() : base(new Uri("asb://topic/topic1"), 120)
     {
+        MustReset = false;
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         await SenderIs(opts =>
         {
@@ -26,15 +27,12 @@ public class TopicsComplianceFixture : TransportComplianceFixture, IAsyncLifetim
         });
     }
 
-    public new Task DisposeAsync()
-    {
-        return Task.CompletedTask;
-    }
-
     protected override Task AfterDisposeAsync()
     {
         return AzureServiceBusTesting.DeleteAllEmulatorObjectsAsync();
     }
 }
 
-public class TopicAndSubscriptionSendingAndReceivingCompliance : TransportCompliance<TopicsComplianceFixture>;
+public class TopicAndSubscriptionSendingAndReceivingCompliance(TopicsComplianceFixture fixture)
+    : TransportCompliance<TopicsComplianceFixture>(fixture),
+        IClassFixture<TopicsComplianceFixture>;

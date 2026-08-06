@@ -13,8 +13,9 @@ public class PubsubEndpointTests
 {
     private PubsubTransport createTransport()
     {
-        return new PubsubTransport("wolverine")
+        return new PubsubTransport
         {
+            ProjectId = "wolverine",
             PublisherApiClient = Substitute.For<PublisherServiceApiClient>(),
             SubscriberApiClient = Substitute.For<SubscriberServiceApiClient>(),
             EmulatorDetection = EmulatorDetection.EmulatorOnly
@@ -58,6 +59,44 @@ public class PubsubEndpointTests
         await topic.InitializeAsync(NullLogger.Instance);
 
         await transport.PublisherApiClient!.DidNotReceive().CreateTopicAsync(Arg.Any<TopicName>());
+    }
+
+    [Fact]
+    public async Task competing_consumer_listener_gets_per_node_subscription()
+    {
+        var transport = createTransport();
+        transport.AssignedNodeNumber = 5;
+
+        var endpoint = new PubsubEndpoint("foo", transport)
+        {
+            IsListener = true,
+            ListenerScope = ListenerScope.CompetingConsumers
+        };
+
+        await endpoint.SetupAsync(NullLogger.Instance);
+
+        // Competing consumers should each read from their own per-node subscription
+        endpoint.Server.Subscription.Name.SubscriptionId.ShouldBe("foo.5");
+    }
+
+    [Fact]
+    public async Task leader_pinned_listener_uses_a_single_shared_subscription()
+    {
+        var transport = createTransport();
+        transport.AssignedNodeNumber = 5;
+
+        var endpoint = new PubsubEndpoint("foo", transport)
+        {
+            IsListener = true,
+            ListenerScope = ListenerScope.PinnedToLeader
+        };
+
+        await endpoint.SetupAsync(NullLogger.Instance);
+
+        // A leader-pinned listener must NOT get a per-node subscription name, otherwise every
+        // node creates its own subscription and Pub/Sub fans a copy of every message to each,
+        // breaking the single-consumer (leader-only) guarantee.
+        endpoint.Server.Subscription.Name.SubscriptionId.ShouldBe("foo");
     }
 
     [Fact]

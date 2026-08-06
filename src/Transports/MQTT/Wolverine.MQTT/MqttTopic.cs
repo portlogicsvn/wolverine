@@ -1,3 +1,4 @@
+using JasperFx.Descriptors;
 using Microsoft.Extensions.Logging;
 using MQTTnet;
 using MQTTnet.Extensions.ManagedClient;
@@ -18,7 +19,7 @@ public class MqttTopic : Endpoint, ISender, ITopicEndpoint
     public string TopicName { get; }
     private CancellationToken _cancellation;
 
-    public MqttTopic(string topicName, MqttTransport parent, EndpointRole role) : base(new Uri("mqtt://topic/" + topicName.Trim('/')), role)
+    public MqttTopic(string topicName, MqttTransport parent, EndpointRole role) : base(MqttEndpointUri.Topic(parent.Protocol, topicName), role)
     {
         TopicName = topicName.Trim('/');
         Parent = parent;
@@ -37,11 +38,13 @@ public class MqttTopic : Endpoint, ISender, ITopicEndpoint
         }
 
         EndpointName = topicName;
+        BrokerRole = "topic";
 
         EnvelopeMapper = new MqttEnvelopeMapper(this);
         Mode = EndpointMode.BufferedInMemory;
     }
 
+    [IgnoreDescription]
     public MqttTransport Parent { get; }
     
     /// <summary>
@@ -55,6 +58,7 @@ public class MqttTopic : Endpoint, ISender, ITopicEndpoint
     /// When set, overrides the built in envelope mapping with a custom
     /// implementation
     /// </summary>
+    [IgnoreDescription]
     public IMqttEnvelopeMapper EnvelopeMapper { get; set; }
 
     public override bool AutoStartSendingAgent()
@@ -72,8 +76,29 @@ public class MqttTopic : Endpoint, ISender, ITopicEndpoint
 
         var logger = runtime.LoggerFactory.CreateLogger<MqttListener>();
 
-        var listener = new MqttListener(Parent, logger, this, receiver);
-        await Parent.SubscribeToTopicAsync(TopicName, listener, this);
+        var listener = new MqttListener(Parent, logger, this, receiver, Parent.Client);
+        await Parent.SubscribeToTopicAsync(TopicName, listener, this, Parent.Client);
+
+        // Broker-per-tenant (GH-3307): the shared listener consumes the default connection. Each tenant runs its
+        // own listener on its own dedicated client, stamping the tenant id onto inbound envelopes via
+        // TenantIdRule. Per-envelope completion routes back over the receiving connection through
+        // Envelope.Listener — the same CompoundListener multi-tenancy pattern used by RabbitMQ / NATS / SQS.
+        if (Parent.Tenants.Any() && TenancyBehavior == TenancyBehavior.TenantAware)
+        {
+            var compound = new CompoundListener(Uri);
+            compound.Inner.Add(listener);
+
+            foreach (var tenant in Parent.Tenants)
+            {
+                var client = Parent.GetTenantClient(tenant);
+                var tenantReceiver = new ReceiverWithRules(receiver, [new TenantIdRule(tenant.TenantId)]);
+                var tenantListener = new MqttListener(Parent, logger, this, tenantReceiver, client);
+                await Parent.SubscribeToTopicAsync(TopicName, tenantListener, this, client);
+                compound.Inner.Add(tenantListener);
+            }
+
+            return compound;
+        }
 
         return listener;
     }
@@ -83,7 +108,41 @@ public class MqttTopic : Endpoint, ISender, ITopicEndpoint
     protected override ISender CreateSender(IWolverineRuntime runtime)
     {
         Compile(runtime);
-        return this;
+
+        // Broker-per-tenant (GH-3307): route by Envelope.TenantId to a per-tenant sender bound to that tenant's
+        // own connection, falling back to the shared/default connection for the untenanted path.
+        //
+        // Both the tenant senders AND the default sender they fall back to are simple fire-and-forget
+        // MqttTopicSenders: TenantedSender intentionally does NOT implement ISenderRequiresCallback (GH-2361) and
+        // does not forward RegisterCallback to the senders beneath it.
+        if (Parent.Tenants.Any() && TenancyBehavior == TenancyBehavior.TenantAware)
+        {
+            var defaultSender = new MqttTopicSender(this, Parent.Client);
+            var tenantedSender = new TenantedSender(Uri, Parent.TenantedIdBehavior, defaultSender);
+
+            foreach (var tenant in Parent.Tenants)
+            {
+                tenantedSender.RegisterSender(tenant.TenantId,
+                    new MqttTopicSender(this, Parent.GetTenantClient(tenant)));
+            }
+
+            return tenantedSender;
+        }
+
+        // Inline keeps the historical immediate/fire-and-forget path (this itself, via SendAsync
+        // below) so explicit inline usage is unaffected.
+        if (Mode == EndpointMode.Inline)
+        {
+            return this;
+        }
+
+        // Buffered and Durable both route through BatchedSender + MqttSenderProtocol so a send is
+        // only considered successful once the broker has actually acknowledged it - see
+        // MqttSenderProtocol for why that matters for UseDurableOutbox/UseDurableInbox backed by a
+        // persistent message store (e.g. PersistMessagesWithSqlite). This mirrors the pattern used by
+        // every other Wolverine transport with real broker acknowledgements (Pub/Sub, Rabbit, etc.).
+        return new BatchedSender(this, new MqttSenderProtocol(this, Parent.Client),
+            runtime.DurabilitySettings.Cancellation, runtime.LoggerFactory.CreateLogger<MqttSenderProtocol>());
     }
 
     bool ISender.SupportsNativeScheduledSend => false;

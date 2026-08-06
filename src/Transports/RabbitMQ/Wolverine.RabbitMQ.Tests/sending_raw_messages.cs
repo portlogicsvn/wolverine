@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using JasperFx.Core;
 using Marten.Services;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
@@ -10,7 +11,12 @@ using Xunit;
 
 namespace Wolverine.RabbitMQ.Tests;
 
-[Trait("Category", "Flaky")]
+// CI marker: send_end_to_end_* tests fail in CI with PRECONDITION_FAILED
+// "inequivalent arg 'x-dead-letter-exchange' for queue 'messages1'" - the
+// queue persists across test runs with one DLX config and a later test tries
+// to re-declare it without one. Skipping in CI via the Flaky filter; the real
+// fix is to stop sharing fixed queue names like 'messages1' across tests
+// (use Guid-suffixed names) or to delete-then-redeclare in setup. See #2618.
 public class sending_raw_messages
 {
     [Fact]
@@ -24,7 +30,7 @@ public class sending_raw_messages
 
                 opts.PublishAllMessages()
                     .ToRabbitQueue(theQueueName).SendInline();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
 
         using var receiver = await WolverineHost.ForAsync(opts =>
@@ -42,6 +48,7 @@ public class sending_raw_messages
 
 
         var tracked = await publisher.TrackActivity()
+            .Timeout(30.Seconds())
             .AlsoTrack(receiver)
             .IncludeExternalTransports()
             .ExecuteAndWaitAsync(c => c.EndpointFor(theQueueName).SendRawMessageAsync(messageData, typeof(RawMessage)));
@@ -61,7 +68,7 @@ public class sending_raw_messages
 
                 opts.PublishAllMessages()
                     .ToRabbitQueue(theQueueName).SendInline();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
 
         using var receiver = await WolverineHost.ForAsync(opts =>
@@ -77,6 +84,7 @@ public class sending_raw_messages
 
 
         var tracked = await publisher.TrackActivity()
+            .Timeout(30.Seconds())
             .AlsoTrack(receiver)
             .IncludeExternalTransports()
             .ExecuteAndWaitAsync(c => c.EndpointFor(theQueueName).SendRawMessageAsync(messageData, typeof(RawMessage)));
@@ -96,7 +104,7 @@ public class sending_raw_messages
 
                 opts.PublishAllMessages()
                     .ToRabbitQueue(theQueueName).SendInline();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
 
         using var receiver = await WolverineHost.ForAsync(opts =>
@@ -131,10 +139,9 @@ public class sending_raw_messages
     }
 
 
-    public static async Task send_messages_with_raw_data()
+    private static async Task send_messages_with_raw_data()
     {
         #region sample_simple_rabbit_mq_setup_for_raw_messages
-
         var builder = Host.CreateApplicationBuilder();
         var connectionString = builder.Configuration.GetConnectionString("rabbit");
 
@@ -163,7 +170,6 @@ public class sending_raw_messages
         #endregion
 
         #region sample_context_for_raw_message_sending
-
         // Helper method for testing in Wolverine that
         // gives you a new IMessageBus instance without having to 
         // muck around with scoped service providers
@@ -172,13 +178,12 @@ public class sending_raw_messages
         // The raw message data, but pretend this was sourced from a database
         // table or some other non-Wolverine storage in your system
         byte[] messageData 
-            = Encoding.Default.GetBytes("{\"Name\": \"George Karlaftis\"}");
+            = Encoding.UTF8.GetBytes("{\"Name\": \"George Karlaftis\"}");
 
             #endregion
 
 
             #region sample_simple_usage_of_sending_by_raw_data
-
             // Simplest possible usage. This can work because the
             // listening endpoint has a configured default message
             // type
@@ -200,7 +205,6 @@ public class sending_raw_messages
             #endregion
 
             #region sample_more_advanced_usage_of_raw_message_sending
-
             await bus
                 .EndpointFor(new Uri("rabbitmq://queue/control"))
                 

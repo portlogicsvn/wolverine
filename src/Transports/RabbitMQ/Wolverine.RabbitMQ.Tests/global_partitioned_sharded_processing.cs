@@ -8,8 +8,6 @@ using Wolverine.Marten;
 using Wolverine.Runtime.Partitioning;
 using Wolverine.Tracking;
 using Xunit;
-using Xunit.Abstractions;
-
 namespace Wolverine.RabbitMQ.Tests;
 
 public class global_partitioned_sharded_processing
@@ -72,7 +70,7 @@ public class global_partitioned_sharded_processing
                     topology.UseShardedRabbitQueues("gletters", 4);
                     topology.MessagesImplementing<ILetterMessage>();
                 });
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var tracked = await host
             .TrackActivity()

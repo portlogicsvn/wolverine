@@ -39,9 +39,9 @@ public class auditing_determination : IntegrationContext
     }
 
     [Fact]
-    public void adds_the_log_start_message_to_code()
+    public async Task adds_the_log_start_message_to_code()
     {
-        with(opts =>
+        await with(opts =>
         {
             opts.Policies.LogMessageStarting(LogLevel.Information);
         });
@@ -57,7 +57,7 @@ public class auditing_determination : IntegrationContext
     [Fact]
     public async Task execute_to_prove_it_does_not_blow_up()
     {
-        with(opts =>
+        await with(opts =>
         {
             opts.Policies.LogMessageStarting(LogLevel.Information);
         });
@@ -66,12 +66,11 @@ public class auditing_determination : IntegrationContext
     }
 
     [Fact]
-    public void use_audit_members_from_explicit_interface_adds()
+    public async Task use_audit_members_from_explicit_interface_adds()
     {
-        with(opts =>
+        await with(opts =>
         {
             #region sample_explicit_registration_of_audit_properties
-
             // opts is WolverineOptions inside of a UseWolverine() call
             opts.Policies.ForMessagesOfType<IAccountMessage>().Audit(x => x.AccountId);
 
@@ -83,15 +82,15 @@ public class auditing_determination : IntegrationContext
     }
 
     [Fact]
-    public void use_audit_member_named_id_and_disambiguate()
+    public async Task use_audit_member_named_id_and_disambiguate()
     {
-        with(opts => opts.Policies.LogMessageStarting(LogLevel.Information));
-        
+        await with(opts => opts.Policies.LogMessageStarting(LogLevel.Information));
+
         var chain = chainFor<AuditedMessage2>();
         
         
         
-        chain.SourceCode!.ShouldContain("\"Starting to process CoreTests.Configuration.AuditedMessage2 ({EnvelopeId} with Id: {Id}, AccountIdentifier: {AccountId}\"");
+        chain.SourceCode!.ShouldContain("\"Starting to process CoreTests.Configuration.AuditedMessage2 ({EnvelopeId}) with Id: {Id}, AccountIdentifier: {AccountId}\"");
         
 /*
 ((Microsoft.Extensions.Logging.ILogger)_loggerForMessage).Log(Microsoft.Extensions.Logging.LogLevel.Information, "Starting to process CoreTests.Configuration.AuditedMessage2 ({EnvelopeId} with Id: {Id}, AccountIdentifier: {AccountId}", context.Envelope.Id, auditedMessage2.Id, auditedMessage2.AccountId);
@@ -100,7 +99,6 @@ public class auditing_determination : IntegrationContext
 }
 
 #region sample_using_audit_attribute
-
 public class AuditedMessage
 {
     [Audit]
@@ -135,7 +133,6 @@ public class AuditedMessage2
 }
 
 #region sample_account_message_for_auditing
-
 // Marker interface
 public interface IAccountMessage
 {

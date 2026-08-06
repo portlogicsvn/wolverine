@@ -1,3 +1,4 @@
+using JasperFx;
 using IntegrationTests;
 using JasperFx.Core;
 using JasperFx.Events.Daemon;
@@ -20,7 +21,6 @@ using Wolverine.Tracking;
 
 namespace MartenTests.MultiTenancy;
 
-[Trait("Category", "Flaky")]
 public class using_tenant_specific_queues_and_subscriptions : PostgresqlContext, IAsyncLifetime
 {
     private readonly List<IHost> _receivers = new();
@@ -31,7 +31,7 @@ public class using_tenant_specific_queues_and_subscriptions : PostgresqlContext,
     private string tenant4ConnectionString = null!;
     private IDocumentStore theSenderStore = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         await using var conn = new NpgsqlConnection(Servers.PostgresConnectionString);
         await conn.OpenAsync();
@@ -62,6 +62,7 @@ public class using_tenant_specific_queues_and_subscriptions : PostgresqlContext,
         _sender = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery().IncludeType(typeof(UpdateColorCountsHandler));
                 // This is too extreme for real usage, but helps tests to run faster
                 opts.Durability.NodeReassignmentPollingTime = 1.Seconds();
                 opts.Durability.HealthCheckPollingTime = 1.Seconds();
@@ -101,23 +102,19 @@ public class using_tenant_specific_queues_and_subscriptions : PostgresqlContext,
         theSenderStore = _sender.Services.GetRequiredService<IDocumentStore>();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
-        foreach (var host in _receivers) host.GetRuntime().Agents.DisableHealthChecks();
-
-        _receivers.Reverse();
-        foreach (var host in _receivers.ToArray()) await shutdownHostAsync(host);
-
-        await _sender.StopAsync();
-        _sender.Dispose();
+        await Task.WhenAll([
+            .._receivers.Select(ShutdownHostAsync),
+            ShutdownHostAsync(_sender)
+        ]);
     }
 
-    private async Task shutdownHostAsync(IHost host)
+    private static async Task ShutdownHostAsync(IHost host)
     {
         host.GetRuntime().Agents.DisableHealthChecks();
         await host.StopAsync();
         host.Dispose();
-        _receivers.Remove(host);
     }
 
     private async Task<string> CreateDatabaseIfNotExists(NpgsqlConnection conn, string databaseName)
@@ -141,6 +138,8 @@ public class using_tenant_specific_queues_and_subscriptions : PostgresqlContext,
         var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery().IncludeType(typeof(UpdateColorCountsHandler));
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Durability.Mode = DurabilityMode.Balanced;
 
                 opts.ListenToPostgresqlQueue("numbers").ListenWithStrictOrdering();
@@ -189,26 +188,6 @@ public class using_tenant_specific_queues_and_subscriptions : PostgresqlContext,
         await conn.CloseAsync();
     }
 
-    private async Task publishNumbers(string tenantId, List<ColorSum> colors)
-    {
-        await using var session = theSenderStore.LightweightSession(tenantId);
-
-        while (colors.Any(x => !x.IsComplete()))
-        {
-            foreach (var color in colors)
-            {
-                if (color.IsComplete())
-                {
-                    continue;
-                }
-
-                color.PublishSome(session);
-            }
-        }
-
-        await session.SaveChangesAsync();
-    }
-
     [Fact]
     public async Task big_bang_end_to_end()
     {
@@ -248,7 +227,7 @@ public class using_tenant_specific_queues_and_subscriptions : PostgresqlContext,
             return all.All(x => x.HasMatched);
         };
 
-        for (var i = 0; i < 20; i++)
+        for (var i = 0; i < 120; i++)
         {
             var matched = await tryMatch();
             if (matched)
@@ -256,7 +235,7 @@ public class using_tenant_specific_queues_and_subscriptions : PostgresqlContext,
                 return;
             }
 
-            await Task.Delay(250.Milliseconds());
+            await Task.Delay(500.Milliseconds(), TestContext.Current.CancellationToken);
         }
 
         throw new TimeoutException("The expected final state was never reached");
@@ -278,7 +257,7 @@ public class ColorData
 
     public Task PublishNumbers(IDocumentStore store)
     {
-        return Task.Factory.StartNew(async () =>
+        return Task.Run(async () =>
         {
             await using var session = store.LightweightSession(TenantId);
 

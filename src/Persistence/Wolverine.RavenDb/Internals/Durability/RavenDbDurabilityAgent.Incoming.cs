@@ -22,8 +22,19 @@ public partial class RavenDbDurabilityAgent
             foreach (var listener in listeners.Where(x => x.ReceivedAt != null))
             {
                 var receivedAt = listener.ReceivedAt!;
-                var circuit = _runtime.Endpoints.FindListenerCircuit(receivedAt)!;
-                if (circuit.Status != ListeningStatus.Accepting)
+
+                // GH-3590: exclusive and leader-pinned listeners run on exactly one node, which is not
+                // necessarily this one. Those endpoints recover their own inbox (ListenerInboxRecovery).
+                // Checked before the circuit lookup because FindListenerCircuit() falls back to the durable
+                // local queue and would otherwise mis-route another node's messages here.
+                if (_runtime.Endpoints.IsSingleNodeListener(receivedAt))
+                {
+                    continue;
+                }
+
+                // circuit can be null when the URI isn't serviced by this node
+                var circuit = _runtime.Endpoints.FindListenerCircuit(receivedAt);
+                if (circuit == null || circuit.Status != ListeningStatus.Accepting)
                 {
                     continue;
                 }
@@ -48,8 +59,11 @@ public partial class RavenDbDurabilityAgent
             await circuit.EnqueueDirectlyAsync(envelopes);
             _logger.RecoveredIncoming(envelopes);
 
-            _logger.LogInformation("Successfully recovered {Count} messages from the inbox for listener {Listener}",
-                envelopes.Count, listener);
+            if (envelopes.Count > 0)
+            {
+                _logger.LogInformation("Successfully recovered {Count} messages from the inbox for listener {Listener}",
+                    envelopes.Count, listener);
+            }
         }
         catch (Exception e)
         {

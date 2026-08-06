@@ -2,16 +2,19 @@
 <Project>
     <PropertyGroup>
         <LangVersion>12</LangVersion>
-        <NoWarn>1570;1571;1572;1573;1574;1587;1591;1701;1702;1711;1735;0618;VSTHRD200</NoWarn>
         <Authors>Jeremy D. Miller;Babu Annamalai;Jaedyn Tonee;</Authors>
-        <PackageIconUrl>https://github.com/JasperFx/wolverine/blob/main/docs/public/logo.png?raw=true</PackageIconUrl>
+        <!-- PackageIconUrl is deprecated and trips NU5048 as a build-break under
+             TreatWarningsAsErrors on .NET SDK 10.0.300+. Use PackageIcon with an
+             embedded file instead. The icon is packed in via the ItemGroup below. -->
+        <PackageIcon>logo.png</PackageIcon>
         <PackageProjectUrl>http://github.com/jasperfx/wolverine</PackageProjectUrl>
         <PackageLicenseExpression>MIT</PackageLicenseExpression>
-        <TargetFrameworks>net8.0;net9.0;net10.0</TargetFrameworks>
+        <TargetFrameworks>net9.0;net10.0</TargetFrameworks>
         <NoWarn>1570;1571;1572;1573;1574;1587;1591;1701;1702;1711;1735;0618;VSTHRD200</NoWarn>
+        <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
         <ImplicitUsings>true</ImplicitUsings>
         <Nullable>enable</Nullable>
-        <Version>5.28.0</Version>
+        <Version>6.24.7</Version>
         <RepositoryUrl>$(PackageProjectUrl)</RepositoryUrl>
         <PublishRepositoryUrl>true</PublishRepositoryUrl>
         <EmbedUntrackedSources>true</EmbedUntrackedSources>
@@ -20,8 +23,27 @@
         <AddSyntheticProjectReferencesForSolutionDependencies>false</AddSyntheticProjectReferencesForSolutionDependencies>
     </PropertyGroup>
 
+    <!-- Every xUnit v3 test project doubles as a Microsoft.Testing.Platform host, so Bobcat's
+         supervisor (see build/SupervisedTests.cs) can drive it as a worker process. This changes
+         only the built executable's entry point: `dotnet test`, VSTest filters, TRX and coverlet
+         all keep working, and xUnit v2 projects ignore the property entirely. Set here rather
+         than per-job so a build can never silently produce a non-supervisable executable. -->
+    <PropertyGroup Condition="$(MSBuildProjectName.EndsWith('Tests'))">
+        <UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>
+    </PropertyGroup>
+
     <ItemGroup>
         <PackageReference Include="Microsoft.SourceLink.GitHub" PrivateAssets="All"/>
     </ItemGroup>
+
+    <ItemGroup>
+        <!-- Embed the package icon referenced by <PackageIcon> above. Pack=true
+             puts the file inside every produced .nupkg; PackagePath="\" places it
+             at the package root so PackageIcon's relative resolution finds it. -->
+        <None Include="$(MSBuildThisFileDirectory)docs/public/logo.png"
+              Pack="true" PackagePath="\" Visible="false" />
+    </ItemGroup>
+
+    <Import Project="$(MSBuildThisFileDirectory)Analysis.Build.props" />
 
 </Project>

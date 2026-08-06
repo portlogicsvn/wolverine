@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using JasperFx;
 using JasperFx.CodeGeneration;
 using JasperFx.CodeGeneration.Frames;
@@ -46,10 +47,10 @@ public class SagaChain : HandlerChain
     {
         // After base constructor, saga handlers may have been moved to ByEndpoint (Separated mode).
         // Check what's left in Handlers (not the original grouping).
-        var remainingSagaCalls = Handlers.Where(x => x.HandlerType.CanBeCastTo<Saga>())
-            .DistinctBy(x => x.HandlerType).ToArray();
+        var allSagaHandlers = Handlers.Where(x => x.HandlerType.CanBeCastTo<Saga>()).ToArray();
+        var distinctSagaTypes = allSagaHandlers.DistinctBy(x => x.HandlerType).ToArray();
 
-        if (remainingSagaCalls.Length == 0)
+        if (distinctSagaTypes.Length == 0)
         {
             // All sagas were separated into ByEndpoint chains — this parent is routing-only.
             var anySaga = grouping.First(x => x.HandlerType.CanBeCastTo<Saga>());
@@ -59,11 +60,13 @@ public class SagaChain : HandlerChain
 
         try
         {
-            var saga = remainingSagaCalls.Single();
+            var saga = distinctSagaTypes.Single();
             SagaType = saga.HandlerType;
             SagaMethodInfo = saga.Method;
 
-            SagaIdMember = DetermineSagaIdMember(MessageType, SagaType, saga.Method);
+            // Pass ALL saga handler methods so [SagaIdentityFrom] is found regardless of declaration order
+            SagaIdMember = DetermineSagaIdMember(MessageType, SagaType,
+                allSagaHandlers.Select(x => x.Method).ToArray());
 
             // Automatically audit the saga id
             if (SagaIdMember != null && AuditedMembers.All(x => x.Member != SagaIdMember))
@@ -73,7 +76,7 @@ public class SagaChain : HandlerChain
         }
         catch (Exception e)
         {
-            var handlerTypes = remainingSagaCalls
+            var handlerTypes = distinctSagaTypes
                 .Select(x => x.HandlerType).Select(x => x.FullNameInCode()).Join(", ");
 
             throw new InvalidSagaException(
@@ -132,7 +135,7 @@ public class SagaChain : HandlerChain
         SagaType = saga.HandlerType;
         SagaMethodInfo = saga.Method;
 
-        SagaIdMember = DetermineSagaIdMember(MessageType, SagaType, saga.Method);
+        SagaIdMember = DetermineSagaIdMember(MessageType, SagaType, [saga.Method]);
 
         // Automatically audit the saga id
         if (SagaIdMember != null && AuditedMembers.All(x => x.Member != SagaIdMember))
@@ -151,14 +154,16 @@ public class SagaChain : HandlerChain
         SagaType = saga.HandlerType;
         SagaMethodInfo = saga.Method;
 
-        SagaIdMember = DetermineSagaIdMember(MessageType, SagaType, saga.Method);
+        // Pass ALL saga handler methods so [SagaIdentityFrom] is found regardless of declaration order
+        SagaIdMember = DetermineSagaIdMember(MessageType, SagaType,
+            sagaCalls.Select(x => x.Method).ToArray());
 
         if (SagaIdMember != null && AuditedMembers.All(x => x.Member != SagaIdMember))
         {
             AuditedMembers.Add(new AuditedMember(SagaIdMember, SagaIdMember.Name, SagaIdMember.Name));
         }
 
-        TypeName = saga.HandlerType.ToSuffixedTypeName(HandlerSuffix).Replace("[]", "Array");
+        TypeName = GeneratedTypeNameFor(saga.HandlerType, HandlerSuffix);
     }
 
     public override bool TryInferMessageIdentity(out PropertyInfo? property)
@@ -186,9 +191,28 @@ public class SagaChain : HandlerChain
 
     public static MemberInfo? DetermineSagaIdMember(Type messageType, Type sagaType, MethodInfo? sagaHandlerMethod = null)
     {
+        return DetermineSagaIdMember(messageType, sagaType,
+            sagaHandlerMethod != null ? [sagaHandlerMethod] : null);
+    }
+
+    // GetFields() + GetProperties() walk over a runtime-resolved messageType.
+    // Saga handlers are an opt-in feature; the messageType is the user's command/
+    // event, statically rooted by handler discovery. Same chunk G / chunk K
+    // rationale: leaf suppression here keeps the IPersistenceFrameProvider /
+    // SagaChain surface free of [Requires*] cascade. AOT-clean apps preserve
+    // saga-message types via [DynamicallyAccessedMembers(PublicFields|PublicProperties)]
+    // on the message type or by registering them through the source-generated
+    // handler discovery path.
+    [UnconditionalSuppressMessage("Trimming", "IL2070",
+        Justification = "Saga handlers are opt-in; user-supplied saga-message types are statically rooted via handler discovery. See AOT guide.")]
+    public static MemberInfo? DetermineSagaIdMember(Type messageType, Type sagaType, MethodInfo[]? sagaHandlerMethods)
+    {
         var expectedSagaIdName = $"{sagaType.Name}Id";
 
-        var specifiedSagaIdMemberName = sagaHandlerMethod?.GetParameters()
+        // Scan ALL handler methods for [SagaIdentityFrom], not just the first one.
+        // This fixes the bug where declaration order of NotFound vs Handle matters.
+        var specifiedSagaIdMemberName = sagaHandlerMethods?
+            .SelectMany(m => m.GetParameters())
             .Select(x => x.GetCustomAttribute<SagaIdentityFromAttribute>())
             .FirstOrDefault(a => a != null)?.PropertyName;
 
@@ -202,7 +226,18 @@ public class SagaChain : HandlerChain
 
     private MethodCall[] findByNames(params string[] methodNames)
     {
-        return Handlers.Where(x => methodNames.Contains(x.Method.Name) && x.HandlerType.CanBeCastTo<Saga>()).ToArray();
+        // Match either the bare name (e.g. "Start") or its async-suffixed twin
+        // (e.g. "StartAsync"). HandlerDiscovery already strips the "Async"
+        // suffix when picking up handler methods, so without this the saga
+        // method would be discovered into the chain but silently dropped from
+        // StartingCalls / ExistingCalls / NotFoundCalls and never invoked.
+        // See https://github.com/JasperFx/wolverine/issues/2578 and the
+        // re-report https://github.com/JasperFx/wolverine/issues/3274.
+        return Handlers
+            .Where(x => x.HandlerType.CanBeCastTo<Saga>()
+                        && methodNames.Any(n =>
+                            x.Method.Name == n || x.Method.Name == n + "Async"))
+            .ToArray();
     }
 
     internal override List<Frame> DetermineFrames(GenerationRules rules, IServiceContainer container,
@@ -274,6 +309,8 @@ public class SagaChain : HandlerChain
         frames.Add(ifNullBlock);
     }
 
+    [UnconditionalSuppressMessage("Trimming", "IL2072",
+        Justification = "SagaType originates from a HandlerCall's HandlerType, which is application-rooted via HandlerDiscovery. Saga types are concrete classes with public default constructors (CreateNewSagaFrame enforces this at runtime), preserved by the registration. AOT consumers run pre-generated frames via TypeLoadMode.Static.")]
     private void generateForOnlyStartingSaga(IServiceContainer container, IPersistenceFrameProvider frameProvider,
         List<Frame> frames)
     {
@@ -291,7 +328,7 @@ public class SagaChain : HandlerChain
 
             if (SagaIdMember != null)
             {
-                frames.Add(new SetSagaIdFromSagaFrame(MessageType, SagaIdMember));
+                frames.Add(new SetSagaIdFromSagaFrame(MessageType, SagaIdMember, SagaType));
             }
 
             // Emit return action frames for non-saga created variables (e.g., cascading messages).
@@ -322,7 +359,7 @@ public class SagaChain : HandlerChain
         {
             yield return new CreateMissingSagaFrame(saga);
 
-            yield return new SetSagaIdFrame(sagaId);
+            yield return new SetSagaIdFrame(sagaId, SagaType);
 
             foreach (var call in StartingCalls)
             {
@@ -365,7 +402,7 @@ public class SagaChain : HandlerChain
         IPersistenceFrameProvider frameProvider, IServiceContainer container, MessageVariable? messageVariable = null)
     {
         // Set the saga ID on the context so cascading messages have the correct saga ID
-        yield return new SetSagaIdFrame(sagaId);
+        yield return new SetSagaIdFrame(sagaId, SagaType);
 
         var handlerFrames = new List<Frame>();
         foreach (var call in ExistingCalls)

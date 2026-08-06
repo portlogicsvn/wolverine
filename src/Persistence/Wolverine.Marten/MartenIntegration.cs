@@ -2,20 +2,23 @@ using JasperFx;
 using JasperFx.Core;
 using JasperFx.Core.Reflection;
 using JasperFx.Events;
+using JasperFx.Events.Daemon;
 using Marten;
 using Marten.Events;
 using Marten.Exceptions;
 using Marten.Internal;
 using Marten.Schema;
+using Marten.Storage;
 using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
+using System.Diagnostics.CodeAnalysis;
 using Weasel.Core;
 using Wolverine.ErrorHandling;
 using Wolverine.Marten.Codegen;
-using Wolverine.Middleware;
 using Wolverine.Marten.Persistence.Sagas;
 using Wolverine.Marten.Publishing;
 using Wolverine.Marten.Requirements;
+using Wolverine.Middleware;
 using Wolverine.Persistence.Sagas;
 using Wolverine.Postgresql.Transport;
 using Wolverine.RDBMS;
@@ -38,8 +41,8 @@ public class MartenIntegration : IWolverineExtension, IEventForwarding
     public bool UseFastEventForwarding { get; set; }
     
     /// <summary>
-    /// Use this when using Wolverine to evenly distribute event projection and subscription 
-    /// work of Marten asynchronous projections. This replaces Marten's <c>AddAsyncDaemon(HotCold)</c> 
+    /// Use this when using Wolverine to evenly distribute event projection and subscription
+    /// work of Marten asynchronous projections. This replaces Marten's <c>AddAsyncDaemon(HotCold)</c>
     /// option and should not be used in combination with Marten's own load distribution.
     /// </summary>
     public bool UseWolverineManagedEventSubscriptionDistribution { get; set; }
@@ -61,13 +64,28 @@ public class MartenIntegration : IWolverineExtension, IEventForwarding
         
         options.CodeGeneration.Sources.Add(new MartenBackedPersistenceMarker());
 
+        // GH-3001: prime the service-location child scope with the handler's outbox-enrolled
+        // IDocumentSession so a service-located IDocumentSession / IQuerySession resolves to that same
+        // session. The frame self-guards (no-op when the chain has no Marten session).
+        options.ScopingFrameSources.Add(() => new PrimeScopedDocumentSessionFrame());
+
         options.CodeGeneration.InsertFirstPersistenceStrategy<MartenPersistenceFrameProvider>();
         options.CodeGeneration.Sources.Add(new SessionVariableSource());
         options.CodeGeneration.Sources.Add(new DocumentOperationsSource());
         options.CodeGeneration.Sources.Add(new EventStoreOperationsSource());
 
         options.Policies.Add<MartenAggregateHandlerStrategy>();
+
+        // GH-2944: pre-populate chain.AncillaryStoreType so the message-type-to-ancillary-store
+        // map built later in WolverineRuntime.HostService sees it. See MartenStoreEagerPolicy for
+        // the Phase A vs Phase B ordering trap this addresses.
+        options.Policies.Add<MartenStoreEagerPolicy>();
         
+        // QuerySpecificationPolicy detects ICompiledQuery/IQueryPlan-typed variables
+        // produced by Load/LoadAsync methods and injects FetchSpecificationFrames to
+        // execute them. Must run BEFORE MartenBatchingPolicy so those injected frames
+        // (which are IBatchableFrame) are grouped into a single batched query.
+        options.CodeGeneration.MethodPreCompilation.Add(new QuerySpecificationPolicy());
         options.CodeGeneration.MethodPreCompilation.Add(new MartenBatchingPolicy());
 
         options.Discovery.CustomizeHandlerDiscovery(x =>
@@ -142,26 +160,85 @@ public class MartenIntegration : IWolverineExtension, IEventForwarding
 
 internal class MartenOverrides : IConfigureMarten
 {
+    // Null for the main store (uses the runtime's default message store). Ancillary stores
+    // override this with their marker type so the outbox targets the ancillary store's own
+    // message store (its configured SchemaName / database). See GH-2887.
+    protected virtual Type? StoreType => null;
+
     public void Configure(IServiceProvider services, StoreOptions options)
     {
-        options.Events.MessageOutbox = new MartenToWolverineOutbox(services);
-        
+        options.Events.MessageOutbox = new MartenToWolverineOutbox(services, StoreType);
+
+        // GH-3290: when Wolverine manages the event subscription distribution, it replaces
+        // Marten's AddAsyncDaemon() registration outright — Marten hosts no coordinator and
+        // starts no agents, but the async projections and subscriptions DO run under
+        // Wolverine's distribution. Marten's only knowledge of the daemon state is
+        // Projections.AsyncMode; left at Disabled, DocumentStore writes a misleading
+        // "The async daemon is disabled ... projections will not be executed" warning at
+        // startup. Record the real state: ExternallyManaged keeps Marten's runtime posture
+        // identical to Disabled (no Marten-side coordination starts) while suppressing the
+        // warning. Only upgrades from Disabled — an explicit user AddAsyncDaemon() choice
+        // is never overwritten, regardless of call order relative to IntegrateWithWolverine.
+        // Marten's only knowledge of the daemon state is Projections.AsyncMode; left at Disabled,
+        // DocumentStore writes a misleading "The async daemon is disabled ... projections will not
+        // be executed" warning at startup. Record the real state: ExternallyManaged keeps Marten's
+        // runtime posture identical to Disabled (no Marten-side coordination starts) while
+        // suppressing the warning. Only upgrades from Disabled — an explicit Solo/HotCold choice is
+        // left alone HERE because AddAsyncDaemon applies its mode through ConfigureMarten, which
+        // runs in registration order, so a choice made after IntegrateWithWolverine is not yet
+        // visible at this point. That combination is invalid and is rejected at host start by
+        // ManagedDistributionDaemonModeValidator (GH-3388), where the options are final.
+        var integration = services.GetService<MartenIntegration>();
+        if (integration is { UseWolverineManagedEventSubscriptionDistribution: true }
+            && options.Projections.AsyncMode == DaemonMode.Disabled)
+        {
+            options.Projections.AsyncMode = DaemonMode.ExternallyManaged;
+        }
+
+        // Envelope is Wolverine's operational outbox document. Keep it
+        // single-tenant and unpartitioned regardless of blanket document
+        // policies the user has applied (AllDocumentsAreMultiTenanted or
+        // AllDocumentsAreMultiTenantedWithPartitioning). Without this,
+        // two stores that share a database schema can disagree about
+        // mt_doc_envelope's shape, producing an impossible
+        // "drop partitioning column" migration on the next deploy.
+        //
+        // These per-type alterations on the DocumentMappingBuilder run
+        // AFTER Marten's applyPolicies / applyPostPolicies passes during
+        // DocumentMapping construction, so they reliably win over any
+        // blanket policy the user registered. See GH-2566 / marten#4268.
+        options.Schema.For<Envelope>()
+            .SingleTenanted()
+            .DoNotPartition();
+
         options.Policies.ForAllDocuments(mapping =>
         {
             if (mapping.DocumentType.CanBeCastTo<Saga>())
             {
                 mapping.UseNumericRevisions = true;
-                mapping.Metadata.Revision.Member = mapping.DocumentType.GetProperty(nameof(Saga.Version))!;
+                // GetProperty(name, returnType) — not GetProperty(name) — because
+                // saga subclasses in the wild sometimes declare a shadowing
+                // `public new ... Version` property. Saga.Version is permanently
+                // an int (it aligns with JasperFx 2.0 rc's IRevisioned.Version,
+                // which is an int; the long-versioned event-sourcing case is a
+                // separate ILongVersioned.Version). Filtering by the int return
+                // type picks the canonical Saga.Version revision property and
+                // ignores any derived shadow of a different type.
+                mapping.Metadata.Revision.Member = mapping.DocumentType.GetProperty(
+                    nameof(Saga.Version), typeof(int))!;
             }
         });
     }
 }
 
-internal class MartenOverrides<T> : MartenOverrides, IConfigureMarten<T> where T : IDocumentStore{}
+internal class MartenOverrides<T> : MartenOverrides, IConfigureMarten<T> where T : IDocumentStore
+{
+    protected override Type? StoreType => typeof(T);
+}
 
 internal class EventWrapperForwarder : IHandledTypeRule
 {
-    public bool TryFindHandledType(Type concreteType, out Type handlerType)
+    public bool TryFindHandledType(Type concreteType, [NotNullWhen(true)] out Type? handlerType)
     {
         handlerType = concreteType.FindInterfaceThatCloses(typeof(IEvent<>))!;
         return handlerType != null;

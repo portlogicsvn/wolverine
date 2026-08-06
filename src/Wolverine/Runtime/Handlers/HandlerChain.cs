@@ -1,4 +1,5 @@
 ﻿using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq.Expressions;
 using System.Reflection;
 using JasperFx;
@@ -48,12 +49,29 @@ public class HandlerChain : Chain<HandlerChain, ModifyHandlerChainAttribute>, IW
 
     protected readonly List<HandlerChain> _byEndpoint = [];
 
+    /// <summary>
+    /// Compose the name of a generated handler class for a type in a way that is guaranteed to be a legal
+    /// C# identifier. <see cref="TypeNameExtensions.ToSuffixedTypeName"/> only strips the generic arity
+    /// (the backtick suffix), so array types like <c>ItemDeleted[]</c> would otherwise leak the brackets
+    /// straight into the generated class name and fail compilation. See GH-3399.
+    /// </summary>
+    /// <remarks>
+    /// Uniqueness is unaffected: ToSuffixedTypeName appends a stable hash of the type's *full* name, and
+    /// T and T[] have different full names, so their generated names cannot collide after sanitizing.
+    /// </remarks>
+    internal static string GeneratedTypeNameFor(Type type, string suffix)
+    {
+        return type.ToSuffixedTypeName(suffix).Replace("[]", "Array").Sanitize();
+    }
+
     private readonly List<Endpoint> _endpoints = [];
 
     private readonly HandlerGraph _parent;
 
     public readonly List<MethodCall> Handlers = new();
     private GeneratedType? _generatedType;
+
+    [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)]
     private Type? _handlerType;
 
     private bool _hasConfiguredFrames;
@@ -63,7 +81,7 @@ public class HandlerChain : Chain<HandlerChain, ModifyHandlerChainAttribute>, IW
         _parent = parent;
         MessageType = messageType ?? throw new ArgumentNullException(nameof(messageType));
 
-        TypeName = messageType.ToSuffixedTypeName(HandlerSuffix).Replace("[]", "Array");
+        TypeName = GeneratedTypeNameFor(messageType, HandlerSuffix);
 
         Description = "Message Handler for " + MessageType.FullNameInCode();
 
@@ -79,7 +97,7 @@ public class HandlerChain : Chain<HandlerChain, ModifyHandlerChainAttribute>, IW
     {
         foreach (var endpoint in endpoints) RegisterEndpoint(endpoint);
 
-        TypeName = call.HandlerType.ToSuffixedTypeName(HandlerSuffix).Replace("[]", "Array");
+        TypeName = GeneratedTypeNameFor(call.HandlerType, HandlerSuffix);
 
         Description = $"Message Handler for {MessageType.FullNameInCode()} using {call}";
     }
@@ -154,9 +172,10 @@ public class HandlerChain : Chain<HandlerChain, ModifyHandlerChainAttribute>, IW
 
     /// <summary>
     ///     At what level should Wolverine log messages of this type about messages succeeding? The default
-    ///     is Information
+    ///     is Debug (changed from Information in 6.21/GH-3490 — a per-message Information log is a real
+    ///     throughput tax on hot listeners; opt back in with Policies.MessageSuccessLogLevel(LogLevel.Information))
     /// </summary>
-    public LogLevel SuccessLogLevel { get; set; } = LogLevel.Information;
+    public LogLevel SuccessLogLevel { get; set; } = LogLevel.Debug;
 
     /// <summary>
     ///     At what level should processing starting and finishing be logged for this message type?
@@ -274,27 +293,23 @@ public class HandlerChain : Chain<HandlerChain, ModifyHandlerChainAttribute>, IW
         return Task.FromResult(found);
     }
 
+    // AttachTypesSynchronously walks Assembly.ExportedTypes on the *generated*
+    // handler assembly (or the pre-compiled one in TypeLoadMode.Static) to
+    // resolve the generated handler class by name. Trim removal of the
+    // generated handler class would already break Wolverine at runtime; the
+    // ExportedTypes walk is finding a type that's known by construction.
+    [UnconditionalSuppressMessage("Trimming", "IL2026",
+        Justification = "ExportedTypes walk over the generated handler assembly to attach the generated handler type; the type is known by construction at codegen time. See AOT guide.")]
+    [UnconditionalSuppressMessage("Trimming", "IL2074",
+        Justification = "_handlerType assignment from ExportedTypes.FirstOrDefault — the generated handler type carries its codegen-emitted public constructor; trim preserves it because the type itself is rooted by the assembly load. See AOT guide.")]
+    [UnconditionalSuppressMessage("Trimming", "IL2077",
+        Justification = "_handlerType is populated by ExportedTypes scan on the generated assembly; the resolved Type's constructors are emitted by the same codegen step that produced the type, so trimming preserves them in any practical setup.")]
+    [UnconditionalSuppressMessage("AOT", "IL3050",
+        Justification = "QuickBuild closes IFinder<TParameter> via MakeGenericType + Activator.CreateInstance; AOT consumers run pre-generated handlers via TypeLoadMode.Static so the reflective close never fires.")]
     bool ICodeFile.AttachTypesSynchronously(GenerationRules rules, Assembly assembly, IServiceProvider? services,
         string containingNamespace)
     {
-        // Use the source-generated type loader for O(1) lookup when available,
-        // falling back to linear scan of assembly.ExportedTypes.
-        // Phase D: First try the PreGeneratedHandlerTypes dictionary for O(1) lookup,
-        // then fall back to TryFindPreGeneratedType for backward compatibility.
-        var typeLoader = _parent?.TypeLoader;
-        if (typeLoader is { HasPreGeneratedHandlers: true })
-        {
-            if (typeLoader.PreGeneratedHandlerTypes?.TryGetValue(TypeName, out var preGenType) == true)
-            {
-                _handlerType = preGenType;
-            }
-            else
-            {
-                _handlerType = typeLoader.TryFindPreGeneratedType(TypeName);
-            }
-        }
-
-        _handlerType ??= assembly.ExportedTypes.FirstOrDefault(x => x.Name == TypeName);
+        _handlerType = assembly.ExportedTypes.FirstOrDefault(x => x.Name == TypeName);
 
         if (_handlerType == null)
         {
@@ -397,6 +412,12 @@ public class HandlerChain : Chain<HandlerChain, ModifyHandlerChainAttribute>, IW
         Postprocessors.Add(cascading);
     }
 
+    // GetProperties / GetFields walk on MessageType to find a member matching
+    // valueName + valueType. The member resolution happens at codegen time
+    // when binding handler parameters to message members. Same chunk Q / R / S
+    // pattern: message types are statically rooted via HandlerDiscovery.
+    [UnconditionalSuppressMessage("Trimming", "IL2075",
+        Justification = "MessageType member walk at codegen time; user message types are statically rooted via HandlerDiscovery. See AOT guide.")]
     public override bool TryFindVariable(string valueName, ValueSource source, Type valueType, out Variable variable)
     {
         if (source == ValueSource.Claim)
@@ -436,6 +457,11 @@ public class HandlerChain : Chain<HandlerChain, ModifyHandlerChainAttribute>, IW
         return false;
     }
 
+    // GetMethods walk on handler types to find a public-static method with the
+    // requested name + return type. Codegen-time helper; handler types
+    // statically rooted via HandlerDiscovery.
+    [UnconditionalSuppressMessage("Trimming", "IL2075",
+        Justification = "Handler-type method walk at codegen time; handler types are statically rooted via HandlerDiscovery. See AOT guide.")]
     private bool tryFindMethodVariable(string methodName, Type returnType, out Variable variable)
     {
         var handlerTypes = Handlers.Select(h => h.HandlerType).Distinct();
@@ -458,6 +484,13 @@ public class HandlerChain : Chain<HandlerChain, ModifyHandlerChainAttribute>, IW
             $"Could not find a public static method '{methodName}' returning {returnType.FullNameInCode()} on handler types: {handlerTypes.Select(t => t.FullNameInCode()).Join(", ")}");
     }
 
+    // typeof(EntityIsNotNullGuardFrame<>).CloseAndBuildAs<MethodCall>(...)
+    // closes the guard-frame generic over the entity type at codegen time.
+    // Same chunk D / I / J / K CloseAndBuildAs pattern.
+    [UnconditionalSuppressMessage("Trimming", "IL2026",
+        Justification = "EntityIsNotNullGuardFrame<> closed over runtime entity type at codegen time; user types statically rooted. See AOT guide.")]
+    [UnconditionalSuppressMessage("AOT", "IL3050",
+        Justification = "EntityIsNotNullGuardFrame<> closed over runtime entity type at codegen time; user types statically rooted. See AOT guide.")]
     public override Frame[] AddStopConditionIfNull(Variable variable)
     {
         var frame = typeof(EntityIsNotNullGuardFrame<>).CloseAndBuildAs<MethodCall>(variable, variable.VariableType);
@@ -465,6 +498,10 @@ public class HandlerChain : Chain<HandlerChain, ModifyHandlerChainAttribute>, IW
         return [frame, new HandlerContinuationFrame(frame)];
     }
 
+    [UnconditionalSuppressMessage("Trimming", "IL2026",
+        Justification = "EntityIsNotNullGuardFrame<> closed over runtime entity type at codegen time; user types statically rooted. See AOT guide.")]
+    [UnconditionalSuppressMessage("AOT", "IL3050",
+        Justification = "EntityIsNotNullGuardFrame<> closed over runtime entity type at codegen time; user types statically rooted. See AOT guide.")]
     public override Frame[] AddStopConditionIfNull(Variable data, Variable? identity, IDataRequirement requirement)
     {
         switch (requirement.OnMissing)
@@ -514,7 +551,11 @@ public class HandlerChain : Chain<HandlerChain, ModifyHandlerChainAttribute>, IW
         return new HandlerChain(call, parent);
     }
 
-    public static HandlerChain For<T>(string methodName, HandlerGraph parent)
+    // GetMethod on typeof(T) for the named handler method. T is the user-
+    // supplied handler type; adding [DAM(PublicMethods|NonPublicMethods)] on T
+    // documents the requirement explicitly. Test-helper API surface — caller
+    // sites pass concrete types so the cascade stops here.
+    public static HandlerChain For<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicMethods | DynamicallyAccessedMemberTypes.NonPublicMethods)] T>(string methodName, HandlerGraph parent)
     {
         var handlerType = typeof(T);
         var method = handlerType.GetMethod(methodName,
@@ -534,6 +575,12 @@ public class HandlerChain : Chain<HandlerChain, ModifyHandlerChainAttribute>, IW
         return new HandlerChain(call, parent);
     }
 
+    [UnconditionalSuppressMessage("Trimming", "IL2026",
+        Justification = "QuickBuild closes [FromKeyedServices] parameters via CloseAndBuildAs (MakeGenericType on IFinder<T>). The _handlerType field is populated from the generated assembly's ExportedTypes; constructors are emitted by codegen and preserved. AOT consumers pre-generate handlers via TypeLoadMode.Static.")]
+    [UnconditionalSuppressMessage("Trimming", "IL2077",
+        Justification = "_handlerType is populated from the generated handler assembly; constructors are emitted by codegen so they survive trimming in any practical setup.")]
+    [UnconditionalSuppressMessage("AOT", "IL3050",
+        Justification = "QuickBuild closes IFinder<TParameter> via MakeGenericType + Activator.CreateInstance for [FromKeyedServices] resolution; AOT consumers run pre-generated handlers via TypeLoadMode.Static so the reflective close never fires.")]
     internal MessageHandler CreateHandler(IServiceContainer container)
     {
         if (_handlerType == null)
@@ -592,11 +639,81 @@ public class HandlerChain : Chain<HandlerChain, ModifyHandlerChainAttribute>, IW
         foreach (var methodCall in Middleware.OfType<MethodCall>())
             methodCall.TryReplaceVariableCreationWithAssignment(messageVariable);
 
+        // Opt-in stamping driven by WolverineOptions.Tracking.* — every diagnostic is
+        // baked into the generated handler at codegen time. When the corresponding
+        // flag is off the frame / event annotation simply isn't emitted, so the hot
+        // path has zero runtime conditionals for any of these features. This is the
+        // explicit no-runtime-if/then design discussed for GH-2694.
+        var options = container.GetInstance<WolverineOptions>();
+        IEnumerable<Frame> preamble = Array.Empty<Frame>();
+
+        if (options?.Tracking.HandlerExecutionDiagnosticsEnabled == true)
+        {
+            // wolverine.envelope.transport_lag_ms / receive_dwell_ms tags get stamped
+            // by an ApplyExecutionDiagnosticTagsFrame at the very front of the chain,
+            // before middleware. The frame emits a fully qualified static call to
+            // WolverineTracing.ApplyExecutionDiagnosticTags(Activity.Current, envelope)
+            // — Executor / HandlerPipeline / TracingExecutor never need to read the
+            // flag at runtime.
+            preamble = preamble.Append(new ApplyExecutionDiagnosticTagsFrame());
+
+            // Bracket every user handler MethodCall with wolverine.handler.started /
+            // wolverine.handler.finished. Middleware MethodCalls earlier in the frame
+            // sequence stay unmarked — the events wrap only the actual handler body.
+            foreach (var handlerCall in Handlers)
+            {
+                handlerCall.ActivityEventBeforeCall = WolverineTracing.HandlerStarted;
+                handlerCall.ActivityEventAfterCall = WolverineTracing.HandlerFinished;
+            }
+        }
+
+        if (options?.Tracking.OutboxDiagnosticsEnabled == true)
+        {
+            // Bracket FlushOutgoingMessages with wolverine.outbox.flushing /
+            // wolverine.outbox.published. Provider-agnostic — every persistence backend
+            // adds the same FlushOutgoingMessages postprocessor frame, so the events
+            // appear identically regardless of which transactional middleware is in play.
+            foreach (var flush in Postprocessors.OfType<FlushOutgoingMessages>())
+            {
+                flush.ActivityEventBeforeCall = WolverineTracing.OutboxFlushing;
+                flush.ActivityEventAfterCall = WolverineTracing.OutboxPublished;
+            }
+        }
+
+        // Cause-and-effect tracking lives between the handler return-value frames
+        // (which enqueue cascading messages onto the message context) and the
+        // postprocessor frames (which include FlushOutgoingMessages). Codegen-only
+        // gating: when the flag is off the frame isn't emitted into the chain and
+        // no runtime check is performed in the framework Executor / HandlerPipeline.
+        IEnumerable<Frame> causation = options?.Tracking.EnableMessageCausationTracking == true
+            ? new Frame[] { new RecordMessageCausationFrame() }
+            : Array.Empty<Frame>();
+
+        // GH-3001: when this chain falls back to service location, prime the child scope so
+        // service-located IMessageContext / IMessageBus (and integration-registered instances like
+        // Marten's outbox-enrolled IDocumentSession) resolve to the same instances the handler uses
+        // instead of duplicates. The MessageContext frame is always added; integrations contribute
+        // more via WolverineOptions.ScopingFrameSources. Every scoping frame self-guards, and the
+        // activator emits nothing unless a service-location scope is actually created for the chain.
+        var scopingFrames = new List<SyncFrame> { new PrimeScopedMessageContextFrame() };
+        scopingFrames.AddRange(options?.ScopingFrameSources.Select(x => x()) ?? []);
+        var scopeActivator = new ScopePrimingActivatorFrame(scopingFrames);
+
         // The Enqueue cascading needs to happen before the post processors because of the
-        // transactional & outbox support
-        return Middleware.Concat(container.TryCreateConstructorFrames(Handlers)).Concat(Handlers)
-            .Concat(handlerReturnValueFrames).Concat(Postprocessors).ToList();
+        // transactional & outbox support. The scope-priming activator runs LAST so it arranges after
+        // the service-location scope (if any) has been created — it emits no code, it only registers
+        // postprocessors on that scope.
+        return preamble
+            .Concat(Middleware)
+            .Concat(container.TryCreateConstructorFrames(Handlers))
+            .Concat(Handlers)
+            .Concat(handlerReturnValueFrames)
+            .Concat(causation)
+            .Concat(Postprocessors)
+            .Append(scopeActivator)
+            .ToList();
     }
+
 
     protected void applyCustomizations(GenerationRules rules, IServiceContainer container)
     {
@@ -681,6 +798,8 @@ internal interface IEntityIsNotNullGuard
 
 internal class EntityIsNotNullGuardFrame<T> : MethodCall, IEntityIsNotNullGuard
 {
+    [UnconditionalSuppressMessage("Trimming", "IL2026",
+        Justification = "MethodCall reflects EntityIsNotNullGuard<T>.GetMethod(\"Assert\"); the Assert method is statically referenced via nameof-style binding in the EntityIsNotNullGuard<T> class and survives trimming. The closed-generic EntityIsNotNullGuard<T> is rooted at codegen time per the AOT guide.")]
     public EntityIsNotNullGuardFrame(Variable variable) : base(typeof(EntityIsNotNullGuard<T>), "Assert")
     {
         Arguments[0] = variable;

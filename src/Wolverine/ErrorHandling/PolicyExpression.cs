@@ -125,12 +125,32 @@ public interface IAdditionalActions
     /// <param name="source"></param>
     /// <returns></returns>
     IAdditionalActions And(IContinuationSource source);
+
+    /// <summary>
+    /// Apply full additive jitter to every delay in this rule.
+    /// Effective delay ∈ [d, 2d]. Mutually exclusive with the other WithXxxJitter methods.
+    /// </summary>
+    IAdditionalActions WithFullJitter();
+
+    /// <summary>
+    /// Apply bounded additive jitter to every delay in this rule.
+    /// Effective delay ∈ [d, d × (1 + percent)]. Mutually exclusive with the other WithXxxJitter methods.
+    /// </summary>
+    /// <param name="percent">Upper bound of the additive range, as a fraction of the configured delay. Must be &gt; 0.</param>
+    IAdditionalActions WithBoundedJitter(double percent);
+
+    /// <summary>
+    /// Apply attempt-scaled additive jitter to every delay in this rule.
+    /// Effective delay ∈ [d, d × (1 + 2·attempt)]. Mutually exclusive with the other WithXxxJitter methods.
+    /// </summary>
+    IAdditionalActions WithExponentialJitter();
 }
 
 internal class FailureActions : IAdditionalActions, IFailureActions
 {
     private readonly FailureRule _rule;
     private readonly List<FailureSlot> _slots = new();
+    private bool _jitterApplied;
 
     public FailureActions(IExceptionMatch match, FailureRuleCollection parent)
     {
@@ -209,6 +229,17 @@ internal class FailureActions : IAdditionalActions, IFailureActions
         return this;
     }
 
+    public IAdditionalActions ContinueWith(IContinuationSource source)
+    {
+        if (source == null) throw new ArgumentNullException(nameof(source));
+
+        var slot = _rule.AddSlot(source);
+        _slots.Add(slot);
+        _rule.InfiniteSource = source;
+
+        return this;
+    }
+
     public IAdditionalActions MoveToErrorQueue()
     {
         var slot = _rule.AddSlot(new MoveToErrorQueueSource());
@@ -270,9 +301,14 @@ internal class FailureActions : IAdditionalActions, IFailureActions
 
     public IAdditionalActions Discard()
     {
-        var slot = _rule.AddSlot(DiscardEnvelope.Instance);
+        var slot = _rule.AddSlot(DiscardEnvelopeSource.Instance);
         _slots.Add(slot);
         return this;
+    }
+
+    public IAdditionalActions IsolateBatchMembers()
+    {
+        return ContinueWith(new Runtime.Batching.ProbeIndividuallyContinuationSource());
     }
 
     public IAdditionalActions PauseSending(TimeSpan pauseTime)
@@ -353,7 +389,7 @@ internal class FailureActions : IAdditionalActions, IFailureActions
         {
             throw new InvalidOperationException("You must specify at least one delay time");
         }
-        
+
         if (delays.Length > 25)
             throw new ArgumentOutOfRangeException(nameof(delays),
                 "Wolverine allows a maximum of 25 attempts, maybe see one of the indefinite requeue or reschedule policies");
@@ -365,6 +401,48 @@ internal class FailureActions : IAdditionalActions, IFailureActions
             _slots.Add(slot);
         }
 
+        return this;
+    }
+
+    public IAdditionalActions WithFullJitter()
+        => ApplyJitterStrategy(new FullJitter());
+
+    public IAdditionalActions WithBoundedJitter(double percent)
+        => ApplyJitterStrategy(new BoundedJitter(percent));
+
+    public IAdditionalActions WithExponentialJitter()
+        => ApplyJitterStrategy(new ExponentialJitter());
+
+    private IAdditionalActions ApplyJitterStrategy(IJitterStrategy strategy)
+    {
+        if (_jitterApplied)
+        {
+            throw new InvalidOperationException(
+                "A jitter strategy has already been applied to this error rule. " +
+                "Only one of WithFullJitter / WithBoundedJitter / WithExponentialJitter is allowed per rule.");
+        }
+
+        var applied = false;
+
+        foreach (var slot in _rule)
+        {
+            if (slot.ApplyJitter(strategy)) applied = true;
+        }
+
+        if (_rule.InfiniteSource is IJitterable infiniteJitterable
+            && infiniteJitterable.TrySetJitter(strategy))
+        {
+            applied = true;
+        }
+
+        if (!applied)
+        {
+            throw new InvalidOperationException(
+                "Jitter can only be applied after a delay-carrying policy such as " +
+                "RetryWithCooldown, ScheduleRetry, ScheduleRetryIndefinitely, or PauseThenRequeue.");
+        }
+
+        _jitterApplied = true;
         return this;
     }
 }
@@ -451,6 +529,13 @@ public interface IFailureActions
     /// </summary>
     IAdditionalActions Discard();
 
+    /// <summary>
+    ///     For a batched message handler, isolate the failing member(s): re-run each member of the batch
+    ///     as its own size-1 batch so only the message that actually causes this exception is
+    ///     dead-lettered, while the healthy members succeed. No effect on non-batched messages. GH-3289.
+    /// </summary>
+    IAdditionalActions IsolateBatchMembers();
+
 
     /// <summary>
     ///     Schedule the message for additional attempts with a delay. Use this
@@ -517,6 +602,12 @@ public interface IFailureActions
     /// <param name="description">Diagnostic description of the failure action</param>
     /// <param name="invokeUsage">If specified, this error action will be executed for inline message execution through IMessageBus.InvokeAsync()</param>
     /// <returns></returns>
+    /// <summary>
+    /// Handle matching failures with a custom <see cref="IContinuationSource"/>, applied on every attempt.
+    /// The plug-in point for custom or transport-specific continuations in the error-handling DSL.
+    /// </summary>
+    IAdditionalActions ContinueWith(IContinuationSource source);
+
     IAdditionalActions CustomActionIndefinitely(Func<IWolverineRuntime, IEnvelopeLifecycle, Exception, ValueTask> action,
         string description, InvokeResult? invokeUsage = null);
 
@@ -551,6 +642,16 @@ public class PolicyExpression : IFailureActions
     }
 
     /// <summary>
+    /// Handle matching failures with a custom <see cref="IContinuationSource"/>, applied on every attempt.
+    /// This is the extension point for plugging your own (or a transport-specific) continuation into the
+    /// error-handling DSL, e.g. <c>OnException&lt;T&gt;().ContinueWith(mySource)</c>.
+    /// </summary>
+    public IAdditionalActions ContinueWith(IContinuationSource source)
+    {
+        return new FailureActions(_match, _parent).ContinueWith(source);
+    }
+
+    /// <summary>
     ///     Immediately move the message to the error queue when the exception
     ///     caught matches this criteria
     /// </summary>
@@ -580,6 +681,18 @@ public class PolicyExpression : IFailureActions
     public IAdditionalActions Discard()
     {
         return new FailureActions(_match, _parent).Discard();
+    }
+
+    /// <summary>
+    ///     For a batched message handler, isolate the failing member(s): re-run each member of the batch
+    ///     as its own size-1 batch so only the message that actually causes this exception is
+    ///     dead-lettered, while the healthy members succeed. Composes with the retry verbs on other
+    ///     exception types (e.g. RetryWithCooldown for transient errors). No effect on non-batched
+    ///     messages. See GH-3289.
+    /// </summary>
+    public IAdditionalActions IsolateBatchMembers()
+    {
+        return new FailureActions(_match, _parent).IsolateBatchMembers();
     }
 
     /// <summary>
@@ -707,7 +820,7 @@ public class PolicyExpression : IFailureActions
     /// <returns>The PolicyBuilder instance, for fluent chaining.</returns>
     public PolicyExpression OrInner<TException>() where TException : Exception
     {
-        _match.Or(new InnerMatch(new TypeMatch<TException>()));
+        _match = _match.Or(new InnerMatch(new TypeMatch<TException>()));
         return this;
     }
 

@@ -5,6 +5,7 @@ using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
+using NSubstitute;
 using Shouldly;
 using Weasel.Core;
 using Weasel.SqlServer;
@@ -14,6 +15,7 @@ using Wolverine.Persistence.Durability;
 using Wolverine.RDBMS;
 using Wolverine.RDBMS.Durability;
 using Wolverine.RDBMS.Polling;
+using Wolverine.Runtime;
 using Wolverine.Runtime.WorkerQueues;
 using Wolverine.SqlServer;
 using Wolverine.SqlServer.Schema;
@@ -32,7 +34,6 @@ public class SqlServerMessageStore_with_IdAndDestination_Identity : MessageStore
         await conn.CloseAsync();
         
         #region sample_configuring_message_identity_to_use_id_and_destination
-
         var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -55,15 +56,15 @@ public class SqlServerMessageStore_with_IdAndDestination_Identity : MessageStore
     public async Task should_have_receive_at_in_primary_keys()
     {
         using var conn = new SqlConnection(Servers.SqlServerConnectionString);
-        await conn.OpenAsync();
+        await conn.OpenAsync(TestContext.Current.CancellationToken);
 
         var runtime = theHost.GetRuntime();
 
-        var incoming = await new IncomingEnvelopeTable(runtime.Options.Durability, "receiver2").FetchExistingAsync(conn);
+        var incoming = await new IncomingEnvelopeTable(runtime.Options.Durability, "receiver2").FetchExistingAsync(conn, TestContext.Current.CancellationToken);
         incoming!.PrimaryKeyColumns.ShouldContain(DatabaseConstants.Id);
         incoming.PrimaryKeyColumns.ShouldContain(DatabaseConstants.ReceivedAt);
 
-        var dlq = await new DeadLettersTable(runtime.Options.Durability, "receiver2").FetchExistingAsync(conn);
+        var dlq = await new DeadLettersTable(runtime.Options.Durability, "receiver2").FetchExistingAsync(conn, TestContext.Current.CancellationToken);
         dlq!.PrimaryKeyColumns.ShouldContain(DatabaseConstants.Id);
         dlq.PrimaryKeyColumns.ShouldContain(DatabaseConstants.ReceivedAt);
     }
@@ -169,17 +170,20 @@ public class SqlServerMessageStore_with_IdAndDestination_Identity : MessageStore
 
         var durabilitySettings = theHost.Services.GetRequiredService<DurabilitySettings>();
 
-        var runtime = theHost.GetRuntime();
-        
-        await thePersistence.As<IMessageDatabase>().PollForScheduledMessagesAsync(runtime,
-            NullLogger.Instance,
-            durabilitySettings,
-            default);
+        // See the note on the twin of this test in SqlServerMessageStoreTests -- the live
+        // runtime would enqueue this envelope for execution and it would be marked Handled
+        // out from under the assertion below. GH-3821.
+        var runtime = Substitute.For<IWolverineRuntime>();
+
+        await thePersistence.As<IMessageDatabase>().PollForScheduledMessagesAsync(runtime, NullLogger.Instance, durabilitySettings, TestContext.Current.CancellationToken);
 
         var stored = (await thePersistence.Admin.AllIncomingAsync()).Single();
 
         stored.OwnerId.ShouldBe(durabilitySettings.AssignedNodeNumber);
         stored.Status.ShouldBe(EnvelopeStatus.Incoming);
+
+        // and the poll really did hand the envelope off to be executed
+        await runtime.Received().EnqueueDirectlyAsync(Arg.Is<IReadOnlyList<Envelope>>(x => x.Count == 1));
     }
     
     [Fact]

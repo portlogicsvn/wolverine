@@ -2,6 +2,7 @@ using Amazon.SQS;
 using Amazon.SQS.Model;
 using JasperFx.Core;
 using JasperFx.Core.Reflection;
+using JasperFx.Descriptors;
 using Microsoft.Extensions.Logging;
 using Wolverine.Configuration;
 using Wolverine.Runtime;
@@ -13,6 +14,13 @@ namespace Wolverine.AmazonSqs.Internal;
 
 public class AmazonSqsQueue : Endpoint, IBrokerQueue, IMassTransitInteropEndpoint
 {
+    /// <summary>
+    ///     Hard Amazon SQS limit for the per-message DelaySeconds parameter (15 minutes). Scheduled
+    ///     sends within this window to a standard queue are delayed natively by SQS; anything past it
+    ///     falls back to Wolverine's own message scheduling
+    /// </summary>
+    public const int MaximumSqsDelaySeconds = 900;
+
     private readonly AmazonSqsTransport _parent;
 
     private bool _initialized;
@@ -29,6 +37,7 @@ public class AmazonSqsQueue : Endpoint, IBrokerQueue, IMassTransitInteropEndpoin
         _parent = parent;
         QueueName = queueName;
         EndpointName = queueName;
+        BrokerRole = "queue";
 
         Configuration = new CreateQueueRequest(QueueName);
 
@@ -41,9 +50,44 @@ public class AmazonSqsQueue : Endpoint, IBrokerQueue, IMassTransitInteropEndpoin
     /// </summary>
     public ISqsEnvelopeMapper? Mapper { get; set; }
 
+    // AmazonSqsQueue inherits raw Endpoint (not the typed Endpoint<,>), so the
+    // generic base override doesn't apply. Surface "user wired their own SQS
+    // mapper or factory" through the same protected hook so the
+    // EndpointDescriptor reports InteropMode = "Custom" for SQS too. See #2641.
+    protected internal override bool HasCustomEnvelopeMapper =>
+        Mapper is not null || MapperFactory is not null;
+
     public string QueueName { get; }
 
     internal bool IsFifoQueue => QueueName.EndsWith(".fifo", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    ///     The <c>MessageDeduplicationId</c> to send for this envelope, or null for none. A FIFO queue
+    ///     without <c>ContentBasedDeduplication</c> rejects any send that carries no
+    ///     <c>MessageDeduplicationId</c> at all, and Wolverine's own circuit-resume ping never has one --
+    ///     so a latched sender could never probe its way back on such a queue. Fall back to the envelope
+    ///     id for pings, which is unique per probe and is exactly the semantic we want (two pings must
+    ///     never dedupe against each other, which content-based deduplication would happily do since every
+    ///     ping body is identical). See GH-3793.
+    /// </summary>
+    internal static string? DetermineDeduplicationId(Envelope envelope)
+    {
+        if (envelope.DeduplicationId.IsNotEmpty())
+        {
+            return envelope.DeduplicationId;
+        }
+
+        return envelope.IsPing() ? envelope.Id.ToString() : null;
+    }
+
+    /// <summary>
+    ///     Opt this standard (non-FIFO) queue into Amazon SQS fair queues by mapping
+    ///     <see cref="Envelope.GroupId"/> to the SQS <c>MessageGroupId</c> on outgoing messages.
+    ///     This has no effect on FIFO queues, which always set <c>MessageGroupId</c>, and implies
+    ///     no ordering or deduplication semantics. Default is <c>false</c>. See
+    ///     https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/using-messagegroupid-property.html
+    /// </summary>
+    public bool EnableFairQueueMessageGroups { get; set; }
 
     // Set by the AmazonSqsTransport parent
     internal string? QueueUrl { get; private set; }
@@ -82,14 +126,79 @@ public class AmazonSqsQueue : Endpoint, IBrokerQueue, IMassTransitInteropEndpoin
     public int MaxNumberOfMessages { get; set; } = 10;
 
     /// <summary>
-    ///     Additional configuration for how an SQS queue should be created
+    ///     Hard Amazon SQS limit on the number of entries in a single <c>DeleteMessageBatch</c>
+    ///     request.
     /// </summary>
-    public CreateQueueRequest Configuration { get; }
+    public const int MaximumDeleteBatchSize = 10;
+
+    private int _deleteMessageBatchSize = MaximumDeleteBatchSize;
 
     /// <summary>
-    ///     Name of the dead letter queue for this SQS queue where failed messages will be moved
+    ///     How many message deletions this listener coalesces into a single
+    ///     <c>DeleteMessageBatch</c> call. Completion is otherwise one HTTP round trip -- and one
+    ///     billable API call -- per message, so a 10 message receive is paid for with 10 sequential
+    ///     deletes. Valid values are 1 through 10; 1 reverts to a delete per message. Default 10.
+    ///     See GH-3493.
     /// </summary>
-    public string? DeadLetterQueueName { get; set; } = AmazonSqsTransport.DeadLetterQueueName;
+    public int DeleteMessageBatchSize
+    {
+        get => _deleteMessageBatchSize;
+        set
+        {
+            if (value < 1 || value > MaximumDeleteBatchSize)
+            {
+                throw new ArgumentOutOfRangeException(nameof(DeleteMessageBatchSize),
+                    $"Must be between 1 and {MaximumDeleteBatchSize}");
+            }
+
+            _deleteMessageBatchSize = value;
+        }
+    }
+
+    /// <summary>
+    ///     The longest a completed message waits for its delete batch to fill before the batch is
+    ///     sent anyway. This is a maximum batch age, not a quiet period. Default 50 milliseconds --
+    ///     far inside any usable visibility timeout. See GH-3493.
+    /// </summary>
+    public TimeSpan DeleteMessageBatchTimeout { get; set; } = TimeSpan.FromMilliseconds(50);
+
+    /// <summary>
+    ///     Additional configuration for how an SQS queue should be created
+    /// </summary>
+    [ChildDescription]
+    public CreateQueueRequest Configuration { get; }
+
+    private string? _deadLetterQueueName;
+    private bool _deadLetterQueueNameSetExplicitly;
+
+    /// <summary>
+    ///     Name of the dead letter queue for this SQS queue where failed messages will be moved.
+    ///     Resolution order:
+    ///     <list type="number">
+    ///       <item>If <c>ConfigureDeadLetterQueue</c> or <c>DisableDeadLetterQueueing</c> ran on
+    ///       this listener, the explicit value (including <c>null</c> for "disabled") wins.</item>
+    ///       <item>Otherwise, falls back to
+    ///       <see cref="AmazonSqsTransport.DefaultDeadLetterQueueName"/> on the parent transport
+    ///       — which itself defaults to <see cref="AmazonSqsTransport.DeadLetterQueueName"/>
+    ///       (<c>"wolverine-dead-letter-queue"</c>) for hosts that haven't opted into a custom
+    ///       transport-wide default.</item>
+    ///     </list>
+    ///     This means an unconfigured queue picks up whatever the transport's default is at the
+    ///     point Wolverine reads the property — the order between
+    ///     <c>UseAmazonSqsTransport().DefaultDeadLetterQueueName(...)</c> and the per-listener
+    ///     bootstrap calls doesn't matter.
+    /// </summary>
+    public string? DeadLetterQueueName
+    {
+        get => _deadLetterQueueNameSetExplicitly
+            ? _deadLetterQueueName
+            : _parent.DefaultDeadLetterQueueName;
+        set
+        {
+            _deadLetterQueueName = value;
+            _deadLetterQueueNameSetExplicitly = true;
+        }
+    }
 
     /// <summary>
     ///     Optional list of message attribute names to request in ReceiveMessage.
@@ -198,6 +307,58 @@ public class AmazonSqsQueue : Endpoint, IBrokerQueue, IMassTransitInteropEndpoin
         return new DefaultSqsEnvelopeMapper();
     }
 
+    /// <summary>
+    ///     Can the requested delivery time of this envelope be honored natively by SQS through the
+    ///     per-message DelaySeconds parameter? Standard queues only (FIFO queues support just a
+    ///     queue-level delay), and only within the 15 minute SQS maximum
+    /// </summary>
+    internal bool CanScheduleNatively(Envelope envelope, DateTimeOffset utcNow)
+    {
+        if (IsFifoQueue)
+        {
+            return false;
+        }
+
+        if (envelope.ScheduledTime is not { } scheduledTime)
+        {
+            return true;
+        }
+
+        return scheduledTime.Subtract(utcNow).TotalSeconds <= MaximumSqsDelaySeconds;
+    }
+
+    /// <summary>
+    ///     The DelaySeconds value to stamp on an outgoing SQS message for this envelope, or 0 for
+    ///     "send immediately". Only applies to standard queues; SQS rejects per-message delays on
+    ///     FIFO queues
+    /// </summary>
+    internal int NativeDelaySecondsFor(Envelope envelope, DateTimeOffset utcNow, ILogger logger)
+    {
+        if (IsFifoQueue || envelope.ScheduledTime is not { } scheduledTime)
+        {
+            return 0;
+        }
+
+        var remaining = scheduledTime.Subtract(utcNow);
+        if (remaining <= TimeSpan.Zero)
+        {
+            return 0;
+        }
+
+        var seconds = (int)Math.Ceiling(remaining.TotalSeconds);
+        if (seconds <= MaximumSqsDelaySeconds)
+        {
+            return seconds;
+        }
+
+        // Defensive only. Wolverine's routing falls back to its own message scheduling for
+        // delays past the SQS maximum, so this should be unreachable through normal publishing
+        logger.LogWarning(
+            "Envelope {EnvelopeId} reached the SQS sender for queue {Queue} with a scheduled delay of {Seconds}s, which exceeds the SQS maximum of {MaximumSeconds}s. The message will be delivered after the maximum delay instead",
+            envelope.Id, QueueName, seconds, MaximumSqsDelaySeconds);
+        return MaximumSqsDelaySeconds;
+    }
+
     internal async Task SendMessageAsync(Envelope envelope, ILogger logger)
     {
         if (!_initialized)
@@ -211,14 +372,26 @@ public class AmazonSqsQueue : Endpoint, IBrokerQueue, IMassTransitInteropEndpoin
         var request = new SendMessageRequest(QueueUrl, body);
         if (IsFifoQueue)
         {
-            if (envelope.GroupId.IsNotEmpty())
+            var groupId = Mapper.DetermineGroupId(envelope);
+            if (groupId.IsNotEmpty())
             {
-                request.MessageGroupId = envelope.GroupId;
+                request.MessageGroupId = groupId;
             }
 
-            if (envelope.DeduplicationId.IsNotEmpty())
+            var deduplicationId = DetermineDeduplicationId(envelope);
+            if (deduplicationId.IsNotEmpty())
             {
-                request.MessageDeduplicationId = envelope.DeduplicationId;
+                request.MessageDeduplicationId = deduplicationId;
+            }
+        }
+        else if (EnableFairQueueMessageGroups)
+        {
+            // SQS fair queues: a MessageGroupId on a standard queue improves tenant fairness.
+            // No deduplication semantics apply to standard queues. See GH-2886.
+            var groupId = Mapper.DetermineGroupId(envelope);
+            if (groupId.IsNotEmpty())
+            {
+                request.MessageGroupId = groupId;
             }
         }
 
@@ -226,6 +399,12 @@ public class AmazonSqsQueue : Endpoint, IBrokerQueue, IMassTransitInteropEndpoin
         {
             request.MessageAttributes ??= new Dictionary<string, MessageAttributeValue>();
             request.MessageAttributes.Add(attribute.Key, attribute.Value);
+        }
+
+        var delaySeconds = NativeDelaySecondsFor(envelope, DateTimeOffset.UtcNow, logger);
+        if (delaySeconds > 0)
+        {
+            request.DelaySeconds = delaySeconds;
         }
 
         await _parent.Client!.SendMessageAsync(request);
@@ -326,21 +505,70 @@ public class AmazonSqsQueue : Endpoint, IBrokerQueue, IMassTransitInteropEndpoin
         {
             throw new InvalidOperationException("The parent transport has not yet been initialized");
         }
-        
+
         Mapper ??= BuildMapper(runtime);
+
+        var logger = runtime.LoggerFactory.CreateLogger<AmazonSqsQueue>();
 
         if (QueueUrl.IsEmpty())
         {
-            await InitializeAsync(runtime.LoggerFactory.CreateLogger<AmazonSqsQueue>());
+            await InitializeAsync(logger);
         }
-        
-        return new SqsListener(runtime, this, _parent, receiver);
+
+        var listener = new SqsListener(runtime, this, _parent, receiver);
+
+        // Broker-per-tenant (GH-3304): the shared listener consumes the default account. Each tenant runs its own
+        // listener on its own account/region, stamping the tenant id onto inbound envelopes via TenantIdRule.
+        // Per-envelope completion routes back over the receiving connection through Envelope.Listener — the same
+        // CompoundListener multi-tenancy pattern used by RabbitMQ / NATS / Kafka.
+        if (_parent.Tenants.Any() && TenancyBehavior == TenancyBehavior.TenantAware)
+        {
+            var compound = new CompoundListener(Uri);
+            compound.Inner.Add(listener);
+
+            foreach (var tenant in _parent.Tenants)
+            {
+                var tenantQueue = BuildTenantSibling(tenant);
+                if (tenantQueue.QueueUrl.IsEmpty())
+                {
+                    await tenantQueue.InitializeAsync(logger);
+                }
+
+                var tenantReceiver = new ReceiverWithRules(receiver, [new TenantIdRule(tenant.TenantId)]);
+                compound.Inner.Add(new SqsListener(runtime, tenantQueue, tenant.Transport, tenantReceiver));
+            }
+
+            return compound;
+        }
+
+        return listener;
     }
 
     protected override ISender CreateSender(IWolverineRuntime runtime)
     {
         Mapper ??= BuildMapper(runtime);
-        
+
+        // Broker-per-tenant (GH-3304): route by Envelope.TenantId to a per-tenant sender bound to that tenant's own
+        // account, falling back to the shared account for the default/untenanted path.
+        //
+        // Both the tenant senders AND the default sender they fall back to must be simple fire-and-forget ISenders:
+        // TenantedSender intentionally does NOT implement ISenderRequiresCallback (GH-2361), and it does not forward
+        // RegisterCallback to the senders beneath it. A BatchedSender (SqsSenderProtocol) registered under it would
+        // therefore never receive its ISenderCallback and would silently drop every message. InlineSqsSender sends
+        // directly and needs no callback — the same fire-and-forget model the RabbitMQ / NATS / Kafka per-tenant
+        // senders use.
+        if (_parent.Tenants.Any() && TenancyBehavior == TenancyBehavior.TenantAware)
+        {
+            var tenantedSender = new TenantedSender(Uri, _parent.TenantedIdBehavior, new InlineSqsSender(runtime, this));
+            foreach (var tenant in _parent.Tenants)
+            {
+                var tenantQueue = BuildTenantSibling(tenant);
+                tenantedSender.RegisterSender(tenant.TenantId, new InlineSqsSender(runtime, tenantQueue));
+            }
+
+            return tenantedSender;
+        }
+
         if (Mode == EndpointMode.Inline)
         {
             return new InlineSqsSender(runtime, this);
@@ -348,8 +576,62 @@ public class AmazonSqsQueue : Endpoint, IBrokerQueue, IMassTransitInteropEndpoin
 
         var protocol = new SqsSenderProtocol(runtime, this,
             _parent.Client ?? throw new InvalidOperationException("Parent transport has not been initialized"));
-        return new BatchedSender(this, protocol, runtime.Cancellation,
+        var sender = new BatchedSender(this, protocol, runtime.Cancellation,
             runtime.LoggerFactory.CreateLogger<SqsSenderProtocol>());
+
+        // FIFO queues only support a queue-level delay, never the per-message DelaySeconds, so
+        // scheduled sends to a FIFO queue always fall back to Wolverine's own message scheduling
+        if (IsFifoQueue)
+        {
+            sender.SupportsNativeScheduledSend = false;
+        }
+
+        return sender;
+    }
+
+    /// <summary>
+    /// Broker-per-tenant (GH-3304): materialize this queue's tenant-specific twin on the given tenant's child
+    /// transport — same queue name and configuration, but bound to the tenant's own SQS client and its own
+    /// QueueUrl cache (which is why a fresh endpoint is required rather than reusing this one). The tenant twin is
+    /// cached on the tenant transport's <see cref="AmazonSqsTransport.Queues"/> so repeated sender/listener builds
+    /// resolve the same instance.
+    /// </summary>
+    internal AmazonSqsQueue BuildTenantSibling(AmazonSqsTenant tenant)
+    {
+        var sibling = tenant.Transport.Queues[QueueName];
+
+        sibling.Mode = Mode;
+        sibling.EndpointName = EndpointName;
+        sibling.IsListener = IsListener;
+        sibling.Role = Role;
+        sibling.EnableFairQueueMessageGroups = EnableFairQueueMessageGroups;
+        sibling.VisibilityTimeout = VisibilityTimeout;
+        sibling.WaitTimeSeconds = WaitTimeSeconds;
+        sibling.MaxNumberOfMessages = MaxNumberOfMessages;
+        sibling.MessageAttributeNames = MessageAttributeNames;
+
+        // Share the interop mapper strategy so tenant traffic serializes identically to the shared account.
+        sibling.Mapper = Mapper;
+        sibling.MapperFactory = MapperFactory;
+
+        // Preserve queue-creation attributes (FIFO, retention, redrive, ...) for AutoProvision on the tenant account.
+        if (Configuration.Attributes is { Count: > 0 })
+        {
+            sibling.Configuration.Attributes ??= new Dictionary<string, string>();
+            foreach (var pair in Configuration.Attributes)
+            {
+                sibling.Configuration.Attributes[pair.Key] = pair.Value;
+            }
+        }
+
+        // Only pin the dead letter queue name when it was set explicitly on this listener; otherwise let the tenant
+        // queue fall back to the tenant transport's own DefaultDeadLetterQueueName (seeded in AmazonSqsTenant.Compile).
+        if (_deadLetterQueueNameSetExplicitly)
+        {
+            sibling.DeadLetterQueueName = _deadLetterQueueName;
+        }
+
+        return sibling;
     }
 
     protected override bool supportsMode(EndpointMode mode)
@@ -410,4 +692,9 @@ public class AmazonSqsQueue : Endpoint, IBrokerQueue, IMassTransitInteropEndpoin
         deadLetterSender = default;
         return false;
     }
+
+    public override DeadLetterStorageMode DeadLetterStorage =>
+        DeadLetterQueueName.IsNotEmpty() && !_parent.DisableDeadLetterQueues
+            ? DeadLetterStorageMode.Native
+            : DeadLetterStorageMode.Durable;
 }

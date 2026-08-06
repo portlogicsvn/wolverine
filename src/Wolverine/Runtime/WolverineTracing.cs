@@ -3,7 +3,7 @@ using JasperFx.Core;
 
 namespace Wolverine.Runtime;
 
-internal static class WolverineTracing
+public static class WolverineTracing
 {
     // See https://opentelemetry.io/docs/reference/specification/trace/semantic_conventions/messaging/ for more information
 
@@ -26,7 +26,6 @@ internal static class WolverineTracing
     public const string PayloadSizeBytes = "messaging.message_payload_size_bytes";
 
     #region sample_wolverine_open_telemetry_tracing_spans_and_activities
-
     /// <summary>
     /// ActivityEvent marking when an incoming envelope is discarded
     /// </summary>
@@ -36,7 +35,48 @@ internal static class WolverineTracing
     /// ActivityEvent marking when an incoming envelope is being moved to the error queue
     /// </summary>
     public const string MovedToErrorQueue = "wolverine.error.queued";
-    
+
+    /// <summary>
+    /// ActivityEvent marking that a Fault&lt;T&gt; was successfully auto-published
+    /// for an envelope being moved to the error queue or discarded.
+    /// </summary>
+    public const string FaultPublished = "wolverine.fault.published";
+
+    /// <summary>
+    /// ActivityEvent marking that auto-publishing a Fault&lt;T&gt; failed —
+    /// the underlying error is logged and metered, never thrown.
+    /// </summary>
+    public const string FaultPublishFailed = "wolverine.fault.publish.failed";
+
+    /// <summary>
+    /// ActivityEvent marking that auto-publishing a Fault&lt;T&gt; was skipped because
+    /// no routes are configured for the fault message type. Operator must wire either
+    /// a remote subscriber (PublishMessage&lt;Fault&lt;T&gt;&gt;().To(...)) or a local handler.
+    /// </summary>
+    public const string FaultNoRoute = "wolverine.fault.no_route";
+
+    /// <summary>
+    /// ActivityEvent marking that auto-publishing was suppressed because the message being
+    /// processed is itself a Fault&lt;T&gt; — Wolverine never publishes Fault&lt;Fault&lt;T&gt;&gt;.
+    /// Almost always indicates a misconfigured recursive handler.
+    /// </summary>
+    public const string FaultRecursionSuppressed = "wolverine.fault.recursion_suppressed";
+
+    /// <summary>
+    /// ActivityEvent marking that a send-side dead-letter movement bypassed
+    /// auto-Fault publishing (the fault subsystem is receive-side only). Emitted
+    /// only when fault publishing is globally enabled — operators using per-type
+    /// PublishFault opt-in only will not see this event.
+    /// </summary>
+    public const string FaultBypassedSendSide = "wolverine.fault.bypassed.send_side";
+
+    /// <summary>
+    /// ActivityEvent marking that an unknown-message-type DLQ movement bypassed
+    /// auto-Fault publishing (no T to construct Fault&lt;T&gt; for). Emitted only
+    /// when fault publishing is globally enabled.
+    /// </summary>
+    public const string FaultBypassedUnknownType = "wolverine.fault.bypassed.unknown_type";
+
     /// <summary>
     /// ActivityEvent marking when an incoming envelope does not have a known message
     /// handler and is being shunted to registered "NoHandler" actions
@@ -119,11 +159,111 @@ internal static class WolverineTracing
     /// </summary>
     public const string TooManySenderFailures = "TooManySenderFailures";
 
+    /// <summary>
+    /// Activity tag for the saga identity value when processing a saga message
+    /// </summary>
+    public const string SagaId = "wolverine.saga.id";
+
+    /// <summary>
+    /// Activity tag set when an envelope being processed carries a
+    /// <see cref="Envelope.ScheduledTime"/> — i.e. it was previously
+    /// scheduled for delayed delivery (saga timeout, deferred command,
+    /// retry-with-delay, …) rather than dispatched immediately. Useful
+    /// for trace queries that want to distinguish "first-time delivery"
+    /// from "scheduled re-entry" in saga workflows where timeout
+    /// messages re-enter the saga after a wait.
+    /// </summary>
+    public const string MessageScheduled = "wolverine.message.scheduled";
+
+    /// <summary>
+    /// Activity tag for the saga type full name when processing a saga message
+    /// </summary>
+    public const string SagaType = "wolverine.saga.type";
+
+    /// <summary>
+    /// Activity tag for the aggregate stream identity when processing an aggregate handler workflow
+    /// </summary>
+    public const string StreamId = "wolverine.stream.id";
+
+    /// <summary>
+    /// Activity tag for the aggregate type full name when processing an aggregate handler workflow
+    /// </summary>
+    public const string StreamType = "wolverine.stream.type";
+
+    /// <summary>
+    /// Span name emitted when a streaming handler is executing via StreamAsync
+    /// </summary>
+    public const string StreamingExecution = "wolverine.streaming";
+
+    /// <summary>
+    /// ActivityEvent emitted when the handler phase of a streaming invocation completes
+    /// and iteration of the returned sequence is about to begin
+    /// </summary>
+    public const string StreamingStarted = "wolverine.stream.handler.started";
+
+    /// <summary>
+    /// ActivityEvent emitted when a streaming handler sequence is fully consumed or cancelled
+    /// </summary>
+    public const string StreamingCompleted = "wolverine.stream.handler.completed";
+
+    /// <summary>
+    /// ActivityEvent emitted by the codegen wrapper around the user handler MethodCall
+    /// immediately before the handler body runs. Opt-in via
+    /// <c>WolverineOptions.Tracking.HandlerExecutionDiagnosticsEnabled</c>.
+    /// </summary>
+    public const string HandlerStarted = "wolverine.handler.started";
+
+    /// <summary>
+    /// ActivityEvent emitted by the codegen wrapper around the user handler MethodCall
+    /// immediately after the handler body returns successfully. Opt-in via
+    /// <c>WolverineOptions.Tracking.HandlerExecutionDiagnosticsEnabled</c>.
+    /// </summary>
+    public const string HandlerFinished = "wolverine.handler.finished";
+
+    /// <summary>
+    /// ActivityEvent emitted by the codegen wrapper around the FlushOutgoingMessages
+    /// MethodCall immediately before the call. Opt-in via
+    /// <c>WolverineOptions.Tracking.OutboxDiagnosticsEnabled</c>.
+    /// </summary>
+    public const string OutboxFlushing = "wolverine.outbox.flushing";
+
+    /// <summary>
+    /// ActivityEvent emitted by the codegen wrapper around the FlushOutgoingMessages
+    /// MethodCall immediately after the call returns. Opt-in via
+    /// <c>WolverineOptions.Tracking.OutboxDiagnosticsEnabled</c>.
+    /// </summary>
+    public const string OutboxPublished = "wolverine.outbox.published";
+
+    /// <summary>
+    /// Activity tag (milliseconds): elapsed time from producer <see cref="Envelope.SentAt"/>
+    /// to consumer activity start. Opt-in via
+    /// <c>WolverineOptions.Tracking.HandlerExecutionDiagnosticsEnabled</c>.
+    /// </summary>
+    public const string EnvelopeTransportLagMs = "wolverine.envelope.transport_lag_ms";
+
+    /// <summary>
+    /// Activity tag (milliseconds): elapsed time from worker-queue handoff
+    /// (<see cref="Envelope.ReceivedAt"/>) to handler activity start. Opt-in via
+    /// <c>WolverineOptions.Tracking.HandlerExecutionDiagnosticsEnabled</c>.
+    /// </summary>
+    public const string EnvelopeReceiveDwellMs = "wolverine.envelope.receive_dwell_ms";
+
+    /// <summary>
+    /// Span name emitted around inbound envelope deserialization. Opt-in via
+    /// <c>WolverineOptions.Tracking.DeserializationSpanEnabled</c>.
+    /// </summary>
+    public const string Deserialize = "wolverine.deserialize";
+
     #endregion
 
     public static ActivitySource ActivitySource { get; } = new(
         "Wolverine",
         typeof(WolverineTracing).Assembly.GetName().Version!.ToString());
+
+    public static Activity? StartStreaming(Envelope envelope)
+    {
+        return StartEnvelopeActivity(StreamingExecution, envelope);
+    }
 
     public static Activity? StartSending(Envelope envelope)
     {
@@ -162,6 +302,44 @@ internal static class WolverineTracing
         if (value != null)
         {
             activity.SetTag(tagName, value);
+        }
+    }
+
+    /// <summary>
+    /// Stamp the handler activity with two timing tags derived from the envelope's
+    /// wall-clock anchors:
+    ///   <c>wolverine.envelope.transport_lag_ms</c> = (activity start − <see cref="Envelope.SentAt"/>),
+    ///   <c>wolverine.envelope.receive_dwell_ms</c> = (activity start − <see cref="Envelope.ReceivedAt"/>).
+    /// Skips negative values (clock drift) and skips the dwell tag when <c>ReceivedAt</c> is
+    /// null (envelope hasn't been through a receiver, e.g. inline invocation). No-ops on a
+    /// null activity so generated code can call this unconditionally.
+    ///
+    /// Public so the codegen frame
+    /// <c>ApplyExecutionDiagnosticTagsFrame</c> can emit a fully qualified static call
+    /// — this avoids a runtime if/then in the framework's <c>Executor</c> /
+    /// <c>HandlerPipeline</c> for the opt-in <c>HandlerExecutionDiagnosticsEnabled</c>
+    /// flag. When the flag is off the frame isn't emitted into the generated handler
+    /// at all, and this method is never called.
+    /// </summary>
+    public static void ApplyExecutionDiagnosticTags(Activity? activity, Envelope envelope)
+    {
+        if (activity is null) return;
+
+        var startUtc = activity.StartTimeUtc;
+
+        var lagMs = (startUtc - envelope.SentAt.UtcDateTime).TotalMilliseconds;
+        if (lagMs >= 0)
+        {
+            activity.SetTag(EnvelopeTransportLagMs, lagMs);
+        }
+
+        if (envelope.ReceivedAt.HasValue)
+        {
+            var dwellMs = (startUtc - envelope.ReceivedAt.Value.UtcDateTime).TotalMilliseconds;
+            if (dwellMs >= 0)
+            {
+                activity.SetTag(EnvelopeReceiveDwellMs, dwellMs);
+            }
         }
     }
 }

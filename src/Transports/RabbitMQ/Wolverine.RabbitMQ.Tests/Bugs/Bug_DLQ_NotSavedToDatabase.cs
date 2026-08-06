@@ -34,11 +34,9 @@ using Wolverine.RabbitMQ;
 using Wolverine.RabbitMQ.Internal;
 using Wolverine.Transports.Sending;
 using Xunit;
-using Xunit.Abstractions;
-
 namespace Wolverine.RabbitMQ.Tests.Bugs;
 
-public class Bug_DLQ_NotSavedToDatabase : IDisposable
+public class Bug_DLQ_NotSavedToDatabase : IAsyncDisposable
 {
     private readonly ITestOutputHelper _output;
     private IHost _host = null!;
@@ -48,11 +46,13 @@ public class Bug_DLQ_NotSavedToDatabase : IDisposable
         _output = output;
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
-        // Try to eliminate queues to keep them from accumulating
-        _host?.TeardownResources();
-        _host?.Dispose();
+        if (_host != null)
+        {
+            await _host.TeardownResources();
+            _host.Dispose();
+        }
     }
 
     [Fact]
@@ -71,9 +71,9 @@ public class Bug_DLQ_NotSavedToDatabase : IDisposable
                 opts.ListenToRabbitQueue(queueName).UseDurableInbox();
                 opts.PublishMessage<TestMessage>().ToRabbitQueue(queueName);
                 opts.Services.AddResourceSetupOnStartup(StartupAction.ResetState);
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
-        await _host.ResetResourceState();
+        await _host.ResetResourceState(cancellation: TestContext.Current.CancellationToken);
 
         // Debug print: check DeadLetterQueue and Mode
         var runtime = _host.Services.GetRequiredService<IWolverineRuntime>();
@@ -101,9 +101,9 @@ public class Bug_DLQ_NotSavedToDatabase : IDisposable
                 opts.ListenToRabbitQueue(queueName); // No UseDurableInbox()
                 opts.PublishMessage<TestMessage>().ToRabbitQueue(queueName);
                 opts.Services.AddResourceSetupOnStartup(StartupAction.ResetState);
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
-        await _host.ResetResourceState();
+        await _host.ResetResourceState(cancellation: TestContext.Current.CancellationToken);
 
         // Debug print: check DeadLetterQueue and Mode
         var runtime = _host.Services.GetRequiredService<IWolverineRuntime>();
@@ -137,9 +137,9 @@ public class Bug_DLQ_NotSavedToDatabase : IDisposable
                 opts.ListenToRabbitQueue(queueName);
                 opts.PublishMessage<TestMessage>().ToRabbitQueue(queueName);
                 opts.Services.AddResourceSetupOnStartup(StartupAction.ResetState);
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
-        await _host.ResetResourceState();
+        await _host.ResetResourceState(cancellation: TestContext.Current.CancellationToken);
 
         // Debug print: check DeadLetterQueue and Mode
         var runtime = _host.Services.GetRequiredService<IWolverineRuntime>();
@@ -202,9 +202,9 @@ public class Bug_DLQ_NotSavedToDatabase : IDisposable
                 opts.EnableAutomaticFailureAcks = false;
                 opts.UseRabbitMq().DisableDeadLetterQueueing().AutoProvision().AutoPurgeOnStartup();
                 opts.Services.AddResourceSetupOnStartup(StartupAction.ResetState);
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
-        await _host.ResetResourceState();
+        await _host.ResetResourceState(cancellation: TestContext.Current.CancellationToken);
 
         var runtime = _host.Services.GetRequiredService<IWolverineRuntime>();
         var transport = runtime.Options.RabbitMqTransport();
@@ -270,9 +270,9 @@ public class Bug_DLQ_NotSavedToDatabase : IDisposable
                 opts.ListenToRabbitQueue(queueName);
                 opts.PublishMessage<TestMessage>().ToRabbitQueue(queueName);
                 opts.Services.AddResourceSetupOnStartup(StartupAction.ResetState);
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
-        await _host.ResetResourceState();
+        await _host.ResetResourceState(cancellation: TestContext.Current.CancellationToken);
 
         var runtime = _host.Services.GetRequiredService<IWolverineRuntime>();
         var transport = runtime.Options.RabbitMqTransport();

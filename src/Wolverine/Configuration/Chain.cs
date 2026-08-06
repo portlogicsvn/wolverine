@@ -1,4 +1,5 @@
-﻿using System.Reflection;
+﻿using System.Diagnostics.CodeAnalysis;
+using System.Reflection;
 using System.Security.Claims;
 using JasperFx;
 using JasperFx.CodeGeneration;
@@ -116,6 +117,12 @@ public abstract class Chain<TChain, TModifyAttribute> : IChain
         return typeof(TChain).CanBeCastTo(parameters.Single().ParameterType);
     }
 
+    // Walks GetProperties + GetFields on a runtime-resolved message type to find
+    // [Audit]-decorated members. Audit attributes are opt-in; user message types
+    // that opt in are statically rooted via handler discovery (which carries
+    // RUC propagation upstream after chunk Q). Same chunk Q / R pattern.
+    [UnconditionalSuppressMessage("Trimming", "IL2070",
+        Justification = "[Audit] is opt-in on user message types; member walk fires at codegen time only. See AOT guide.")]
     protected void applyAuditAttributes(Type type)
     {
         foreach (var property in type.GetProperties())
@@ -135,10 +142,32 @@ public abstract class Chain<TChain, TModifyAttribute> : IChain
         }
     }
 
+    // GetMethods on runtime-resolved handler types to find static `Configure(IChain)`
+    // methods. Handler types are statically rooted via HandlerDiscovery; this fires
+    // at codegen time only. Same chunk Q (HandlerDiscovery.actionsFromType) pattern.
+    [UnconditionalSuppressMessage("Trimming", "IL2070",
+        Justification = "Handler-type method walk for static Configure methods at codegen time; handler types are statically rooted via HandlerDiscovery. See AOT guide.")]
     protected void applyAttributesAndConfigureMethods(GenerationRules rules, IServiceContainer container)
     {
         var handlers = HandlerCalls();
-        var configureMethods = handlers.Select(x => x.HandlerType).Distinct()
+        var handlerTypes = handlers.Select(x => x.HandlerType).Distinct().ToList();
+
+        // Interface-based configuration (compile-time safe): check for IHandlerConfiguration implementors first
+        var interfaceHandled = new HashSet<Type>();
+        foreach (var handlerType in handlerTypes)
+        {
+            if (handlerType.IsAssignableTo(typeof(IHandlerConfiguration)))
+            {
+                // Invoke via interface map to call the concrete type's static implementation
+                var map = handlerType.GetInterfaceMap(typeof(IHandlerConfiguration));
+                map.TargetMethods[0].Invoke(null, [this]);
+                interfaceHandled.Add(handlerType);
+            }
+        }
+
+        // Convention-based configuration (backward compatible): skip types already handled by the interface
+        var configureMethods = handlerTypes
+            .Where(t => !interfaceHandled.Contains(t))
             .SelectMany(x => x.GetMethods())
             .Where(isConfigureMethod);
 
@@ -292,6 +321,12 @@ public abstract class Chain<TChain, TModifyAttribute> : IChain
     private bool _appliedImpliedMiddleware;
     private int _middlewareOutgoingCounter = 100;
     
+    // GetMethods walks on runtime-resolved handler types to discover
+    // [WolverineBefore]/[WolverineAfter]/[WolverineOnException]/[WolverineFinally]
+    // attribute-marked methods. Handler types are statically rooted via
+    // HandlerDiscovery; this fires at codegen time only. Same chunk Q pattern.
+    [UnconditionalSuppressMessage("Trimming", "IL2075",
+        Justification = "Handler-type method walks for [Wolverine*] attributes at codegen time; handler types statically rooted via HandlerDiscovery. See AOT guide.")]
     public void ApplyImpliedMiddlewareFromHandlers(GenerationRules generationRules)
     {
         if (_appliedImpliedMiddleware) return;
@@ -430,6 +465,15 @@ public abstract class Chain<TChain, TModifyAttribute> : IChain
 
     public abstract void UseForResponse(MethodCall methodCall);
 
+    // typeof(Applier<>).CloseAndBuildAs<IApplier> closes the internal Applier<T>
+    // shape over a runtime-resolved IResponseAware type so the generic static-
+    // virtual ConfigureResponse hook can be invoked. Same chunk D / I / J / K
+    // CloseAndBuildAs pattern. IResponseAware is opt-in; user types are
+    // statically rooted via handler return-type discovery.
+    [UnconditionalSuppressMessage("Trimming", "IL2026",
+        Justification = "Applier<TResponseAware> closed over runtime IResponseAware type at codegen time; user types statically rooted via handler return discovery. See AOT guide.")]
+    [UnconditionalSuppressMessage("AOT", "IL3050",
+        Justification = "Applier<TResponseAware> closed over runtime IResponseAware type at codegen time; user types statically rooted via handler return discovery. See AOT guide.")]
     protected internal void tryApplyResponseAware()
     {
         var responseAwares = ReturnVariablesOfType(typeof(IResponseAware)).ToArray();
@@ -445,33 +489,53 @@ public abstract class Chain<TChain, TModifyAttribute> : IChain
                 $"{responseAwares[0].VariableType.FullNameInCode()} generates special response handling"));
     }
     
+    /// <summary>
+    /// Set to <see langword="true"/> when this chain's compiled code resolves at least one
+    /// dependency via service location (i.e., reaches into <see cref="IServiceProvider"/>
+    /// rather than receiving the dependency through a constructor / handler-method parameter).
+    /// Recorded at codegen time by <see cref="AssertServiceLocationsAreAllowed"/>.
+    ///
+    /// When a chain service-locates, the generated code creates a child scope, and Wolverine primes
+    /// that scope so a service-located <see cref="IMessageContext"/> / <see cref="IMessageBus"/>
+    /// (and integration-contributed instances such as Marten's <c>IDocumentSession</c>, via
+    /// <c>WolverineOptions.ScopingFrameSources</c>) resolves to the same instance the handler
+    /// received rather than a duplicate. See GH-3001 (which replaced the earlier AsyncLocal handoff
+    /// from GH-2583).
+    /// </summary>
+    public bool UsesServiceLocation { get; private set; }
+
     public void AssertServiceLocationsAreAllowed(ServiceLocationReport[] reports, IServiceProvider? services)
     {
         if (!reports.Any()) return;
-        
+
         var logger = services.GetLoggerOrDefault<ICodeFile>();
         var options = services!.GetService<WolverineOptions>() ?? new WolverineOptions();
 
         switch (options.ServiceLocationPolicy)
         {
             case ServiceLocationPolicy.AllowedButWarn:
+                UsesServiceLocation = true;
                 foreach (var report in reports)
                 {
                     if (report.ServiceDescriptor.IsKeyedService)
                     {
-                        logger.LogInformation("Utilizing service location for {Chain} for Service {ServiceType} ({Key}): {Reason}. See https://wolverinefx.net/guide/codegen.html", Description, report.ServiceDescriptor.ServiceType, report.ServiceDescriptor.ServiceKey, report.Reason);
+                        logger.LogWarning("Utilizing service location for {Chain} for Service {ServiceType} ({Key}): {Reason}. This will throw in Wolverine 6.0 when ServiceLocationPolicy.NotAllowed becomes the default. See https://wolverinefx.net/guide/codegen.html", Description, report.ServiceDescriptor.ServiceType, report.ServiceDescriptor.ServiceKey, report.Reason);
                     }
                     else
                     {
-                        logger.LogInformation("Utilizing service location for {Chain} for Service {ServiceType}: {Reason}. See https://wolverinefx.net/guide/codegen.html", Description, report.ServiceDescriptor.ServiceType, report.Reason);
+                        logger.LogWarning("Utilizing service location for {Chain} for Service {ServiceType}: {Reason}. This will throw in Wolverine 6.0 when ServiceLocationPolicy.NotAllowed becomes the default. See https://wolverinefx.net/guide/codegen.html", Description, report.ServiceDescriptor.ServiceType, report.Reason);
                     }
                 }
                 break;
-            
+
             case ServiceLocationPolicy.NotAllowed:
                 throw new InvalidServiceLocationException(this, reports);
-            
+
             default:
+                // ServiceLocationPolicy.AlwaysAllowed — no warning, but the chain still
+                // resolves at least one dependency via service location, so flag it for
+                // the executor wrap.
+                UsesServiceLocation = true;
                 return;
         }
 
@@ -484,7 +548,7 @@ public class InvalidServiceLocationException : Exception
     public static string ToMessage(IChain chain, ServiceLocationReport[] reports)
     {
         var writer = new StringWriter();
-        writer.WriteLine($"Found service locations while generating code for {chain.Description}, but the policy is configured as {nameof(WolverineOptions)}.{nameof(WolverineOptions.ServiceLocationPolicy)} = {ServiceLocationPolicy.NotAllowed}");
+        writer.WriteLine($"Found service locations while generating code for {chain.Description}, but {nameof(ServiceLocationPolicy)}.{nameof(ServiceLocationPolicy.NotAllowed)} is in effect (this will become the default in Wolverine 6.0).");
         writer.WriteLine("See https://wolverinefx.net/guide/codegen.html for more information");
         writer.WriteLine("Service location(s):");
         foreach (var report in reports)

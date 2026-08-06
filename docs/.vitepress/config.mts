@@ -111,6 +111,7 @@ const config: UserConfig<DefaultTheme.Config> = {
                         {text: 'Modular Monoliths', link: '/tutorials/modular-monolith'},
                         {text: 'Event Sourcing and CQRS with Marten', link: '/tutorials/cqrs-with-marten'},
                         {text: 'Event Sourcing and CQRS with Polecat', link: '/tutorials/cqrs-with-polecat'},
+                        {text: 'Using Wolverine with F#', link: '/tutorials/fsharp'},
                         {text: 'Railway Programming with Wolverine', link: '/tutorials/railway-programming'},
                         {text: 'Interoperability with Non-Wolverine Systems', link: '/tutorials/interop'},
                         {text: 'Leader Election and Agents', link: '/tutorials/leader-election'},
@@ -118,6 +119,7 @@ const config: UserConfig<DefaultTheme.Config> = {
                         {text: 'Dead Letter Queues', link: '/tutorials/dead-letter-queues'},
                         {text: 'Idempotency in Messaging', link: '/tutorials/idempotency'},
                         {text: 'Multi-Tenancy', link: '/tutorials/multi-tenancy'},
+                        {text: 'Command Line Diagnostics', link: '/tutorials/command-line-diagnostics'},
                         {text: 'Migrating from Minimal APIs', link: '/tutorials/from-minimal-api'},
                         {text: 'Migrating from MVC Controllers', link: '/tutorials/from-mvc'},
                         {text: 'Migrating from MVC/Minimal API Filters', link: '/tutorials/middleware-migration'}
@@ -130,12 +132,17 @@ const config: UserConfig<DefaultTheme.Config> = {
                         {text: 'Basic Concepts', link: '/guide/basics'},
                         {text: 'Configuration', link: '/guide/configuration'},
                         {text: 'Runtime Architecture', link: '/guide/runtime'},
+                        {text: 'Message Encryption', link: '/guide/runtime/encryption'},
+                        {text: 'Heartbeats', link: '/guide/runtime/heartbeats'},
                         {text: 'Instrumentation and Metrics', link: '/guide/logging'},
                         {text: 'Diagnostics', link: '/guide/diagnostics'},
+                        {text: 'Health Checks', link: '/guide/health-checks'},
                         {text: 'Serverless Hosting', link: '/guide/serverless'},          
                         {text: 'Test Automation Support', link: '/guide/testing'},
                         {text: 'Command Line Integration', link: '/guide/command-line'},
+                        {text: 'Aspire Dashboard Integration', link: '/guide/aspire'},
                         {text: 'Code Generation', link: '/guide/codegen'},
+                        {text: 'AOT Publishing', link: '/guide/aot'},
                         {text: 'Extensions', link: '/guide/extensions'},
                         {text: 'Sample Projects', link: '/guide/samples'}
                     ]
@@ -187,7 +194,8 @@ const config: UserConfig<DefaultTheme.Config> = {
                                         {text: 'Topics', link:'/guide/messaging/transports/rabbitmq/topics'},
                                         {text: 'Interoperability', link:'/guide/messaging/transports/rabbitmq/interoperability'},
                                         {text: 'Connecting to Multiple Brokers', link: '/guide/messaging/transports/rabbitmq/multiple-brokers'},
-                                        {text: 'Multi-Tenancy', link: '/guide/messaging/transports/rabbitmq/multi-tenancy'}
+                                        {text: 'Multi-Tenancy', link: '/guide/messaging/transports/rabbitmq/multi-tenancy'},
+                                        {text: 'Performance Tuning', link: '/guide/messaging/transports/rabbitmq/performance'}
                                     ]},
                                 {text: 'Azure Service Bus', link: '/guide/messaging/transports/azureservicebus/', items:[
                                         {text: 'Publishing', link:'/guide/messaging/transports/azureservicebus/publishing'},
@@ -204,13 +212,15 @@ const config: UserConfig<DefaultTheme.Config> = {
                                     ]},
                                 {text: 'Amazon SQS', link: '/guide/messaging/transports/sqs/', items:[
                                         {text: 'Publishing', link:'/guide/messaging/transports/sqs/publishing'},
+                                        {text: 'Scheduled Delivery', link:'/guide/messaging/transports/sqs/scheduled'},
                                         {text: 'Listening', link:'/guide/messaging/transports/sqs/listening'},
                                         {text: 'Dead Letter Queues', link:'/guide/messaging/transports/sqs/deadletterqueues'},
                                         {text: 'Configuring Queues', link:'/guide/messaging/transports/sqs/queues'},
                                         {text: 'Conventional Routing', link:'/guide/messaging/transports/sqs/conventional-routing'},
                                         {text: 'Interoperability', link:'/guide/messaging/transports/sqs/interoperability'},
                                         {text: 'MessageAttributes', link:'/guide/messaging/transports/sqs/message-attributes'},
-                                        {text: 'FIFO Queues', link:'/guide/messaging/transports/sqs/fifo-queues'}
+                                        {text: 'FIFO Queues', link:'/guide/messaging/transports/sqs/fifo-queues'},
+                                        {text: 'Fair Queues', link:'/guide/messaging/transports/sqs/fair-queues'}
                                     ]},
                                 {text: 'Amazon SNS', link: '/guide/messaging/transports/sns'},
                                 {text: 'TCP', link: '/guide/messaging/transports/tcp'},
@@ -219,7 +229,8 @@ const config: UserConfig<DefaultTheme.Config> = {
                                         {text: 'Listening', link:'/guide/messaging/transports/gcp-pubsub/listening'},
                                         {text: 'Dead Letter Queues', link:'/guide/messaging/transports/gcp-pubsub/deadlettering'},
                                         {text: 'Conventional Routing', link:'/guide/messaging/transports/gcp-pubsub/conventional-routing'},
-                                        {text: 'Interoperability', link:'/guide/messaging/transports/gcp-pubsub/interoperability'}
+                                        {text: 'Interoperability', link:'/guide/messaging/transports/gcp-pubsub/interoperability'},
+                                        {text: 'Customisation', link:'/guide/messaging/transports/gcp-pubsub/customisation'}
                                     ]},
                                 {text: 'Apache Pulsar', link: '/guide/messaging/transports/pulsar'},
                                 {text: 'Sql Server', link: '/guide/messaging/transports/sqlserver'},
@@ -231,7 +242,8 @@ const config: UserConfig<DefaultTheme.Config> = {
                                 {text: 'Kafka', link: '/guide/messaging/transports/kafka'},
                                 {text: 'SignalR', link: '/guide/messaging/transports/signalr'},
                                 {text: 'Redis', link: '/guide/messaging/transports/redis'},
-                                {text: 'External Database Tables', link: '/guide/messaging/transports/external-tables'}
+                                {text: 'External Database Tables', link: '/guide/messaging/transports/external-tables'},
+                                {text: 'Salesforce Pub/Sub (community)', link: 'https://github.com/meyc-v1/wolverinefxcontrib-salesforcepubsub'}
                             ]
                         },
                         {text: 'Partitioned Sequential Messaging', link: '/guide/messaging/partitioning'},
@@ -239,6 +251,7 @@ const config: UserConfig<DefaultTheme.Config> = {
                         {text: 'Endpoint Specific Operations', link: '/guide/messaging/endpoint-operations'},
                         {text: 'Broadcast to a Specific Topic', link: '/guide/messaging/broadcast-to-topic'},
                         {text: 'Message Expiration', link: '/guide/messaging/expiration'},
+                        {text: 'Header Propagation', link: '/guide/messaging/header-propagation'},
                         {text: 'Endpoint Policies', link: '/guide/messaging/policies'},
                         {text: 'Sending Error Handling', link: '/guide/messaging/sending-error-handling'}
                     ]
@@ -263,6 +276,7 @@ const config: UserConfig<DefaultTheme.Config> = {
                         {text: 'Exception Handling', link: '/guide/http/exception-handling'},
                         {text: 'Policies', link: '/guide/http/policies.md'},
                         {text: 'OpenAPI Metadata', link: '/guide/http/metadata'},
+                        {text: 'API Versioning', link: '/guide/http/versioning'},
                         {text: 'Using as Mediator', link: '/guide/http/mediator'},
                         {text: 'Multi-Tenancy and ASP.Net Core', link: '/guide/http/multi-tenancy'},
                         {text: 'Publishing Messages', link: '/guide/http/messaging'},
@@ -278,7 +292,18 @@ const config: UserConfig<DefaultTheme.Config> = {
                         {text: 'Rate Limiting', link: '/guide/http/rate-limiting'},
                         {text: 'Streaming and SSE', link: '/guide/http/streaming'},
                         {text: 'HTTP Messaging Transport', link: '/guide/http/transport'},
-                        {text: 'Integration Testing with Alba', link: '/guide/http/integration-testing'}
+                        {text: 'Integration Testing with Alba', link: '/guide/http/integration-testing'},
+                        {text: 'gRPC Services', link: '/guide/grpc/', collapsed: true, items: [
+                                {text: 'How gRPC Handlers Work', link: '/guide/grpc/handlers'},
+                                {text: 'Code-First and Proto-First Contracts', link: '/guide/grpc/contracts'},
+                                {text: 'Error Handling', link: '/guide/grpc/errors'},
+                                {text: 'Streaming', link: '/guide/grpc/streaming'},
+                                {text: 'Typed gRPC Clients', link: '/guide/grpc/client'},
+                                {text: 'Multi-Tenancy', link: '/guide/grpc/multi-tenancy'},
+                                {text: 'Integration with Sagas', link: '/guide/grpc/sagas'},
+                                {text: 'Samples', link: '/guide/grpc/samples'}
+                            ]
+                        }
                     ]
                 },
                 {
@@ -287,17 +312,20 @@ const config: UserConfig<DefaultTheme.Config> = {
                     items: [
                         {text: 'Durable Inbox and Outbox Messaging', link: '/guide/durability/'},
                         {text: 'Troubleshooting and Leadership Election', link: '/guide/durability/leadership-and-troubleshooting'},
+                        {text: 'Connection Budgets', link: '/guide/durability/connection-budgets'},
                         {text: 'Sagas', link: '/guide/durability/sagas'},
                         {text: 'Marten Integration', link: '/guide/durability/marten/',  collapsed: false, items: [
                                 {text: 'Transactional Middleware', link: '/guide/durability/marten/transactional-middleware'},
                                 {text: 'Transactional Outbox Support', link: '/guide/durability/marten/outbox'},
                                 {text: 'Transactional Inbox Support', link: '/guide/durability/marten/inbox'},
                                 {text: 'Operation Side Effects', link: '/guide/durability/marten/operations'},
+                                {text: 'Fetching Query Specifications', link: '/guide/durability/marten/fetch-specifications'},
                                 {text: 'Aggregate Handlers and Event Sourcing', link: '/guide/durability/marten/event-sourcing'},
                                 {text: 'Event Forwarding to Wolverine', link: '/guide/durability/marten/event-forwarding'},
                                 {text: 'Event Subscriptions', link: '/guide/durability/marten/subscriptions'},
                                 {text: 'Subscription/Projection Distribution', link: '/guide/durability/marten/distribution'},
                                 {text: 'Sagas', link: '/guide/durability/marten/sagas'},
+                                {text: 'Process Manager via Handlers', link: '/guide/durability/marten/process-manager-via-handlers'},
                                 {text: 'Multi-Tenancy and Marten', link: '/guide/durability/marten/multi-tenancy'},
                                 {text: 'Ancillary Marten Stores', link: '/guide/durability/marten/ancillary-stores'},
                             ]},
@@ -312,6 +340,7 @@ const config: UserConfig<DefaultTheme.Config> = {
                                 {text: 'Subscription/Projection Distribution', link: '/guide/durability/polecat/distribution'},
                                 {text: 'Sagas', link: '/guide/durability/polecat/sagas'},
                                 {text: 'Multi-Tenancy and Polecat', link: '/guide/durability/polecat/multi-tenancy'},
+                                {text: 'Ancillary Polecat Stores', link: '/guide/durability/polecat/ancillary-stores'},
                             ]},
                         {text: 'Sql Server Integration', link: '/guide/durability/sqlserver'},
                         {text: 'PostgreSQL Integration', link: '/guide/durability/postgresql'},
@@ -327,11 +356,15 @@ const config: UserConfig<DefaultTheme.Config> = {
                                 {text: 'Saga Storage', link: '/guide/durability/efcore/sagas'},
                                 {text: 'Multi-Tenancy', link: '/guide/durability/efcore/multi-tenancy'},
                                 {text: 'Domain Events', link: '/guide/durability/efcore/domain-events'},
-                                {text: 'Database Migrations', link: '/guide/durability/efcore/migrations'}
+                                {text: 'Database Migrations', link: '/guide/durability/efcore/migrations'},
+                                {text: 'Query Plans', link: '/guide/durability/efcore/query-plans'},
+                                {text: 'Batch Queries', link: '/guide/durability/efcore/batch-queries'},
+                                {text: 'Initial Data', link: '/guide/durability/efcore/initial-data'}
 
                             ]},
                         {text: 'Managing Message Storage', link: '/guide/durability/managing'},
                         {text: 'Dead Letter Storage', link: '/guide/durability/dead-letter-storage'},
+                        {text: 'Claim Checks', link: '/guide/durability/claim-checks'},
                         {text: 'Idempotent Message Delivery', link:'/guide/durability/idempotency'}
                     ]
                 },

@@ -2,8 +2,11 @@ using JasperFx;
 using JasperFx.Core;
 using JasperFx.Core.Reflection;
 using Microsoft.Azure.Cosmos;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Logging;
+using Wolverine.Logging;
 using Wolverine.Persistence;
+using Wolverine.Persistence.Durability;
 using Wolverine.Runtime;
 using Wolverine.Runtime.Agents;
 using Wolverine.Runtime.WorkerQueues;
@@ -26,6 +29,7 @@ public partial class CosmosDbDurabilityAgent : IAgent
     private readonly CancellationTokenSource _cancellation = new();
     private readonly CancellationTokenSource _combined;
     private PersistenceMetrics? _metrics;
+    private readonly DurabilityHealthSignals _health;
 
     public CosmosDbDurabilityAgent(Container container, IWolverineRuntime runtime,
         CosmosDbMessageStore parent)
@@ -36,11 +40,12 @@ public partial class CosmosDbDurabilityAgent : IAgent
         _localQueue = (ILocalQueue)runtime.Endpoints.AgentForLocalQueue(TransportConstants.Scheduled);
         _settings = runtime.DurabilitySettings;
 
-        Uri = new Uri("cosmosdb://durability");
+        Uri = new Uri($"{PersistenceConstants.AgentScheme}://cosmosdb/durability");
 
         _logger = runtime.LoggerFactory.CreateLogger<CosmosDbDurabilityAgent>();
 
         _combined = CancellationTokenSource.CreateLinkedTokenSource(runtime.Cancellation, _cancellation.Token);
+        _health = new DurabilityHealthSignals(_settings);
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
@@ -69,16 +74,26 @@ public partial class CosmosDbDurabilityAgent : IAgent
             {
                 var lastExpiredTime = DateTimeOffset.UtcNow;
 
-                await tryRecoverIncomingMessages();
-                await tryRecoverOutgoingMessagesAsync();
-
-                if (_settings.DeadLetterQueueExpirationEnabled)
+                try
                 {
-                    var now = DateTimeOffset.UtcNow;
-                    if (now > lastExpiredTime.AddHours(1))
+                    await tryRecoverIncomingMessages();
+                    await tryRecoverOutgoingMessagesAsync();
+
+                    if (_settings.DeadLetterQueueExpirationEnabled)
                     {
-                        await tryDeleteExpiredDeadLetters();
+                        var now = DateTimeOffset.UtcNow;
+                        if (now > lastExpiredTime.AddHours(1))
+                        {
+                            await tryDeleteExpiredDeadLetters();
+                        }
                     }
+
+                    _health.RecordPollSuccess();
+                }
+                catch (Exception e) when (!_combined.IsCancellationRequested)
+                {
+                    _health.RecordPollFailure(e);
+                    _logger.LogError(e, "Recovery loop tick failed");
                 }
 
                 await timer.WaitForNextTickAsync(_combined.Token);
@@ -92,10 +107,39 @@ public partial class CosmosDbDurabilityAgent : IAgent
 
             while (!_combined.IsCancellationRequested)
             {
-                await runScheduledJobs();
+                try
+                {
+                    await runScheduledJobs();
+                    _health.RecordPollSuccess();
+                }
+                catch (Exception e) when (!_combined.IsCancellationRequested)
+                {
+                    _health.RecordPollFailure(e);
+                    _logger.LogError(e, "Scheduled-job loop tick failed");
+                }
+
                 await timer.WaitForNextTickAsync(_combined.Token);
             }
         }, _combined.Token);
+    }
+
+    public async Task<HealthCheckResult> CheckHealthAsync(HealthCheckContext context,
+        CancellationToken cancellationToken = default)
+    {
+        PersistedCounts? counts = null;
+        if (Status == AgentStatus.Running)
+        {
+            try
+            {
+                counts = await _parent.Admin.FetchCountsAsync();
+            }
+            catch (Exception e)
+            {
+                _health.RecordPollFailure(e);
+            }
+        }
+
+        return _health.Evaluate(Status, Uri, counts, DateTimeOffset.UtcNow);
     }
 
     private async Task tryDeleteExpiredDeadLetters()
@@ -132,9 +176,9 @@ public partial class CosmosDbDurabilityAgent : IAgent
         }
     }
 
-    public Task StopAsync(CancellationToken cancellationToken)
+    public async Task StopAsync(CancellationToken cancellationToken)
     {
-        _cancellation.Cancel();
+        await _cancellation.CancelAsync();
 
         if (_metrics != null)
         {
@@ -150,10 +194,21 @@ public partial class CosmosDbDurabilityAgent : IAgent
         {
             _scheduledJob.SafeDispose();
         }
-
-        return Task.CompletedTask;
     }
 
     public Uri Uri { get; set; }
     public AgentStatus Status { get; set; }
+
+    /// <summary>
+    /// Human-readable description for monitoring tools — see
+    /// <see cref="IAgent.Description"/>.
+    /// </summary>
+    public string Description => $"Wolverine Cosmos DB durability agent for {Uri} — recovers persisted inbox/outbox messages and runs scheduled jobs against the Cosmos DB message store.";
+
+    /// <summary>
+    /// True once <see cref="StartTimers"/> has wired up the recovery and scheduled-job
+    /// background loops. Exposed for diagnostic and test inspection so callers can detect
+    /// the multi-instance "two pollers" condition without reflection. See #2623.
+    /// </summary>
+    public bool IsPolling => _recoveryTask is not null || _scheduledJob is not null;
 }

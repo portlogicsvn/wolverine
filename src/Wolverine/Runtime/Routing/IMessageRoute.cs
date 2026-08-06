@@ -2,8 +2,7 @@ using Wolverine.Transports.Sending;
 
 namespace Wolverine.Runtime.Routing;
 
-#region sample_IMessageRoute
-
+#region sample_imessageroute
 /// <summary>
 /// Contains all the rules for where and how an outgoing message
 /// should be sent to a single subscriber
@@ -76,4 +75,11 @@ internal class TransformedMessageRouteSource : IMessageRouteSource
     }
 
     public bool IsAdditive => true;
+
+    public RouteSourceDescriptor Describe(IWolverineRuntime runtime) => new()
+    {
+        Name = "MessageTransformations",
+        Description = "Routes a registered transformed message type to wherever its destination type routes, applying the transformation when sending. Additive: transformed routes are combined with any others.",
+        IsAdditive = IsAdditive
+    };
 }

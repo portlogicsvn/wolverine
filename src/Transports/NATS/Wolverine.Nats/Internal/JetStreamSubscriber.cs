@@ -21,6 +21,7 @@ internal class JetStreamSubscriber : INatsSubscriber
     public JetStreamSubscriber(
         NatsEndpoint endpoint,
         NatsConnection connection,
+        INatsJSContext jetStreamContext,
         ILogger<NatsEndpoint> logger,
         JetStreamEnvelopeMapper mapper,
         string? subscriptionPattern = null
@@ -31,10 +32,12 @@ internal class JetStreamSubscriber : INatsSubscriber
         _logger = logger;
         _mapper = mapper;
         _subscriptionPattern = subscriptionPattern ?? endpoint.Subject;
-        _jetStreamContext = connection.CreateJetStreamContext();
+        _jetStreamContext = jetStreamContext;
     }
 
     public bool SupportsNativeDeadLetterQueue => _endpoint.DeadLetterQueueEnabled;
+
+    public TransportConnectionState ConnectionState => _connection.ConnectionState.ToTransportConnectionState();
 
     public async Task StartAsync(
         IListener listener,
@@ -53,13 +56,43 @@ internal class JetStreamSubscriber : INatsSubscriber
         var config = new ConsumerConfig
         {
             AckPolicy = ConsumerConfigAckPolicy.Explicit,
-            MaxDeliver = _endpoint.MaxDeliveryAttempts,
-            AckWait = TimeSpan.FromSeconds(30)
+            MaxDeliver = _endpoint.EffectiveMaxDeliveryAttempts,
+            AckWait = _endpoint.JetStreamDefaults.AckWait
         };
 
-        if (string.IsNullOrEmpty(_endpoint.ConsumerName))
+        // Apply the per-endpoint or transport-wide DeliverPolicy override when set.
+        // Leaving the property unset on the ConsumerConfig instance falls through to
+        // the NATS server default of DeliverPolicy.All — which replays every existing
+        // message in the stream when an auto-provisioned consumer first connects, so
+        // hosts that want "only new messages from now on" need to opt in here.
+        if (_endpoint.EffectiveDeliverPolicy is { } deliverPolicy)
         {
-            config.FilterSubject = _subscriptionPattern;
+            config.DeliverPolicy = deliverPolicy;
+        }
+
+        // Scope the consumer to this listener's subject. This used to be applied only to
+        // ephemeral consumers, so a durable consumer created through the fallback below
+        // was provisioned with no filter at all -- and every durable consumer sharing a
+        // stream then received every message published to that stream (GH-3676). The
+        // AutoProvision path in NatsEndpoint has always set it for named consumers; this
+        // is the runtime create-on-missing path catching up. Consumers that already exist
+        // are unaffected: GetConsumerAsync succeeding means this config is never sent
+        if (!string.IsNullOrEmpty(_subscriptionPattern))
+        {
+            // Native scheduling publishes its control message to {subject}{suffix} and no single
+            // NATS filter covers both that and {subject} -- '{subject}.>' excludes {subject}
+            // itself. On a work queue stream a control message no consumer covers is discarded
+            // outright, so the schedule is never registered and the send silently never arrives;
+            // a multi-filter consumer keeps the schedule subject owned by this endpoint
+            var scheduleSubject = _subscriptionPattern + _endpoint.ScheduleSubjectSuffix;
+            if (_endpoint.UsesNativeScheduledSend && !string.IsNullOrEmpty(_endpoint.ScheduleSubjectSuffix))
+            {
+                config.FilterSubjects = [_subscriptionPattern, scheduleSubject];
+            }
+            else
+            {
+                config.FilterSubject = _subscriptionPattern;
+            }
         }
 
         if (!string.IsNullOrEmpty(_endpoint.ConsumerName))
@@ -67,9 +100,9 @@ internal class JetStreamSubscriber : INatsSubscriber
             config.Name = _endpoint.ConsumerName;
             config.DurableName = _endpoint.ConsumerName;
 
-            if (!string.IsNullOrEmpty(_endpoint.QueueGroup))
+            if (!string.IsNullOrEmpty(_endpoint.EffectiveQueueGroup))
             {
-                config.DeliverGroup = _endpoint.QueueGroup;
+                config.DeliverGroup = _endpoint.EffectiveQueueGroup;
             }
 
             try
@@ -129,12 +162,17 @@ internal class JetStreamSubscriber : INatsSubscriber
 
                         // Skip messages without headers or without message-type header.
                         // These are typically NATS protocol messages that should not be processed by Wolverine.
-                        if (msg.Headers == null || !msg.Headers.ContainsKey("message-type"))
+                        if (_endpoint.MessageType == null && (msg.Headers == null || !msg.Headers.ContainsKey("message-type")))
                         {
+                            _logger.LogDebug(
+                                "Skipping NATS message without message-type header from subject {Subject}. DataLength={DataLength}, HasHeaders={HasHeaders}",
+                                msg.Subject,
+                                msg.Data.Length,
+                                msg.Headers != null
+                            );
                             await msg.AckAsync(cancellationToken: cancellation);
                             continue;
                         }
-
                         var envelope = new NatsEnvelope(null, msg);
                         _mapper.MapIncomingToEnvelope(envelope, msg);
 
@@ -181,7 +219,9 @@ internal class JetStreamSubscriber : INatsSubscriber
         {
             try
             {
+#pragma warning disable VSTHRD003 // Avoid awaiting foreign Tasks
                 await _consumerTask;
+#pragma warning restore VSTHRD003 // Avoid awaiting foreign Tasks
             }
             catch (OperationCanceledException)
             {

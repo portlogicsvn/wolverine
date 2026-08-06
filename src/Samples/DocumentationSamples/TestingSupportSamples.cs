@@ -18,7 +18,6 @@ public class TestingSupportSamples
     public static async Task stub_all_external_transports()
     {
         #region sample_conditionally_disable_transports
-
         var builder = Host.CreateApplicationBuilder();
         builder.UseWolverine(opts =>
         {
@@ -40,8 +39,7 @@ public class TestingSupportSamples
 
 public static class AccountHandler
 {
-    #region sample_AccountHandler_for_testing_examples
-
+    #region sample_accounthandler_for_testing_examples
     [Transactional]
     public static IEnumerable<object> Handle(
         DebitAccount command,
@@ -78,7 +76,6 @@ public static class AccountHandler
 public class AccountHandlerTests
 {
     #region sample_handle_a_debit_that_makes_the_account_have_a_low_balance
-
     [Fact]
     public void handle_a_debit_that_makes_the_account_have_a_low_balance()
     {
@@ -120,7 +117,6 @@ public class AccountHandlerTests
     [Fact]
 
     #region sample_using_tracked_session
-
     public async Task using_tracked_sessions()
     {
         // The point here is just that you somehow have
@@ -138,8 +134,7 @@ public class AccountHandlerTests
     #endregion
 
     #region sample_advanced_tracked_session_usage
-
-    public async Task using_tracked_sessions_advanced(IHost otherWolverineSystem)
+    private static async Task using_tracked_sessions_advanced(IHost otherWolverineSystem)
     {
         // The point here is just that you somehow have
         // an IHost for your application
@@ -174,7 +169,16 @@ public class AccountHandlerTests
 
             // Again, this is testing against processes, with another IHost
             .WaitForMessageToBeReceivedAt<LowBalanceDetected>(otherWolverineSystem)
-            
+
+            // Continue tracking until at least this many messages of the
+            // type have finished execution. Use this when messages are
+            // published out-of-band from the tracked execution -- e.g. by a
+            // Marten async daemon subscription or projection side effect --
+            // where the tracked session could otherwise complete during a
+            // momentary lull before every expected message has been published.
+            // Multiple calls combine, requiring every count to be reached.
+            .WaitForExecutionOf<AccountUpdated>(1)
+
             // Wolverine does this automatically, but it's sometimes
             // helpful to tell Wolverine to not track certain message
             // types during testing. Especially messages originating from
@@ -252,7 +256,7 @@ public class When_message_is_sent : IAsyncLifetime
 {
     private IHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         var hostBuilder = Host.CreateDefaultBuilder();
         hostBuilder.ConfigureServices(
@@ -321,6 +325,6 @@ public class When_message_is_sent : IAsyncLifetime
             .ShouldBeOfType<FileAdded>();
     }
 
-    public async Task DisposeAsync() => await _host.StopAsync();
+    public async ValueTask DisposeAsync() => await _host.StopAsync();
 }
 #endregion

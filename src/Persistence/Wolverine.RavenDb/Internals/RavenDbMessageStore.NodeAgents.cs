@@ -3,12 +3,16 @@ using Raven.Client.Documents;
 using Raven.Client.Documents.Operations;
 using Raven.Client.Documents.Queries;
 using Raven.Client.Documents.Session;
+using Raven.Client.Exceptions;
+using Raven.Client.Exceptions.Documents.Session;
 using Wolverine.Runtime.Agents;
 
 namespace Wolverine.RavenDb.Internals;
 
 public partial class RavenDbMessageStore : INodeAgentPersistence
 {
+    private const int NodePersistenceMaxAttempts = 25;
+
     public async Task ClearAllAsync(CancellationToken cancellationToken)
     {
         // Shouldn't really get called at runtime, so we're doing it crudely
@@ -29,21 +33,55 @@ public partial class RavenDbMessageStore : INodeAgentPersistence
 
     public async Task<int> PersistAsync(WolverineNode node, CancellationToken cancellationToken)
     {
-        using var session = _store.OpenAsyncSession(new SessionOptions
+        Exception? lastConflict = null;
+
+        for (var attempt = 1; attempt <= NodePersistenceMaxAttempts; attempt++)
         {
-            TransactionMode = TransactionMode.ClusterWide
-        });
+            try
+            {
+                using var session = _store.OpenAsyncSession(new SessionOptions
+                {
+                    TransactionMode = TransactionMode.ClusterWide
+                });
+                // RavenDB rejects cluster-wide transactions combined with optimistic concurrency.
+                // Disable it explicitly so a consumer-enabled convention doesn't break this session.
+                session.Advanced.UseOptimisticConcurrency = false;
 
-        var sequence = await session.LoadAsync<NodeSequence>(NodeSequence.SequenceId, cancellationToken);
-        sequence ??= new NodeSequence();
+                var sequence = await session.LoadAsync<NodeSequence>(NodeSequence.SequenceId, cancellationToken);
+                sequence ??= new NodeSequence();
 
-        node.AssignedNodeNumber = ++sequence.Count;
+                node.AssignedNodeNumber = ++sequence.Count;
 
-        await session.StoreAsync(sequence, cancellationToken);
-        await session.StoreAsync(node, cancellationToken);
-        await session.SaveChangesAsync(cancellationToken);
+                await session.StoreAsync(sequence, cancellationToken);
+                await session.StoreAsync(node, cancellationToken);
+                await session.SaveChangesAsync(cancellationToken);
 
-        return node.AssignedNodeNumber;
+                return node.AssignedNodeNumber;
+            }
+            catch (Exception e) when (isNodeSequenceConcurrencyConflict(e))
+            {
+                lastConflict = e;
+
+                if (attempt == NodePersistenceMaxAttempts)
+                {
+                    break;
+                }
+
+                // Linear backoff with jitter to avoid synchronized retries (thundering herd)
+                // when many nodes contend for the sequence at startup.
+                var jitter = Random.Shared.Next(0, 20);
+                await Task.Delay(TimeSpan.FromMilliseconds(20 * attempt + jitter), cancellationToken);
+            }
+        }
+
+        throw new InvalidOperationException(
+            $"Unable to persist Wolverine node {node.NodeId} after {NodePersistenceMaxAttempts} attempts because RavenDB node sequence allocation kept conflicting.",
+            lastConflict);
+    }
+
+    private static bool isNodeSequenceConcurrencyConflict(Exception exception)
+    {
+        return exception is ClusterTransactionConcurrencyException or ConcurrencyException;
     }
 
     public async Task DeleteAsync(Guid nodeId, int assignedNodeNumber)
@@ -104,6 +142,8 @@ public partial class RavenDbMessageStore : INodeAgentPersistence
         {
             TransactionMode = TransactionMode.ClusterWide
         });
+        // Cluster-wide transactions can't run with optimistic concurrency. See PersistAsync.
+        session.Advanced.UseOptimisticConcurrency = false;
 
         foreach (var restriction in restrictions)
         {
@@ -159,10 +199,21 @@ public partial class RavenDbMessageStore : INodeAgentPersistence
     public async Task AssignAgentsAsync(Guid nodeId, IReadOnlyList<Uri> agents, CancellationToken cancellationToken)
     {
         using var session = _store.OpenAsyncSession();
+        // Agent assignments are idempotent: a re-assignment should overwrite the existing
+        // record. Load first so RavenDB uses the loaded change vector at save time and the
+        // write works whether or not the consumer has optimistic concurrency enabled.
         foreach (var agent in agents)
         {
-            var agentAssignment = new AgentAssignment(agent, nodeId);
-            await session.StoreAsync(agentAssignment, cancellationToken);
+            var id = AgentAssignment.ToId(agent);
+            var existing = await session.LoadAsync<AgentAssignment>(id, cancellationToken);
+            if (existing == null)
+            {
+                await session.StoreAsync(new AgentAssignment(agent, nodeId), id, cancellationToken);
+            }
+            else
+            {
+                existing.NodeId = nodeId;
+            }
         }
 
         await session.SaveChangesAsync(token: cancellationToken);
@@ -180,8 +231,19 @@ public partial class RavenDbMessageStore : INodeAgentPersistence
     {
         using var session = _store.OpenAsyncSession();
 
-        var agentAssignment = new AgentAssignment(agentUri, nodeId);
-        await session.StoreAsync(agentAssignment, agentAssignment.Id, cancellationToken);
+        // Agent assignments are idempotent: re-electing the same agent should overwrite the
+        // existing record. Load first so RavenDB uses the loaded change vector at save time
+        // instead of trying to write a brand-new document over an existing one.
+        var id = AgentAssignment.ToId(agentUri);
+        var existing = await session.LoadAsync<AgentAssignment>(id, cancellationToken);
+        if (existing == null)
+        {
+            await session.StoreAsync(new AgentAssignment(agentUri, nodeId), id, cancellationToken);
+        }
+        else
+        {
+            existing.NodeId = nodeId;
+        }
 
         await session.SaveChangesAsync(token: cancellationToken);
     }
@@ -197,10 +259,33 @@ public partial class RavenDbMessageStore : INodeAgentPersistence
         return node;
     }
 
-    public async Task MarkHealthCheckAsync(WolverineNode node, CancellationToken cancellationToken)
+    public async Task<bool> MarkHealthCheckAsync(WolverineNode node, CancellationToken cancellationToken)
     {
         using var session = _store.OpenAsyncSession();
-        session.Advanced.AddOrPatch(node.NodeId.ToString(), node, x => x.LastHealthCheck, DateTimeOffset.UtcNow);
+
+        // GH-3604 / D2: only patch an EXISTING node document. A miss means a peer deleted this still-live
+        // node's row; report it to the caller (which re-registers with real identity) instead of the old
+        // AddOrPatch, which blindly stored a skeleton node with no capabilities on a miss.
+        var existing = await session.LoadAsync<WolverineNode>(node.NodeId.ToString(), cancellationToken);
+        if (existing == null)
+        {
+            return false;
+        }
+
+        session.Advanced.Patch<WolverineNode, DateTimeOffset>(
+            node.NodeId.ToString(), x => x.LastHealthCheck, DateTimeOffset.UtcNow);
+        await session.SaveChangesAsync(cancellationToken);
+        return true;
+    }
+
+    public async Task ReregisterNodeAsync(WolverineNode node, CancellationToken cancellationToken)
+    {
+        // Store the node document with its preserved AssignedNodeNumber WITHOUT touching the NodeSequence
+        // (unlike PersistAsync, which allocates a fresh number). The caller restores the AgentAssignment
+        // documents separately.
+        using var session = _store.OpenAsyncSession();
+        session.Advanced.UseOptimisticConcurrency = false;
+        await session.StoreAsync(node, node.NodeId.ToString(), cancellationToken);
         await session.SaveChangesAsync(cancellationToken);
     }
 

@@ -3,12 +3,10 @@ using JasperFx;
 using JasperFx.Core.Reflection;
 using Marten;
 using Marten.Internal.Sessions;
-using Marten.Storage;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using JasperFx.Resources;
 using Shouldly;
-using Weasel.Core;
 using Wolverine;
 using Wolverine.Marten;
 using Wolverine.Marten.Publishing;
@@ -22,7 +20,7 @@ public class basic_marten_integration : PostgresqlContext, IAsyncLifetime
 {
     private IHost theHost = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         theHost = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -33,11 +31,13 @@ public class basic_marten_integration : PostgresqlContext, IAsyncLifetime
                     o.AutoCreateSchemaObjects = AutoCreate.All;
                 }).UseLightweightSessions().IntegrateWithWolverine();
 
+                opts.Discovery.DisableConventionalDiscovery();
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Services.AddResourceSetupOnStartup();
             }).StartAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await theHost.StopAsync();
         theHost.Dispose();
@@ -68,6 +68,8 @@ public class basic_marten_integration : PostgresqlContext, IAsyncLifetime
                     o.AutoCreateSchemaObjects = AutoCreate.All;
                 }).IntegrateWithWolverine(x => x.MessageStorageSchemaName = "wolverine");
 
+                opts.Discovery.DisableConventionalDiscovery();
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.Services.AddResourceSetupOnStartup();
             }).Start();
 
@@ -90,12 +92,12 @@ public class basic_marten_integration : PostgresqlContext, IAsyncLifetime
         using (var session = theHost.DocumentStore().LightweightSession())
         {
             session.Store(doc);
-            await session.SaveChangesAsync();
+            await session.SaveChangesAsync(TestContext.Current.CancellationToken);
         }
 
         using (var query = theHost.DocumentStore().QuerySession())
         {
-            (await query.LoadAsync<FakeDoc>(doc.Id)).ShouldNotBeNull();
+            (await query.LoadAsync<FakeDoc>(doc.Id, TestContext.Current.CancellationToken)).ShouldNotBeNull();
         }
     }
 

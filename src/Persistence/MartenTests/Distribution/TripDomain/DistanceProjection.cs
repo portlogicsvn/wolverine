@@ -1,10 +1,11 @@
 using JasperFx.Events;
 using Marten.Events;
+using JasperFx.Events.Projections;
 using Marten.Events.Projections;
 
 namespace MartenTests.Distribution.TripDomain;
 
-public class DistanceProjection : EventProjection
+public partial class DistanceProjection : EventProjection
 {
     public DistanceProjection()
     {

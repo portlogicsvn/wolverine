@@ -10,7 +10,7 @@ inline, you can execute that message for a specific tenant with this syntax:
 <!-- snippet: sample_invoking_by_tenant -->
 <a id='snippet-sample_invoking_by_tenant'></a>
 ```cs
-public static async Task invoking_by_tenant(IMessageBus bus)
+private static async Task invoking_by_tenant(IMessageBus bus)
 {
     // Invoke inline
     await bus.InvokeForTenantAsync("tenant1", new CreateTodo("Release Wolverine 1.0"));
@@ -20,7 +20,7 @@ public static async Task invoking_by_tenant(IMessageBus bus)
         await bus.InvokeForTenantAsync<TodoCreated>("tenant2", new CreateTodo("Update the Documentation"));
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/MultiTenantedTodoService/MultiTenantedTodoWebService.Tests/end_to_end.cs#L101-L113' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_invoking_by_tenant' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/MultiTenantedTodoService/MultiTenantedTodoWebService.Tests/end_to_end.cs#L95-L106' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_invoking_by_tenant' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 When using this syntax, any [cascaded messages](/guide/handlers/cascading) will also be tagged with the same tenant id.
@@ -33,13 +33,13 @@ the `DeliveryOptions` approach:
 <!-- snippet: sample_publish_by_tenant -->
 <a id='snippet-sample_publish_by_tenant'></a>
 ```cs
-public static async Task publish_by_tenant(IMessageBus bus)
+private static async Task publish_by_tenant(IMessageBus bus)
 {
     await bus.PublishAsync(new CreateTodo("Fix that last broken test"),
         new DeliveryOptions { TenantId = "tenant3" });
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/MultiTenantedTodoService/MultiTenantedTodoWebService.Tests/end_to_end.cs#L115-L123' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_publish_by_tenant' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/MultiTenantedTodoService/MultiTenantedTodoWebService.Tests/end_to_end.cs#L108-L115' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_publish_by_tenant' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Cascading Messages
@@ -66,7 +66,7 @@ public static IEnumerable<object> Handle(IncomingMessage message)
         TenantId = "one"
     });
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/using_group_ids.cs#L29-L48' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_tenant_id_and_cascading_messages' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/DocumentationSamples/using_group_ids.cs#L28-L46' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_tenant_id_and_cascading_messages' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Referencing the TenantId <Badge type="tip" text="3.6" />
@@ -76,12 +76,9 @@ but you don't want to inject the Wolverine `IMessageContext` or `Envelope` into 
 an easy way to just "push" the current tenant id into your handler methods. Maybe this is for ease of writing unit tests,
 or conditional logic, or some other reason.
 
-To that end, you can inject the `Wolverine.Persistence.TenantId` into any Wolverine message handler or HTTP endpoint method
-to get easy access to the tenant id:
-
-TODO/FIX: snippet: sample_TenantId
-
-There's really nothing to it other than just pulling that type in as a parameter argument to a message handler:
+To that end, you can inject the `JasperFx.MultiTenancy.TenantId` into any Wolverine message handler or HTTP endpoint method
+to get easy access to the tenant id. There's really nothing to it other than just pulling that type in as a parameter
+argument to a message handler:
 
 <!-- snippet: sample_injecting_tenant_id -->
 <a id='snippet-sample_injecting_tenant_id'></a>
@@ -96,7 +93,7 @@ public static class SomeCommandHandler
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/CoreTests/Acceptance/multi_tenancy.cs#L120-L132' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_injecting_tenant_id' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/CoreTests/Acceptance/multi_tenancy.cs#L121-L132' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_injecting_tenant_id' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 In tests, you can create that `TenantId` value just by:

@@ -135,8 +135,16 @@ public abstract class HttpHandler
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public async ValueTask<(T?, HandlerContinuation)> ReadJsonAsync<T>(HttpContext context)
+    public async ValueTask<(T?, HandlerContinuation)> ReadJsonAsync<T>(HttpContext context, bool optional = false)
     {
+        // An optional body (a nullable [FromBody] member) with no content binds null and continues
+        // instead of failing content-type/JSON validation. Mirrors minimal-API optional-body
+        // semantics. See GH-3135.
+        if (optional && context.Request.ContentLength is null or 0)
+        {
+            return (default, HandlerContinuation.Continue);
+        }
+
         if (!isRequestJson(context))
         {
             context.Response.StatusCode = 415;
@@ -222,6 +230,28 @@ public abstract class HttpHandler
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static Task WriteProblems(ProblemDetails details, HttpContext context)
     {
+        return Results.Problem(details).ExecuteAsync(context);
+    }
+
+    /// <summary>
+    /// Called by generated code when <see cref="WolverineHttpOptions.RejectUnparseableQueryValues"/>
+    /// is enabled and a query string value is present but cannot be parsed to the expected
+    /// parameter type. Writes a 400 ProblemDetails response naming the offending query string
+    /// parameter, matching ASP.NET Core minimal API binding behavior. GH-3372.
+    /// </summary>
+    public static Task WriteQueryValueParsingProblem(HttpContext context, string parameterName, string? rawValue,
+        string expectedType)
+    {
+        var details = new ProblemDetails
+        {
+            Status = 400,
+            Title = "Invalid query string value",
+            Detail =
+                $"Query string parameter '{parameterName}' has the value '{rawValue}' which cannot be parsed to the expected type {expectedType}"
+        };
+
+        details.Extensions["parameter"] = parameterName;
+
         return Results.Problem(details).ExecuteAsync(context);
     }
 }

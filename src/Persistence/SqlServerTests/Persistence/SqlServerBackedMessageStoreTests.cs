@@ -22,7 +22,7 @@ public class SqlServerBackedMessageStoreTests : SqlServerContext, IAsyncLifetime
 
     private IHost theHost = null!;
 
-    public override async Task DisposeAsync()
+    public override async ValueTask DisposeAsync()
     {
         await theHost.StopAsync();
         theHost.Dispose();
@@ -30,7 +30,7 @@ public class SqlServerBackedMessageStoreTests : SqlServerContext, IAsyncLifetime
 
     protected override async Task initialize()
     {
-        theHost = WolverineHost.For(opts => { opts.PersistMessagesWithSqlServer(Servers.SqlServerConnectionString); });
+        theHost = await WolverineHost.ForAsync(opts => { opts.PersistMessagesWithSqlServer(Servers.SqlServerConnectionString); });
 
         await theHost.ResetResourceState();
 
@@ -41,7 +41,8 @@ public class SqlServerBackedMessageStoreTests : SqlServerContext, IAsyncLifetime
         theEnvelope.ConversationId = Guid.NewGuid();
         theEnvelope.ParentId = Guid.NewGuid().ToString();
 
-        theHost.Get<IMessageStore>().Inbox.RescheduleExistingEnvelopeForRetryAsync(theEnvelope).Wait(3.Seconds());
+        await theHost.Get<IMessageStore>().Inbox.RescheduleExistingEnvelopeForRetryAsync(theEnvelope)
+            .WaitAsync(3.Seconds());
 
         var persistor = theHost.GetRuntime().Storage.As<SqlServerMessageStore>();
 

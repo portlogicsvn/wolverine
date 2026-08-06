@@ -28,7 +28,7 @@ using var host = await Host.CreateDefaultBuilder()
         opts.UseDataAnnotationsValidation();
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Extensions/Wolverine.DataAnnotationsValidation.Tests/Samples.cs#L13-L22' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_bootstrap_with_dataannotations_validation' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Extensions/Wolverine.DataAnnotationsValidation.Tests/Samples.cs#L13-L21' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_bootstrap_with_dataannotations_validation' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 Now you can decorate your messages with the built-in or custom `ValidationAttributes`:
@@ -70,7 +70,7 @@ public static class CreateCustomerHandler
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Extensions/Wolverine.DataAnnotationsValidation.Tests/Samples.cs#L64-L100' title='Snippet source file'>snippet source</a> | <a href='#snippet-dataannotations_usage' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Extensions/Wolverine.DataAnnotationsValidation.Tests/Samples.cs#L61-L96' title='Snippet source file'>snippet source</a> | <a href='#snippet-dataannotations_usage' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 In the case above, the Validation check will happen at runtime *before* the call to the handler methods. If 
@@ -84,7 +84,7 @@ Some notes about the middleware:
 
 ## Customizing the Validation Failure Behavior
 
-Out of the box, the Fluent Validation middleware will throw a `DataAnnotationsValidation.ValidationException`
+Out of the box, the Data Annotations middleware will throw a `DataAnnotationsValidation.ValidationException`
 with all the validation failures if the validation fails. To customize that behavior, you can plug
 in a custom implementation of the `IFailureAction<T>` interface. This behaves exactly the same as 
 the [Fluent Validation Customisation](/guide/handlers/fluent-validation).

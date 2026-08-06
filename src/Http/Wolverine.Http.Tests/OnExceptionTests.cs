@@ -2,8 +2,6 @@ using Alba;
 using Shouldly;
 using WolverineWebApi;
 using Xunit;
-using Xunit.Abstractions;
-
 namespace Wolverine.Http.Tests;
 
 public class OnExceptionTests : IntegrationContext
@@ -25,7 +23,7 @@ public class OnExceptionTests : IntegrationContext
             x.ContentTypeShouldBe("application/problem+json");
         });
 
-        var problem = result.ReadAsJson<Microsoft.AspNetCore.Mvc.ProblemDetails>();
+        var problem = await result.ReadAsJsonAsync<Microsoft.AspNetCore.Mvc.ProblemDetails>();
         problem.ShouldNotBeNull();
         problem!.Title.ShouldBe("Custom Error");
         problem.Detail.ShouldBe("Something went wrong");
@@ -41,7 +39,7 @@ public class OnExceptionTests : IntegrationContext
             x.ContentTypeShouldBe("application/problem+json");
         });
 
-        var problem = result.ReadAsJson<Microsoft.AspNetCore.Mvc.ProblemDetails>();
+        var problem = await result.ReadAsJsonAsync<Microsoft.AspNetCore.Mvc.ProblemDetails>();
         problem.ShouldNotBeNull();
         problem!.Title.ShouldBe("Specific Error");
     }
@@ -56,7 +54,7 @@ public class OnExceptionTests : IntegrationContext
             x.ContentTypeShouldBe("application/problem+json");
         });
 
-        var problem = result.ReadAsJson<Microsoft.AspNetCore.Mvc.ProblemDetails>();
+        var problem = await result.ReadAsJsonAsync<Microsoft.AspNetCore.Mvc.ProblemDetails>();
         problem.ShouldNotBeNull();
         problem!.Title.ShouldBe("General Error");
     }
@@ -71,7 +69,7 @@ public class OnExceptionTests : IntegrationContext
             x.ContentTypeShouldBe("application/problem+json");
         });
 
-        var problem = result.ReadAsJson<Microsoft.AspNetCore.Mvc.ProblemDetails>();
+        var problem = await result.ReadAsJsonAsync<Microsoft.AspNetCore.Mvc.ProblemDetails>();
         problem.ShouldNotBeNull();
         problem!.Title.ShouldBe("Async Error");
     }
@@ -87,10 +85,27 @@ public class OnExceptionTests : IntegrationContext
             x.StatusCodeShouldBe(500);
         });
 
+        // GH-3714: the generated endpoint writes the ProblemDetails response from inside the try block, so
+        // Alba can see a complete response while the server-side finally frame has not run yet. Waiting on
+        // the recorded action is the only ordering this test can rely on -- asserting straight after the
+        // scenario made it a race that only the rest of the suite running first happened to win.
+        await waitForRecordedActionAsync("Finally");
+
         // Handler threw, OnException handled it, Finally always runs
         ExceptionWithFinallyEndpoints.Actions.ShouldContain("Handler");
         ExceptionWithFinallyEndpoints.Actions.ShouldContain("OnException");
         ExceptionWithFinallyEndpoints.Actions.ShouldContain("Finally");
+    }
+
+    private static async Task waitForRecordedActionAsync(string action)
+    {
+        // List<T>.Contains scans by index, so it is safe to read while the request thread is still
+        // appending -- unlike an Enumerable.Contains, which would throw on a concurrent modification.
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(5);
+        while (!ExceptionWithFinallyEndpoints.Actions.Contains(action) && DateTimeOffset.UtcNow < deadline)
+        {
+            await Task.Delay(25);
+        }
     }
 
     [Fact]
@@ -116,7 +131,8 @@ public class OnExceptionTests : IntegrationContext
             x.StatusCodeShouldBeOk();
         });
 
-        result.ReadAsText().ShouldBe("All good");
+        var text = await result.ReadAsTextAsync();
+        text.ShouldBe("All good");
     }
 
     [Fact]
@@ -147,8 +163,27 @@ public class OnExceptionTests : IntegrationContext
             x.ContentTypeShouldBe("application/problem+json");
         });
 
-        var problem = result.ReadAsJson<Microsoft.AspNetCore.Mvc.ProblemDetails>();
+        var problem = await result.ReadAsJsonAsync<Microsoft.AspNetCore.Mvc.ProblemDetails>();
         problem.ShouldNotBeNull();
         problem!.Title.ShouldBe("Global Error Handler");
+    }
+
+    // PR #3000 regression: an HTTP-endpoint OnException with an *extra* injected parameter
+    // (the author's literal ILogger example) alongside the exception still resolves the
+    // parameter and returns its ProblemDetails response.
+    [Fact]
+    public async Task on_exception_with_extra_injected_parameter()
+    {
+        var result = await Scenario(x =>
+        {
+            x.Get.Url("/on-exception/injected-parameter");
+            x.StatusCodeShouldBe(500);
+            x.ContentTypeShouldBe("application/problem+json");
+        });
+
+        var problem = await result.ReadAsJsonAsync<Microsoft.AspNetCore.Mvc.ProblemDetails>();
+        problem.ShouldNotBeNull();
+        problem!.Title.ShouldBe("Injected Parameter Error");
+        problem.Detail.ShouldBe("Injected parameter error");
     }
 }

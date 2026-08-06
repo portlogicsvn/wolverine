@@ -20,6 +20,10 @@ public class event_forwarding_bug
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery()
+                    .IncludeType(typeof(AddShoppingListItemHandler))
+                    .IncludeType(typeof(CreateShoppingListHandler))
+                    .IncludeType(typeof(IntegrationHandler));
                 opts.Policies.AutoApplyTransactions();
 
                 opts.Durability.Mode = DurabilityMode.Solo;
@@ -32,9 +36,8 @@ public class event_forwarding_bug
                     m.Events.StreamIdentity = StreamIdentity.AsString;
                     m.Projections.LiveStreamAggregation<ShoppingList>();
                 }).UseLightweightSessions()
-                .IntegrateWithWolverine()
-                .EventForwardingToWolverine();;
-            }).StartAsync();
+                .IntegrateWithWolverine(x => x.UseFastEventForwarding = true);
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var runtime = host.GetRuntime();
         var routing = runtime.RoutingFor(typeof(Event<ShoppingListCreated>));

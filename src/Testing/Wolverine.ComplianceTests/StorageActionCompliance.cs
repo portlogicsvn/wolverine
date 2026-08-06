@@ -10,7 +10,7 @@ public abstract class StorageActionCompliance : IAsyncLifetime
 {
     public List<IDisposable> Disposables = new();
     
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         Host = await Microsoft.Extensions.Hosting.Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -34,7 +34,7 @@ public abstract class StorageActionCompliance : IAsyncLifetime
 
     protected abstract void configureWolverine(WolverineOptions opts);
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         foreach (var disposable in Disposables)
         {
@@ -292,8 +292,7 @@ public record MaybeInsertTodo(string Id, string Name, bool ShouldInsert);
 public record ReturnNullInsert;
 public record ReturnNullStorageAction;
 
-#region sample_TodoHandler_to_demonstrate_storage_operations
-
+#region sample_todohandler_to_demonstrate_storage_operations
 public static class TodoHandler
 {
     public static Insert<Todo> Handle(CreateTodo command) => Storage.Insert(new Todo
@@ -430,7 +429,6 @@ public static class ExamineFirstHandler
 }
 
 #region sample_using_unit_of_work_as_side_effect
-
 public record StoreMany(string[] Adds);
 
 public static class StoreManyHandler

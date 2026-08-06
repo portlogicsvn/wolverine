@@ -14,8 +14,7 @@ using Wolverine.Postgresql.Transport;
 using Wolverine.Runtime;
 using Wolverine.Runtime.WorkerQueues;
 using Wolverine.Tracking;
-using Xunit.Abstractions;
-
+using Xunit;
 namespace PostgresqlTests.Transport;
 
 public class basic_functionality : PostgresqlContext, IAsyncLifetime
@@ -33,7 +32,7 @@ public class basic_functionality : PostgresqlContext, IAsyncLifetime
     private IMessageStore theMessageStore = null!;
     private WolverineRuntime theRuntime = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         using var conn = new NpgsqlConnection(Servers.PostgresConnectionString);
         await conn.OpenAsync();
@@ -44,7 +43,16 @@ public class basic_functionality : PostgresqlContext, IAsyncLifetime
             .UseWolverine(opts =>
             {
                 opts.UsePostgresqlPersistenceAndTransport(Servers.PostgresConnectionString, schema:"transports", transportSchema:"transports");
-                opts.ListenToPostgresqlQueue("one");
+
+                // Register the "one" queue but neutralize the host's auto-started listener.
+                // None of the tests in this fixture rely on the host listener; every test
+                // that exercises receiving creates its own PostgresqlQueueListener and
+                // calls TryPopAsync / TryPopDurablyAsync / DeleteExpiredAsync directly.
+                // Without this, the host listener can poll mid-test on slow CI (default
+                // polling interval is 5s; CI runs of pop_off_buffered take ~9s under
+                // load) and consume messages out from under the test's manual pop,
+                // making CountAsync assertions flaky.
+                opts.ListenToPostgresqlQueue("one").PollingInterval(1.Hours());
             }).StartAsync();
 
         theTransport = theHost.GetRuntime().Options.Transports.GetOrCreate<PostgresqlTransport>();
@@ -55,7 +63,7 @@ public class basic_functionality : PostgresqlContext, IAsyncLifetime
         theRuntime = theHost.GetRuntime();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await theHost.StopAsync();
         theHost.Dispose();
@@ -65,9 +73,9 @@ public class basic_functionality : PostgresqlContext, IAsyncLifetime
     public async Task expected_tables_exist_for_queue()
     {
         await using var conn = new NpgsqlConnection(Servers.PostgresConnectionString);
-        await conn.OpenAsync();
+        await conn.OpenAsync(TestContext.Current.CancellationToken);
 
-        var names = await conn.ExistingTablesAsync(schemas: ["transports"]);
+        var names = await conn.ExistingTablesAsync(schemas: ["transports"], ct: TestContext.Current.CancellationToken);
 
         await conn.CloseAsync();
 

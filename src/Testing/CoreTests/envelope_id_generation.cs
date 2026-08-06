@@ -32,7 +32,6 @@ public class envelope_id_generation : IDisposable
         envelope.Id.ShouldNotBe(Guid.Empty);
     }
 
-#if NET9_0_OR_GREATER
     [Fact]
     public void guid_v7_mode_produces_version_7_guids()
     {
@@ -61,7 +60,7 @@ public class envelope_id_generation : IDisposable
     }
 
     [Fact]
-    public void guid_v7_ids_are_unique_across_threads()
+    public async Task guid_v7_ids_are_unique_across_threads()
     {
         Envelope.IdGenerator = Guid.CreateVersion7;
 
@@ -71,16 +70,19 @@ public class envelope_id_generation : IDisposable
         // Simulate the scenario from the bug report: multiple threads generating IDs
         for (var t = 0; t < 10; t++)
         {
+            // xUnit's own fixer declines this shape (it cannot tell which Task.Run overload to bind),
+            // so the token is threaded by hand. It only governs scheduling here -- the loop below has
+            // nothing to cancel.
             tasks.Add(Task.Run(() =>
             {
                 for (var i = 0; i < 1000; i++)
                 {
                     ids.Add(new Envelope().Id);
                 }
-            }));
+            }, TestContext.Current.CancellationToken));
         }
 
-        Task.WaitAll(tasks.ToArray());
+        await Task.WhenAll(tasks);
 
         ids.Count.ShouldBe(10_000);
         ids.Distinct().Count().ShouldBe(10_000, "All IDs should be unique");
@@ -93,13 +95,12 @@ public class envelope_id_generation : IDisposable
             .UseWolverine(opts =>
             {
                 opts.EnvelopeIdGeneration = EnvelopeIdGeneration.GuidV7;
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var tracked = await host.InvokeMessageAndWaitAsync(new GuidV7TestMessage("hello"));
 
         GuidV7TestHandler.LastReceived.ShouldBe("hello");
     }
-#endif
 
     [Fact]
     public void all_newid_usages_respect_id_generator()

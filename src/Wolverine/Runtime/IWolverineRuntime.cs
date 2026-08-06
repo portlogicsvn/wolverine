@@ -1,9 +1,11 @@
 ﻿using System.Diagnostics.Metrics;
 using Microsoft.Extensions.Logging;
 using Wolverine.Configuration;
+using Wolverine.ErrorHandling;
 using Wolverine.Logging;
 using Wolverine.Persistence;
 using Wolverine.Persistence.Durability;
+using Wolverine.Persistence.Sagas;
 using Wolverine.Runtime.Agents;
 using Wolverine.Runtime.Handlers;
 using Wolverine.Runtime.Metrics;
@@ -40,6 +42,17 @@ public interface IWolverineRuntime
     MessageStoreCollection Stores { get; }
 
     /// <summary>
+    /// Read-only diagnostic surface over every saga storage registered
+    /// with this Wolverine application. Wraps Marten, EF Core, RavenDB,
+    /// or any other registered <see cref="ISagaStoreDiagnostics"/>
+    /// implementation behind a single fan-out aggregator so callers
+    /// (CritterWatch and other monitoring tools) can list saga types,
+    /// fetch a saga instance by id, or peek at recent instances without
+    /// caring which store actually holds the data.
+    /// </summary>
+    ISagaStoreDiagnostics SagaStorage { get; }
+
+    /// <summary>
     /// Try to find the main message store in a completely initialized state and safely cast to the type "T"
     /// </summary>
     /// <typeparam name="T"></typeparam>
@@ -57,6 +70,15 @@ public interface IWolverineRuntime
 
 
     IMessageRouter RoutingFor(Type messageType);
+
+    /// <summary>
+    ///     Produce a structured, on-demand explanation of how a message type is routed: which
+    ///     <see cref="IMessageRouteSource"/>s were consulted (in order), what each produced, whether
+    ///     a terminating source short-circuited the chain, the final routes, and whether the type is
+    ///     a framework system message type. Intended for diagnostics — the describe-routing CLI and
+    ///     external tooling — and runs against the live route sources with no steady-state cost.
+    /// </summary>
+    RoutingExplanation ExplainRoutingFor(Type messageType);
 
     /// <summary>
     ///     Try to find an applied extension of type T
@@ -102,6 +124,11 @@ public interface IExecutorFactory
     IExecutor BuildFor(Type messageType, Endpoint endpoint);
 }
 
+internal interface IWolverineRuntimeInternal : IWolverineRuntime
+{
+    IFaultPublisher FaultPublisher { get; }
+}
+
 // This was for testing
 internal static class WolverineRuntimeExtensions
 {
@@ -123,4 +150,14 @@ internal static class WolverineRuntimeExtensions
         var router = runtime.RoutingFor(message.GetType());
         return router.RouteForSend(message, options);
     }
+
+    internal static ValueTask PublishFaultIfEnabledAsync(
+        this IWolverineRuntime runtime,
+        IEnvelopeLifecycle lifecycle,
+        Exception exception,
+        FaultTrigger trigger,
+        System.Diagnostics.Activity? activity)
+        => runtime is IWolverineRuntimeInternal wri
+            ? wri.FaultPublisher.PublishIfEnabledAsync(lifecycle, exception, trigger, activity)
+            : ValueTask.CompletedTask;
 }

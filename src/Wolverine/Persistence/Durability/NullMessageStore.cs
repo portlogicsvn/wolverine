@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using JasperFx.Core;
 using JasperFx.Descriptors;
 using Wolverine.Logging;
@@ -74,14 +75,9 @@ public class NullMessageStore : IMessageStore, IMessageInbox, IMessageOutbox, IM
 
     public Task StoreIncomingAsync(Envelope envelope)
     {
-        if (envelope.Status == EnvelopeStatus.Scheduled)
+        // A no-op store never throws; just schedule in memory when we can and otherwise do nothing.
+        if (envelope.Status == EnvelopeStatus.Scheduled && envelope.ScheduledTime != null)
         {
-            if (envelope.ScheduledTime == null)
-            {
-                throw new ArgumentOutOfRangeException(
-                    $"The envelope {envelope} is marked as Scheduled, but does not have an ExecutionTime");
-            }
-
             ScheduledJobs?.Enqueue(envelope.ScheduledTime.Value, envelope);
         }
 
@@ -98,13 +94,10 @@ public class NullMessageStore : IMessageStore, IMessageInbox, IMessageOutbox, IM
 
     public Task RescheduleExistingEnvelopeForRetryAsync(Envelope envelope)
     {
-        if (!envelope.ScheduledTime.HasValue)
+        if (envelope.ScheduledTime.HasValue)
         {
-            throw new ArgumentOutOfRangeException(nameof(envelope),
-                $"Envelope does not have a value for {nameof(Envelope.ScheduledTime)}");
+            ScheduledJobs?.Enqueue(envelope.ScheduledTime.Value, envelope);
         }
-
-        ScheduledJobs?.Enqueue(envelope.ScheduledTime!.Value, envelope);
 
         return Task.CompletedTask;
     }
@@ -126,7 +119,7 @@ public class NullMessageStore : IMessageStore, IMessageInbox, IMessageOutbox, IM
 
     public Task<IReadOnlyList<Envelope>> LoadOutgoingAsync(Uri destination)
     {
-        throw new NotSupportedException();
+        return Task.FromResult((IReadOnlyList<Envelope>)Array.Empty<Envelope>());
     }
 
     public Task DiscardAndReassignOutgoingAsync(Envelope[] discards, Envelope[] reassigned, int nodeId)
@@ -143,10 +136,18 @@ public class NullMessageStore : IMessageStore, IMessageInbox, IMessageOutbox, IM
     public IMessageOutbox Outbox => this;
     public IDeadLetters DeadLetters => this;
     public IScheduledMessages ScheduledMessages => this;
-    public INodeAgentPersistence Nodes => throw new NotSupportedException();
+    // A no-op node persistence rather than throwing: observers / CritterWatch call this to record node
+    // lifecycle and must not blow up on a storeless (Solo / NullMessageStore) host.
+    public INodeAgentPersistence Nodes => NullNodeAgentPersistence.Instance;
+
+    // No durable backing → no dynamic-listener registry. Solo-mode hosts that
+    // *do* want dynamic listeners need a real message store.
+    public IListenerStore Listeners => NullListenerStore.Instance;
 
     public IMessageStoreAdmin Admin => this;
 
+    [UnconditionalSuppressMessage("Trimming", "IL2026",
+        Justification = "DatabaseDescriptor(subject) reads subject's runtime-type properties for diagnostic reporting. NullMessageStore properties trimmed away are silently omitted, which is acceptable for this diagnostic surface.")]
     public DatabaseDescriptor Describe()
     {
         return new DatabaseDescriptor(this);
@@ -165,7 +166,10 @@ public class NullMessageStore : IMessageStore, IMessageInbox, IMessageOutbox, IM
 
     public IAgent StartScheduledJobs(IWolverineRuntime wolverineRuntime)
     {
-        throw new NotSupportedException();
+        // In-memory scheduled jobs are wired separately (WolverineRuntime.startInMemoryScheduledJobs), so
+        // there is no durable scheduled-job agent to run here — return a no-op agent rather than throwing.
+        return new CompositeAgent(new Uri($"{PersistenceConstants.AgentScheme}://scheduledjobs/null"),
+            Array.Empty<IAgent>());
     }
 
     public Task<IReadOnlyList<Envelope>> AllIncomingAsync()
@@ -251,27 +255,27 @@ public class NullMessageStore : IMessageStore, IMessageInbox, IMessageOutbox, IM
 
     public Task<IReadOnlyList<Envelope>> LoadScheduledToExecuteAsync(DateTimeOffset utcNow)
     {
-        throw new NotSupportedException();
+        return Task.FromResult((IReadOnlyList<Envelope>)Array.Empty<Envelope>());
     }
 
     public Task ReassignOutgoingAsync(int ownerId, Envelope[] outgoing)
     {
-        throw new NotSupportedException();
+        return Task.CompletedTask;
     }
 
     public Task<IReadOnlyList<Envelope>> LoadPageOfGloballyOwnedIncomingAsync(Uri listenerAddress, int limit)
     {
-        throw new NotSupportedException();
+        return Task.FromResult((IReadOnlyList<Envelope>)Array.Empty<Envelope>());
     }
 
     public Task ReassignIncomingAsync(int ownerId, IReadOnlyList<Envelope> incoming)
     {
-        throw new NotSupportedException();
+        return Task.CompletedTask;
     }
 
     public Task<DeadLetterEnvelope?> DeadLetterEnvelopeByIdAsync(Guid id, string? tenantId = null)
     {
-        throw new NotImplementedException();
+        return Task.FromResult<DeadLetterEnvelope?>(null);
     }
 
     Task<ScheduledMessageResults> IScheduledMessages.QueryAsync(ScheduledMessageQuery query, CancellationToken token)
@@ -297,6 +301,8 @@ public class NullMessageStore : IMessageStore, IMessageInbox, IMessageOutbox, IM
 
 internal class NullNodeAgentPersistence : INodeAgentPersistence
 {
+    public static readonly NullNodeAgentPersistence Instance = new();
+
     public Task ClearAllAsync(CancellationToken cancellationToken)
     {
         return Task.CompletedTask;
@@ -348,7 +354,14 @@ internal class NullNodeAgentPersistence : INodeAgentPersistence
         return Task.FromResult(default(WolverineNode?));
     }
 
-    public Task MarkHealthCheckAsync(WolverineNode node, CancellationToken cancellationToken)
+    public Task<bool> MarkHealthCheckAsync(WolverineNode node, CancellationToken cancellationToken)
+    {
+        // No durable store to coordinate through, so there is never a peer to eject this node; always
+        // report the row as present so the caller never tries to re-register.
+        return Task.FromResult(true);
+    }
+
+    public Task ReregisterNodeAsync(WolverineNode node, CancellationToken cancellationToken)
     {
         return Task.CompletedTask;
     }

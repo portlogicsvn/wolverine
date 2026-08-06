@@ -19,7 +19,7 @@ public class moving_unknown_cloudevents_type_to_dlq : IAsyncLifetime
 
     private readonly string _topicName = $"cloudevents-dlq-{Guid.NewGuid():N}";
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _receiver = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -45,7 +45,7 @@ public class moving_unknown_cloudevents_type_to_dlq : IAsyncLifetime
         await _receiver.RebuildAllEnvelopeStorageAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _receiver.StopAsync();
         _receiver.Dispose();
@@ -73,8 +73,8 @@ public class moving_unknown_cloudevents_type_to_dlq : IAsyncLifetime
         await producer.ProduceAsync(_topicName, new Message<string, byte[]>
         {
             Value = Encoding.UTF8.GetBytes(cloudEventsJson)
-        });
-        producer.Flush();
+        }, TestContext.Current.CancellationToken);
+        producer.Flush(TestContext.Current.CancellationToken);
 
         // Poll until the message appears in the dead letter queue
         var storage = _receiver.GetRuntime().Storage;
@@ -89,7 +89,7 @@ public class moving_unknown_cloudevents_type_to_dlq : IAsyncLifetime
 
             if (deadLetters.Envelopes.Any()) break;
 
-            await Task.Delay(1.Seconds());
+            await Task.Delay(1.Seconds(), TestContext.Current.CancellationToken);
         }
 
         deadLetters.Envelopes.ShouldNotBeEmpty();

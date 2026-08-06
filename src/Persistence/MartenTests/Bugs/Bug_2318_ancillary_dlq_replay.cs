@@ -73,7 +73,7 @@ public class Bug_2318_ancillary_dlq_replay : IAsyncLifetime
 {
     private IHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         Switch2318.ShouldThrow = true;
 
@@ -110,13 +110,17 @@ public class Bug_2318_ancillary_dlq_replay : IAsyncLifetime
                     .ProcessEventsWithWolverineHandlersInStrictOrder("bug2318_sub",
                         o => o.IncludeType<AncillaryEvent2318>());
 
+                opts.Discovery.DisableConventionalDiscovery()
+                    .IncludeType(typeof(SomeMessage2318Handler))
+                    .IncludeType(typeof(AncillaryEvent2318Handler))
+                    .IncludeType(typeof(AncillaryCommand2318Handler));
                 opts.Services.AddResourceSetupOnStartup();
             }).StartAsync();
 
         await _host.ResetResourceState();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _host.StopAsync();
         _host.Dispose();
@@ -135,7 +139,7 @@ public class Bug_2318_ancillary_dlq_replay : IAsyncLifetime
             .InvokeMessageAndWaitAsync(message);
 
         // Give time for the message to be dead-lettered
-        await Task.Delay(5.Seconds());
+        await Task.Delay(5.Seconds(), TestContext.Current.CancellationToken);
 
         var runtime = _host.GetRuntime();
         var ancillaryStore = runtime.Stores.FindAncillaryStore(typeof(IAncillaryStore2318));
@@ -163,7 +167,7 @@ public class Bug_2318_ancillary_dlq_replay : IAsyncLifetime
         ancillaryStore.StartScheduledJobs(runtime);
 
         // Wait for the replayed message to be processed
-        await Task.Delay(10.Seconds());
+        await Task.Delay(10.Seconds(), TestContext.Current.CancellationToken);
 
         // Step 4: Verify the envelope is NOT stuck as Incoming in the ancillary store
         var incoming = await ancillaryStore.Admin.AllIncomingAsync();

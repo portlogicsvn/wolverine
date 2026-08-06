@@ -13,6 +13,16 @@ internal class FlushOutgoingMessagesOnCommit : DocumentSessionListenerBase
     private readonly MessageContext _context;
     private readonly PostgresqlMessageStore _messageStore;
 
+    // Tracks whether BeforeSaveChangesAsync queued the "mark incoming handled"
+    // UPDATE into this batch. The in-memory Envelope.Status flag is only flipped
+    // once the commit actually succeeds (in AfterCommitAsync). Flipping it before
+    // the commit left it stale on rollback (e.g. a duplicate document insert), so
+    // DurableReceiver's _markAsHandled optimization — which skips the real UPDATE
+    // when Status == Handled — would strand the row as 'Incoming' forever and it
+    // would be reprocessed on every reclaim/restart. See
+    // Bug_discard_after_failed_outbox_commit.
+    private bool _queuedHandledUpdate;
+
     public FlushOutgoingMessagesOnCommit(MessageContext context, PostgresqlMessageStore messageStore)
     {
         _context = context;
@@ -21,6 +31,8 @@ internal class FlushOutgoingMessagesOnCommit : DocumentSessionListenerBase
 
     public override Task BeforeSaveChangesAsync(IDocumentSession session, CancellationToken token)
     {
+        _queuedHandledUpdate = false;
+
         // No need to do anything for HTTP requests
         if (_context.Envelope == null)
         {
@@ -41,8 +53,29 @@ internal class FlushOutgoingMessagesOnCommit : DocumentSessionListenerBase
                 {
                     if (_context.Envelope.Store is PostgresqlMessageStore envelopeStore)
                     {
-                        // Envelope was routed to a specific store (possibly this one)
-                        incomingTableName = envelopeStore.IncomingFullName;
+                        // Envelope was routed to a specific store. Only fold the
+                        // handled-update into THIS Marten transaction if envelopeStore
+                        // sits on the same connection / schema as _messageStore — the
+                        // session is open against _messageStore's database, so an
+                        // UPDATE against a different database's inbox table simply
+                        // can't run here. Compare by Uri (the existing same-database
+                        // heuristic in the envelope.Store==null branch below uses
+                        // the same approach), which keeps this from depending on
+                        // IMessageStore.Id and matches the local notion of "same
+                        // store" the rest of this method already uses.
+                        //
+                        // Cross-store envelopes (e.g. a main-store handler dispatches
+                        // a local message to an ancillary-store handler — GH-2669)
+                        // are skipped here so the envelope's owning store handles
+                        // the mark-handled separately via its own connection.
+                        if (envelopeStore.Uri == _messageStore.Uri)
+                        {
+                            incomingTableName = envelopeStore.IncomingFullName;
+                        }
+                        else
+                        {
+                            return Task.CompletedTask;
+                        }
                     }
                     else if (_context.Envelope.Store == null)
                     {
@@ -64,7 +97,10 @@ internal class FlushOutgoingMessagesOnCommit : DocumentSessionListenerBase
 
                 var keepUntil = DateTimeOffset.UtcNow.Add(_context.Runtime.Options.Durability.KeepAfterMessageHandling);
                 session.QueueSqlCommand($"update {incomingTableName} set {DatabaseConstants.Status} = '{EnvelopeStatus.Handled}', {DatabaseConstants.KeepUntil} = ? where id = ?", keepUntil, _context.Envelope.Id);
-                _context.Envelope.Status = EnvelopeStatus.Handled;
+
+                // Defer the in-memory status flip to AfterCommitAsync — the UPDATE
+                // above is only durable if this batch commits. See _queuedHandledUpdate.
+                _queuedHandledUpdate = true;
             }
 
             // This was buggy in real usage.
@@ -82,6 +118,13 @@ internal class FlushOutgoingMessagesOnCommit : DocumentSessionListenerBase
 
     public override Task AfterCommitAsync(IDocumentSession session, IChangeSet commit, CancellationToken token)
     {
+        // The queued mark-handled UPDATE is only durable now that the commit
+        // succeeded, so it's safe to trust the in-memory optimization flag.
+        if (_queuedHandledUpdate && _context.Envelope != null)
+        {
+            _context.Envelope.Status = EnvelopeStatus.Handled;
+        }
+
         return _context.FlushOutgoingMessagesAsync();
     }
 }

@@ -63,7 +63,7 @@ public class HttpScheduledMessageTests
             await bus.ScheduleAsync(command, scheduledTime);
         }
 
-        await Task.Delay(500); // some delay for batching
+        await Task.Delay(500, TestContext.Current.CancellationToken); // some delay for batching
         tracker.ReceivedMessages.Count.ShouldBe(count);
     }
 }
@@ -81,7 +81,7 @@ public class TestWolverineHttpTransportClient : IWolverineHttpTransportClient
         {
             if (envelope.ScheduledTime.HasValue)
             {
-                Assert.Equal(envelope.TenantId, Tenant.Id);
+                envelope.TenantId.ShouldBe(Tenant.Id);
                 _tracker.RecordExecution(envelope.Id.ToString());
             }
         }
@@ -100,6 +100,11 @@ public class TestWolverineHttpTransportClient : IWolverineHttpTransportClient
         }
 
         return Task.CompletedTask;
+    }
+
+    public Task<InlineHttpReply> InvokeAsync(string uri, Envelope envelope, JsonSerializerOptions serializerOptions)
+    {
+        return Task.FromResult(new InlineHttpReply(200, Array.Empty<byte>()));
     }
 }
 

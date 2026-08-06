@@ -73,4 +73,23 @@ public class MaybeEndWithResultFrame : AsyncFrame
 
         Next?.GenerateCode(method, writer);
     }
+
+    public override void GenerateFSharpCode(GeneratedMethod method, ISourceWriter writer)
+    {
+        if (Next is MaybeEndWithResultFrame next && ReferenceEquals(next.Result, Result))
+        {
+            Next?.GenerateFSharpCode(method, writer);
+            return;
+        }
+
+        writer.WriteComment("Evaluate whether or not the execution should be stopped based on the IResult value");
+        writer.Write(
+            $"BLOCK:if not (isNull ({Result.FSharpUsage} :> obj)) && not ({Result.FSharpUsage} :? {typeof(WolverineContinue).FSharpName()}) then");
+        writer.Write($"do! {Result.FSharpUsage}.{nameof(IResult.ExecuteAsync)}({_context!.FSharpUsage})");
+        writer.Write("return ()");
+        writer.FinishBlock();
+        writer.BlankLine();
+
+        Next?.GenerateFSharpCode(method, writer);
+    }
 }

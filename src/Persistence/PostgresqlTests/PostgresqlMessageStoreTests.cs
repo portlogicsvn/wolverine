@@ -33,6 +33,11 @@ public class PostgresqlMessageStoreTests : MessageStoreCompliance
                 }).IntegrateWithWolverine();
 
                 opts.ListenAtPort(2345).UseDurableInbox();
+
+                // Exercise the real RdbmsListenerStore impl in the IListenerStore
+                // compliance tests (GH-2685). When this flag is off the suite falls
+                // back to the NullListenerStore short-circuit in MessageStoreCompliance.
+                opts.Durability.EnableDynamicListeners = true;
             }).StartAsync();
 
         var store = host.Get<IDocumentStore>();
@@ -66,6 +71,35 @@ public class PostgresqlMessageStoreTests : MessageStoreCompliance
     }
 
     [Fact]
+    public async Task delete_expired_handled_envelopes_in_batches()
+    {
+        // Regression for #3116 -- batched ctid-based cleanup on the non-partitioned table
+        for (var i = 0; i < 5; i++)
+        {
+            var envelope = ObjectMother.Envelope();
+            await thePersistence.Inbox.StoreIncomingAsync(envelope);
+            await thePersistence.Inbox.MarkIncomingEnvelopeAsHandledAsync(envelope);
+        }
+
+        await using (var conn = new NpgsqlConnection(Servers.PostgresConnectionString))
+        {
+            await conn.OpenAsync(TestContext.Current.CancellationToken);
+            await conn.CreateCommand(
+                    $"update receiver.{DatabaseConstants.IncomingTable} set {DatabaseConstants.KeepUntil} = :cutoff where status = 'Handled'")
+                .With("cutoff", DateTimeOffset.UtcNow.Subtract(1.Hours()))
+                .ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+            await conn.CloseAsync();
+        }
+
+        var command = new DeleteExpiredHandledEnvelopesCommand((IMessageDatabase)thePersistence,
+            new DurabilitySettings(), Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+        await theHost.InvokeAsync(command);
+
+        var counts = await thePersistence.Admin.FetchCountsAsync();
+        counts.Handled.ShouldBe(0);
+    }
+
+    [Fact]
     public async Task delete_old_log_node_records()
     {
         var nodeRecord1 = new NodeRecord()
@@ -93,11 +127,11 @@ public class PostgresqlMessageStoreTests : MessageStoreCompliance
         await theHost.InvokeAsync(new DatabaseOperationBatch(messageDatabase, [log]));
 
         using var conn = new NpgsqlConnection(Servers.PostgresConnectionString);
-        await conn.OpenAsync();
+        await conn.OpenAsync(TestContext.Current.CancellationToken);
         await conn.CreateCommand(
                 $"update receiver.{DatabaseConstants.NodeRecordTableName} set timestamp = :time where node_number = 2")
             .With("time", DateTimeOffset.UtcNow.Subtract(10.Days()))
-            .ExecuteNonQueryAsync();
+            .ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         await conn.CloseAsync();
         
         var recent2 = await thePersistence.Nodes.FetchRecentRecordsAsync(100);

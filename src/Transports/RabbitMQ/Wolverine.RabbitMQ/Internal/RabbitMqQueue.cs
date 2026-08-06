@@ -1,3 +1,4 @@
+using JasperFx.Descriptors;
 using Microsoft.Extensions.Logging;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Exceptions;
@@ -40,7 +41,8 @@ public partial class RabbitMqQueue : RabbitMqEndpoint, IBrokerQueue, IRabbitMqQu
         _parent = parent;
         QueueName = EndpointName = queueName;
         Mode = EndpointMode.Inline;
-        
+        BrokerRole = "queue";
+
         if (Role == EndpointRole.Application && QueueName != _parent.DeadLetterQueue.QueueName)
         {
             DeadLetterQueue = _parent.DeadLetterQueue.Clone();
@@ -55,6 +57,23 @@ public partial class RabbitMqQueue : RabbitMqEndpoint, IBrokerQueue, IRabbitMqQu
     public QueueType QueueType { get; set; } = QueueType.classic;
 
     internal bool HasDeclared { get; private set; }
+
+    /// <summary>
+    /// For durable (inbox-backed) listeners, the maximum number of prefetched deliveries the
+    /// consumer will coalesce into one batched inbox insert (with a 5ms max accumulation age).
+    /// 1 reverts to strict message-at-a-time persistence. Ignored for Buffered/Inline
+    /// endpoints. Default 100. See GH-3492.
+    /// </summary>
+    public int MaximumMessagesToReceive { get; set; } = 100;
+
+    /// <summary>
+    /// Overrides the transport-wide consumer dispatch concurrency for just this queue's listening
+    /// channels. This is the RabbitMQ client's own limit on how many deliveries it hands to a
+    /// consumer at once, and with the default of 1 an Inline listener consumes strictly one
+    /// message at a time no matter what MaxDegreeOfParallelism says. Null uses the transport-wide
+    /// value set through ConfigureChannelCreation(). See GH-3492.
+    /// </summary>
+    public ushort? ConsumerDispatchConcurrency { get; set; }
 
     /// <summary>
     ///     The number of unacknowledged messages that can be processed concurrently
@@ -110,8 +129,9 @@ public partial class RabbitMqQueue : RabbitMqEndpoint, IBrokerQueue, IRabbitMqQu
 
     public override async ValueTask TeardownAsync(ILogger logger)
     {
-        // This is a reply uri owned by another node, so get out of here
-        if (isSystemQueue() || AutoDelete)
+        // This is a reply uri owned by another node, so get out of here. Externally-owned queues
+        // belong to another system and must not be deleted (nor their bindings torn down). GH-3064.
+        if (isSystemQueue() || AutoDelete || IsExternallyOwned)
         {
             return;
         }
@@ -131,7 +151,8 @@ public partial class RabbitMqQueue : RabbitMqEndpoint, IBrokerQueue, IRabbitMqQu
 
     public override async ValueTask SetupAsync(ILogger logger)
     {
-        if (isSystemQueue())
+        // Externally-owned queues are declared/managed by another system; don't try to create them. GH-3064.
+        if (isSystemQueue() || IsExternallyOwned)
         {
             return;
         }
@@ -201,11 +222,13 @@ public partial class RabbitMqQueue : RabbitMqEndpoint, IBrokerQueue, IRabbitMqQu
     ///     Arguments for Rabbit MQ queue declarations. See the Rabbit MQ .NET client documentation at
     ///     https://www.rabbitmq.com/dotnet.html
     /// </summary>
+    [IgnoreDescription]
     public IDictionary<string, object?> Arguments { get; } = new Dictionary<string, object?>();
 
     /// <summary>
     ///     Arguments for Rabbit MQ channel consume operations
     /// </summary>
+    [IgnoreDescription]
     public IDictionary<string, object?> ConsumerArguments { get; } = new Dictionary<string, object?>();
 
     /// <summary>
@@ -266,7 +289,9 @@ public partial class RabbitMqQueue : RabbitMqEndpoint, IBrokerQueue, IRabbitMqQu
 
         if (_parent.AutoProvision || _parent.AutoPurgeAllQueues || PurgeOnStartup)
         {
-            if (_parent.AutoProvision)
+            // Externally-owned queues (and their bindings) are managed by another system; skip the
+            // declare even when AutoProvision is on so startup doesn't fail without configure ACLs. GH-3064.
+            if (_parent.AutoProvision && !IsExternallyOwned)
             {
                 await DeclareAsync(channel, logger);
             }
@@ -382,5 +407,23 @@ public partial class RabbitMqQueue : RabbitMqEndpoint, IBrokerQueue, IRabbitMqQu
 
         deadLetterSender = default;
         return false;
+    }
+
+    // Native and InteropFriendly modes route to a native RabbitMQ dead letter queue; WolverineStorage
+    // (and no DLQ) uses Wolverine's durable storage. EnableDeadLetterQueueRecovery() bridges the
+    // native queue back into durable storage.
+    public override DeadLetterStorageMode DeadLetterStorage
+    {
+        get
+        {
+            if (DeadLetterQueue is null || DeadLetterQueue.Mode == DeadLetterQueueMode.WolverineStorage)
+            {
+                return DeadLetterStorageMode.Durable;
+            }
+
+            return _parent.EnableDeadLetterQueueRecovery
+                ? DeadLetterStorageMode.NativeWithRecovery
+                : DeadLetterStorageMode.Native;
+        }
     }
 }

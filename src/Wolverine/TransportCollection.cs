@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Diagnostics.CodeAnalysis;
 using JasperFx.Core;
 using Wolverine.Configuration;
 using Wolverine.Transports;
@@ -32,6 +33,13 @@ public class TransportCollection : IEnumerable<ITransport>, IAsyncDisposable
             if (value != null)
             {
                 value.IsListener = true;
+
+                // CritterWatch GH-907: whatever endpoint carries node control traffic is system
+                // traffic by definition. The database and shared-memory control endpoints are born
+                // with the System role, but a generic endpoint promoted to control duty (e.g.
+                // UseTcpForControlEndpoint) was not — leaving its agent-command traffic visible to
+                // metrics as apparent application volume.
+                value.Role = EndpointRole.System;
             }
 
             _nodeControlEndpoint = value;
@@ -70,7 +78,7 @@ public class TransportCollection : IEnumerable<ITransport>, IAsyncDisposable
         _transports[transport.Protocol] = transport;
     }
 
-    public T GetOrCreate<T>(BrokerName? name = null) where T : ITransport, new()
+    public T GetOrCreate<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] T>(BrokerName? name = null) where T : ITransport, new()
     {
         if (name == null)
         {

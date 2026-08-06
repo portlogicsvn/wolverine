@@ -18,10 +18,9 @@ public class moving_unknown_message_type_to_dlq : IAsyncLifetime
     private IHost _sender = null!;
     private IHost _receiver = null!;
 
-    public static async Task TestSample()
+    private static async Task TestSample()
     {
         #region sample_unknown_messages_go_to_dead_letter_queue
-
         var builder = Host.CreateApplicationBuilder();
         builder.UseWolverine(opts =>
         {
@@ -36,7 +35,7 @@ public class moving_unknown_message_type_to_dlq : IAsyncLifetime
         #endregion
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         await SharedMemoryQueueManager.ClearAllAsync();
 
@@ -67,7 +66,7 @@ public class moving_unknown_message_type_to_dlq : IAsyncLifetime
         await _receiver.RebuildAllEnvelopeStorageAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _sender.StopAsync();
         _sender.Dispose();

@@ -1,7 +1,10 @@
+using System.Security.Cryptography;
+using System.Text;
 using Amazon.Runtime;
 using Amazon.SQS;
 using Amazon.SQS.Model;
 using JasperFx.Core;
+using JasperFx.Descriptors;
 using Microsoft.Extensions.Logging;
 using Spectre.Console;
 using Wolverine.Configuration;
@@ -10,7 +13,7 @@ using Wolverine.Transports;
 
 namespace Wolverine.AmazonSqs.Internal;
 
-public class AmazonSqsTransport : BrokerTransport<AmazonSqsQueue>
+public class AmazonSqsTransport : BrokerTransport<AmazonSqsQueue>, IAsyncDisposable
 {
     public const string DeadLetterQueueName = DeadLetterQueueConstants.DefaultQueueName;
     public const string ResponseEndpointName = "AmazonSqsResponses";
@@ -27,6 +30,7 @@ public class AmazonSqsTransport : BrokerTransport<AmazonSqsQueue>
     {
         Queues = new LightweightCache<string, AmazonSqsQueue>(name => new AmazonSqsQueue(name, this));
         IdentifierDelimiter = "-";
+        DefaultDeadLetterQueueName = DeadLetterQueueName;
     }
 
     public AmazonSqsTransport() : this("sqs")
@@ -34,20 +38,77 @@ public class AmazonSqsTransport : BrokerTransport<AmazonSqsQueue>
 
     }
 
-    public override Uri ResourceUri => new Uri(Config.ServiceURL);
+    public override Uri ResourceUri
+    {
+        get
+        {
+            // An explicitly set ServiceURL (e.g. LocalStack) wins
+            if (Config.ServiceURL.IsNotEmpty())
+            {
+                return new Uri(Config.ServiceURL);
+            }
+
+            // Otherwise fall back to the configured region so that this purely
+            // diagnostic Uri doesn't throw when only RegionEndpoint was set
+            try
+            {
+                var region = Config.RegionEndpoint?.SystemName;
+                if (region.IsNotEmpty())
+                {
+                    return new Uri($"https://sqs.{region}.amazonaws.com");
+                }
+            }
+            catch (Exception)
+            {
+                // RegionEndpoint resolution can probe ambient configuration; ignore and
+                // use the generic fallback below
+            }
+
+            return new Uri("sqs://amazon");
+        }
+    }
 
     internal AmazonSqsTransport(IAmazonSQS client) : this()
     {
         Client = client;
     }
 
+    public override string? DescribeEndpoint()
+    {
+        // An explicit ServiceURL (e.g. LocalStack) is a plain endpoint URL; AWS credentials are supplied separately.
+        if (Config.ServiceURL.IsNotEmpty()) return Config.ServiceURL;
+
+        try
+        {
+            var region = Config.RegionEndpoint?.SystemName;
+            if (region.IsNotEmpty()) return region;
+        }
+        catch (Exception)
+        {
+            // RegionEndpoint resolution can probe ambient configuration; ignore.
+        }
+
+        return null;
+    }
+
+    [DescribeAsConfigurationState]
     public Func<IWolverineRuntime, AWSCredentials>? CredentialSource { get; set; }
 
+    [IgnoreDescription]
     public LightweightCache<string, AmazonSqsQueue> Queues { get; }
 
+    /// <summary>
+    /// Broker-per-tenant registrations (GH-3304). Each tenant owns a child transport pointed at its own SQS
+    /// account/region/endpoint (and its own queue + QueueUrl cache); outbound is routed by
+    /// <see cref="Envelope.TenantId"/> and inbound listeners stamp the tenant id.
+    /// </summary>
+    [IgnoreDescription]
+    internal LightweightCache<string, AmazonSqsTenant> Tenants { get; } = new(name => new AmazonSqsTenant(name));
+
+    [ChildDescription]
     public AmazonSQSConfig Config { get; } = new();
 
-    internal IAmazonSQS? Client { get; private set; }
+    internal IAmazonSQS? Client { get; set; }
 
     public int LocalStackPort { get; set; }
 
@@ -55,28 +116,100 @@ public class AmazonSqsTransport : BrokerTransport<AmazonSqsQueue>
     public bool DisableDeadLetterQueues { get; set; }
 
     /// <summary>
+    /// Transport-wide default dead-letter-queue name. Every <see cref="AmazonSqsQueue"/>
+    /// that hasn't had an explicit per-listener override applied
+    /// (via <c>ConfigureDeadLetterQueue</c> or <c>DisableDeadLetterQueueing</c>) reads
+    /// its <see cref="AmazonSqsQueue.DeadLetterQueueName"/> through this property.
+    /// Defaults to <see cref="DeadLetterQueueName"/> (<c>"wolverine-dead-letter-queue"</c>),
+    /// matching the historical behaviour for hosts that don't opt in.
+    ///
+    /// Set via <c>AmazonSqsTransportConfiguration.DefaultDeadLetterQueueName(string)</c>
+    /// at host bootstrap; also honoured by auto-provision (the default DLQ is provisioned
+    /// once under whatever name resolves at that point). Per-listener overrides always
+    /// win over this default; <c>DisableAllNativeDeadLetterQueues()</c> disables the
+    /// whole DLQ surface regardless of what's configured here.
+    /// </summary>
+    public string? DefaultDeadLetterQueueName { get; set; }
+
+    /// <summary>
     /// Is this transport connection allowed to build and use response and control queues
     /// for just this node? Default is false, requiring explicit opt-in.
     /// </summary>
     public bool SystemQueuesEnabled { get; set; }
 
+    /// <summary>
+    /// The hard limit Amazon SQS puts on a queue name. The <c>.fifo</c> suffix counts against it.
+    /// </summary>
+    public const int MaximumQueueNameLength = 80;
+
+    /// <summary>
+    /// Coerce an identifier into something Amazon SQS will actually accept: "Can only include
+    /// alphanumeric characters, hyphens, or underscores. 1 to 80 in length".
+    ///
+    /// Conventional routing derives queue names from message type names, so the raw input can carry
+    /// characters SQS rejects (<c>Handle(Item[])</c>, generics, nested types) or simply run past 80
+    /// characters once a prefix is applied. Either one fails <c>CreateQueue</c> with a 400, and
+    /// because broker initialization provisions every queue together, one bad name takes down
+    /// startup for every conventionally-routed host in the assembly. See GH-3763, and GH-3786 for
+    /// the same defect on Azure Service Bus.
+    ///
+    /// This is a no-op for every name that works today: a name SQS rejects could never have been
+    /// provisioned in the first place.
+    /// </summary>
     public static string SanitizeSqsName(string identifier)
     {
         //AWS requires FIFO queues to have a `.fifo` suffix
         var suffixIndex = identifier.LastIndexOf(".fifo", StringComparison.OrdinalIgnoreCase);
 
+        var suffix = string.Empty;
+        var name = identifier;
+
         if (suffixIndex != -1) // ".fifo" suffix found
         {
-            var prefix = identifier[..suffixIndex];
-            var suffix = identifier[suffixIndex..];
-
-            prefix = prefix.Replace('.', Separator);
-
-            return prefix + suffix;
+            suffix = identifier[suffixIndex..];
+            name = identifier[..suffixIndex];
         }
 
-        // ".fifo" suffix not found
-        return identifier.Replace('.', Separator);
+        return truncateToLimit(substituteIllegalCharacters(name), suffix);
+    }
+
+    private static string substituteIllegalCharacters(string name)
+    {
+        var characters = new char[name.Length];
+
+        for (var i = 0; i < name.Length; i++)
+        {
+            var c = name[i];
+
+            // '.' has always mapped to the identifier separator, and plenty of existing queue names
+            // depend on that exact spelling. Everything else illegal becomes '_' -- substituting
+            // rather than stripping is what keeps Item[] separable from Item.
+            characters[i] = c switch
+            {
+                '.' => Separator,
+                '-' or '_' => c,
+                _ => char.IsAsciiLetterOrDigit(c) ? c : '_'
+            };
+        }
+
+        return new string(characters);
+    }
+
+    private static string truncateToLimit(string name, string suffix)
+    {
+        if (name.Length + suffix.Length <= MaximumQueueNameLength)
+        {
+            return name + suffix;
+        }
+
+        // Truncation alone would collide two long names that share a prefix, and conventionally
+        // routed names are namespace-qualified type names, which very often do. Append a stable
+        // digest of the full name so the result stays unique -- and stays the SAME across processes
+        // and machines, which rules out string.GetHashCode() (randomized per process on .NET Core).
+        var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(name))).ToLowerInvariant()[..8];
+        var budget = MaximumQueueNameLength - suffix.Length - digest.Length - 1;
+
+        return string.Concat(name.AsSpan(0, budget), Separator.ToString(), digest, suffix);
     }
 
     public override string SanitizeIdentifier(string identifier)
@@ -117,8 +250,17 @@ public class AmazonSqsTransport : BrokerTransport<AmazonSqsQueue>
         // and SQS queue names are case-sensitive. Without this, the sender creates
         // "wolverine-response-MyApp-123" but the receiver resolves the reply URI
         // to "wolverine-response-myapp-123" (lowercased by Uri), creating a different queue.
+        // The per-node response queue must be unique to this running node. In Solo mode the assigned
+        // node number is always 1 (#3188), and the service name is not unique per host, so multiple
+        // Solo hosts (e.g. the request/reply compliance sender + receiver, or successive fixtures on
+        // one broker) would share one response queue and cross-deliver each other's replies. Use the
+        // always-unique UniqueNodeId in Solo; Balanced gets a unique AssignedNodeNumber via election.
+        // See #3189.
+        var responseNode = runtime.Options.Durability.Mode == DurabilityMode.Solo
+            ? runtime.Options.UniqueNodeId.ToString("N")
+            : runtime.DurabilitySettings.AssignedNodeNumber.ToString();
         var responseName = SanitizeSqsName(
-            $"wolverine.response.{runtime.Options.ServiceName}.{runtime.DurabilitySettings.AssignedNodeNumber}")
+            $"wolverine.response.{runtime.Options.ServiceName}.{responseNode}")
             .ToLowerInvariant();
 
         var queue = Queues[responseName];
@@ -142,6 +284,59 @@ public class AmazonSqsTransport : BrokerTransport<AmazonSqsQueue>
         {
             await CleanupOrphanedSystemQueuesAsync(runtime);
             StartSystemQueueKeepAlive(runtime.DurabilitySettings.Cancellation, runtime);
+        }
+
+        // Broker-per-tenant (GH-3304): now that the parent connection is fully resolved, seed each tenant's child
+        // transport from it and build the tenant's own SQS client. Clients are lightweight and the queues/QueueUrls
+        // are resolved lazily per tenant, so there's no live connection to open here — but when AutoProvision is on
+        // we create the shared queue topology on every tenant account, since each is a separate broker.
+        if (Tenants.Any())
+        {
+            foreach (var tenant in Tenants)
+            {
+                tenant.Compile(this, runtime);
+            }
+
+            if (AutoProvision)
+            {
+                await provisionTenantQueuesAsync(runtime);
+            }
+        }
+    }
+
+    // Create the shared application queues (and their dead letter queues) on each tenant's own account. Mirrors
+    // what the default connection provisions lazily via AmazonSqsQueue.InitializeAsync, but runs against the
+    // tenant client so a tenant's listener has its queue ready before it starts polling (GH-3304).
+    private async Task provisionTenantQueuesAsync(IWolverineRuntime runtime)
+    {
+        var logger = runtime.LoggerFactory.CreateLogger<AmazonSqsTransport>();
+
+        var applicationQueues = Queues
+            .Where(x => x.Role == EndpointRole.Application)
+            .ToArray();
+
+        foreach (var tenant in Tenants)
+        {
+            foreach (var queue in applicationQueues)
+            {
+                try
+                {
+                    var tenantQueue = queue.BuildTenantSibling(tenant);
+                    await tenantQueue.SetupAsync(tenant.Transport.Client!);
+
+                    if (tenantQueue.DeadLetterQueueName.IsNotEmpty() && !DisableDeadLetterQueues)
+                    {
+                        await tenant.Transport.Queues[tenantQueue.DeadLetterQueueName!]
+                            .SetupAsync(tenant.Transport.Client!);
+                    }
+                }
+                catch (Exception e)
+                {
+                    logger.LogWarning(e,
+                        "Error while provisioning queue {Queue} for tenant {TenantId}", queue.QueueName,
+                        tenant.TenantId);
+                }
+            }
         }
     }
 
@@ -271,4 +466,17 @@ public class AmazonSqsTransport : BrokerTransport<AmazonSqsQueue>
     }
 
     public string ServerHost => Config.ServiceURL?.ToUri().Host!;
+
+    public ValueTask DisposeAsync()
+    {
+        Client?.Dispose();
+
+        // Broker-per-tenant (GH-3304): each tenant owns its own SQS client through its child transport; dispose them.
+        foreach (var tenant in Tenants)
+        {
+            tenant.Transport.Client?.Dispose();
+        }
+
+        return ValueTask.CompletedTask;
+    }
 }

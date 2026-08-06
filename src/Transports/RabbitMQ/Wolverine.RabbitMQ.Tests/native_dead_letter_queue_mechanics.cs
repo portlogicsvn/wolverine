@@ -6,6 +6,7 @@ using RabbitMQ.Client;
 using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
 using Shouldly;
+using Wolverine.RabbitMQ;
 using Wolverine.RabbitMQ.Internal;
 using Wolverine.Runtime;
 using Wolverine.Tracking;
@@ -13,14 +14,14 @@ using Xunit;
 
 namespace Wolverine.RabbitMQ.Tests;
 
-[Trait("Category", "Flaky")]
-public class native_dead_letter_queue_mechanics : IDisposable
+public class native_dead_letter_queue_mechanics : IAsyncLifetime
 {
     private readonly string QueueName = Guid.NewGuid().ToString();
     private IHost _host = null!;
     private RabbitMqTransport theTransport = null!;
 
-    public async Task afterBootstrapping()
+    public async ValueTask InitializeAsync() =>await  ValueTask.CompletedTask;
+    private async Task afterBootstrapping()
     {
         _host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
@@ -43,12 +44,15 @@ public class native_dead_letter_queue_mechanics : IDisposable
             .GetOrCreate<RabbitMqTransport>();
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
         // Try to eliminate queues to keep them from accumulating
-        _host.TeardownResources();
-
-        _host?.Dispose();
+        if (_host != null)
+        {
+            await _host.TeardownResources();
+            await _host.StopAsync();
+            _host.Dispose();
+        }
     }
 
     [Fact]
@@ -74,6 +78,85 @@ public class native_dead_letter_queue_mechanics : IDisposable
     }
 
     [Fact]
+    public async Task publish_side_queue_keeps_its_custom_dead_letter_exchange_during_auto_provision()
+    {
+        var queueName = QueueName + "-publish-override";
+        var defaultDeadLetterQueueName = "default-dlx";
+        var defaultDeadLetterExchangeName = "default-dlx-exchange";
+        var overrideDeadLetterExchangeName = "override-dlx-exchange";
+
+        _host = await Host.CreateDefaultBuilder()
+            .UseWolverine(opts =>
+            {
+                opts.UseRabbitMq()
+                    .AutoProvision()
+                    .AutoPurgeOnStartup()
+                    .CustomizeDeadLetterQueueing(new DeadLetterQueue(defaultDeadLetterQueueName)
+                    {
+                        ExchangeName = defaultDeadLetterExchangeName
+                    });
+
+                opts.PublishMessage<PublishOverrideMessage>()
+                    .ToRabbitQueue(queueName)
+                    .DeadLetterQueueing(new DeadLetterQueue(queueName + "-dlq")
+                    {
+                        ExchangeName = overrideDeadLetterExchangeName
+                    });
+
+                opts.LocalRoutingConventionDisabled = true;
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
+
+        theTransport = _host
+            .Services
+            .GetRequiredService<IWolverineRuntime>()
+            .Options
+            .Transports
+            .GetOrCreate<RabbitMqTransport>();
+
+        var queue = theTransport.Queues[queueName];
+
+        queue.DeadLetterQueue!.QueueName.ShouldBe(queueName + "-dlq");
+        queue.Arguments[RabbitMqTransport.DeadLetterQueueHeader].ShouldBe(overrideDeadLetterExchangeName);
+        queue.Arguments[RabbitMqTransport.DeadLetterQueueHeader].ShouldNotBe(defaultDeadLetterExchangeName);
+    }
+
+    [Fact]
+    public async Task publish_side_queue_can_disable_dead_letter_queueing_during_auto_provision()
+    {
+        var queueName = QueueName + "-publish-disabled";
+
+        _host = await Host.CreateDefaultBuilder()
+            .UseWolverine(opts =>
+            {
+                opts.UseRabbitMq()
+                    .AutoProvision()
+                    .AutoPurgeOnStartup()
+                    .CustomizeDeadLetterQueueing(new DeadLetterQueue("default-dlx")
+                    {
+                        ExchangeName = "default-dlx-exchange"
+                    });
+
+                opts.PublishMessage<PublishOverrideMessage>()
+                    .ToRabbitQueue(queueName)
+                    .DisableDeadLetterQueueing();
+
+                opts.LocalRoutingConventionDisabled = true;
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
+
+        theTransport = _host
+            .Services
+            .GetRequiredService<IWolverineRuntime>()
+            .Options
+            .Transports
+            .GetOrCreate<RabbitMqTransport>();
+
+        var queue = theTransport.Queues[queueName];
+
+        queue.DeadLetterQueue.ShouldBeNull();
+        queue.Arguments.ContainsKey(RabbitMqTransport.DeadLetterQueueHeader).ShouldBeFalse();
+    }
+
+    [Fact]
     public async Task no_dead_letter_queue_if_disabled()
     {
         var queueName = "queue_with_no_native_dead_letter_queue";
@@ -84,7 +167,7 @@ public class native_dead_letter_queue_mechanics : IDisposable
                 opts.ListenToRabbitQueue(queueName);
 
 
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
 
         var transport = host.Services.GetRequiredService<IWolverineRuntime>().Options.RabbitMqTransport();
@@ -109,7 +192,7 @@ public class native_dead_letter_queue_mechanics : IDisposable
                 opts.ListenToRabbitQueue(QueueName);
 
                 opts.LocalRoutingConventionDisabled = true;
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         theTransport = _host
             .Services
@@ -137,14 +220,13 @@ public class native_dead_letter_queue_mechanics : IDisposable
 
         (await initialQueue.QueuedCountAsync()).ShouldBe(0);
 
-        var attempts = 0;
-        while (attempts < 5)
+        var deadline = DateTimeOffset.UtcNow.Add(30.Seconds());
+        while (DateTimeOffset.UtcNow < deadline)
         {
             var queuedCount = await deadLetterQueue.QueuedCountAsync();
             if (queuedCount > 0) return;
 
-            attempts++;
-            await Task.Delay(250.Milliseconds());
+            await Task.Delay(250.Milliseconds(), TestContext.Current.CancellationToken);
         }
 
         throw new Exception("Never got a message in the dead letter queue");
@@ -177,9 +259,7 @@ public class native_dead_letter_queue_mechanics : IDisposable
         queue.Compile(runtime);
 
         var channel = Substitute.For<IChannel>();
-        channel.QueueDeclareAsync(Arg.Any<string>(), Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<bool>(),
-                Arg.Any<IDictionary<string, object?>>())
-            .Returns(Task.FromResult(new QueueDeclareOk(queue.QueueName, 0, 0)));
+        channel.QueueDeclareAsync(Arg.Any<string>(), Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<IDictionary<string, object?>>(), cancellationToken: Arg.Any<CancellationToken>()).Returns(Task.FromResult(new QueueDeclareOk(queue.QueueName, 0, 0)));
 
         await queue.DeclareAsync(channel, NullLogger.Instance);
 
@@ -253,9 +333,7 @@ public class native_dead_letter_queue_mechanics : IDisposable
         overrideEndpoint.Compile(runtime);
 
         var channel = Substitute.For<IChannel>();
-        channel.QueueDeclareAsync(Arg.Any<string>(), Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<bool>(),
-                Arg.Any<IDictionary<string, object?>>())
-            .Returns(Task.FromResult(new QueueDeclareOk(defaultQueue, 0, 0)));
+        channel.QueueDeclareAsync(Arg.Any<string>(), Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<IDictionary<string, object?>>(), cancellationToken: Arg.Any<CancellationToken>()).Returns(Task.FromResult(new QueueDeclareOk(defaultQueue, 0, 0)));
 
         await defaultEndpoint.DeclareAsync(channel, NullLogger.Instance);
         await overrideEndpoint.DeclareAsync(channel, NullLogger.Instance);
@@ -280,7 +358,7 @@ public class native_dead_letter_queue_mechanics : IDisposable
                 opts.LocalRoutingConventionDisabled = true;
 
                 opts.ListenToRabbitQueue(QueueName + "Different").DeadLetterQueueing(new DeadLetterQueue(deadLetterQueueName));
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         theTransport = _host
             .Services
@@ -296,14 +374,13 @@ public class native_dead_letter_queue_mechanics : IDisposable
 
         (await initialQueue.QueuedCountAsync()).ShouldBe(0);
 
-        var attempts = 0;
-        while (attempts < 5)
+        var deadline = DateTimeOffset.UtcNow.Add(30.Seconds());
+        while (DateTimeOffset.UtcNow < deadline)
         {
             var queuedCount = await deadLetterQueue.QueuedCountAsync();
             if (queuedCount > 0) return;
 
-            attempts++;
-            await Task.Delay(250.Milliseconds());
+            await Task.Delay(250.Milliseconds(), TestContext.Current.CancellationToken);
         }
 
         throw new Exception("Never got a message in the dead letter queue");
@@ -311,6 +388,8 @@ public class native_dead_letter_queue_mechanics : IDisposable
 }
 
 public record AlwaysErrors;
+
+public record PublishOverrideMessage;
 
 public static class AlwaysErrorsHandler
 {

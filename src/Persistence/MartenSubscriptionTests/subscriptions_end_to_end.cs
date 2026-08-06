@@ -44,7 +44,7 @@ public class subscriptions_end_to_end
                 }).IntegrateWithWolverine()
                 .UseLightweightSessions()
                 .SubscribeToEvents(new TestBatchSubscription());
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var runtime = host.GetRuntime();
         var routing = runtime.RoutingFor(typeof(IEvent<AEvent>));
@@ -70,18 +70,21 @@ public class subscriptions_end_to_end
             await daemon.WaitForNonStaleData(30.Seconds());
         };
 
+        // See use_unfiltered_publishing_subscription for why the explicit waiter is needed
         var tracked = await host
             .TrackActivity()
+            .Timeout(60.Seconds())
+            .WaitForExecutionOf<EventTotalsUpdated>(4)
             .ExecuteAndWaitAsync(writeEvents);
 
         // 4 event types, 4 totals. Might be broken up by page
         tracked.Executed.MessagesOf<EventTotalsUpdated>().Count().ShouldBeGreaterThanOrEqualTo(4);
 
         using var query = store.QuerySession();
-        (await query.LoadAsync<EventTotals>("A"))!.Count.ShouldBe(6);
-        (await query.LoadAsync<EventTotals>("B"))!.Count.ShouldBe(7);
-        (await query.LoadAsync<EventTotals>("C"))!.Count.ShouldBe(5);
-        (await query.LoadAsync<EventTotals>("D"))!.Count.ShouldBe(6);
+        (await query.LoadAsync<EventTotals>("A", TestContext.Current.CancellationToken))!.Count.ShouldBe(6);
+        (await query.LoadAsync<EventTotals>("B", TestContext.Current.CancellationToken))!.Count.ShouldBe(7);
+        (await query.LoadAsync<EventTotals>("C", TestContext.Current.CancellationToken))!.Count.ShouldBe(5);
+        (await query.LoadAsync<EventTotals>("D", TestContext.Current.CancellationToken))!.Count.ShouldBe(6);
     }
 
     [Fact]
@@ -105,7 +108,7 @@ public class subscriptions_end_to_end
                 }).IntegrateWithWolverine()
                 .UseLightweightSessions()
                 .SubscribeToEvents(subscription);
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var store = host.Services.GetRequiredService<IDocumentStore>();
 
@@ -128,18 +131,21 @@ public class subscriptions_end_to_end
             await daemon.WaitForNonStaleData(30.Seconds());
         };
 
+        // See use_unfiltered_publishing_subscription for why the explicit waiter is needed
         var tracked = await host
             .TrackActivity()
+            .Timeout(60.Seconds())
+            .WaitForExecutionOf<EventTotalsUpdated>(2)
             .ExecuteAndWaitAsync(writeEvents);
 
         // 4 event types, 2 allow list. Might be broken up by page
         tracked.Executed.MessagesOf<EventTotalsUpdated>().Count().ShouldBeGreaterThanOrEqualTo(2);
 
         using var query = store.QuerySession();
-        (await query.LoadAsync<EventTotals>("A"))!.Count.ShouldBe(6);
-        (await query.LoadAsync<EventTotals>("B"))!.Count.ShouldBe(7);
-        (await query.LoadAsync<EventTotals>("C")).ShouldBeNull();
-        (await query.LoadAsync<EventTotals>("D")).ShouldBeNull();
+        (await query.LoadAsync<EventTotals>("A", TestContext.Current.CancellationToken))!.Count.ShouldBe(6);
+        (await query.LoadAsync<EventTotals>("B", TestContext.Current.CancellationToken))!.Count.ShouldBe(7);
+        (await query.LoadAsync<EventTotals>("C", TestContext.Current.CancellationToken)).ShouldBeNull();
+        (await query.LoadAsync<EventTotals>("D", TestContext.Current.CancellationToken)).ShouldBeNull();
     }
 
     [Fact]
@@ -161,7 +167,7 @@ public class subscriptions_end_to_end
                 }).IntegrateWithWolverine()
                 .UseLightweightSessions()
                 .ProcessEventsWithWolverineHandlersInStrictOrder("Inline");
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var store = host.Services.GetRequiredService<IDocumentStore>();
 
@@ -174,7 +180,7 @@ public class subscriptions_end_to_end
         session.Events.StartStream(Guid.NewGuid(), new AEvent(), new AEvent(), new AEvent(), new AEvent());
         session.Events.StartStream(Guid.NewGuid(), new BEvent(), new CEvent(), new CEvent(), new BEvent());
 
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         await daemon.WaitForNonStaleData(30.Seconds());
 
@@ -207,7 +213,7 @@ public class subscriptions_end_to_end
                         s.IncludeType<AEvent>();
                         s.IncludeType<BEvent>();
                     });
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var store = host.Services.GetRequiredService<IDocumentStore>();
 
@@ -220,7 +226,7 @@ public class subscriptions_end_to_end
         session.Events.StartStream(Guid.NewGuid(), new AEvent(), new AEvent(), new AEvent(), new AEvent());
         session.Events.StartStream(Guid.NewGuid(), new BEvent(), new CEvent(), new CEvent(), new BEvent());
 
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         await daemon.WaitForNonStaleData(30.Seconds());
 
@@ -244,7 +250,7 @@ public class subscriptions_end_to_end
                     }).IntegrateWithWolverine()
                     .UseLightweightSessions()
                     .PublishEventsToWolverine("Publish");
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var store = host.Services.GetRequiredService<IDocumentStore>();
 
@@ -267,9 +273,16 @@ public class subscriptions_end_to_end
             await daemon.WaitForNonStaleData(30.Seconds());
         };
 
+        // The subscription flushes its messages to Wolverine *after* the daemon commits
+        // the page + progress, so WaitForNonStaleData returning does not mean the relayed
+        // messages have even been published yet. Without these explicit waiters the tracked
+        // session can complete on a momentary lull after the first message executes.
         var tracked = await host
             .TrackActivity()
-            // TODO -- add a custom waiter here, might be a race condition
+            .Timeout(60.Seconds())
+            .WaitForExecutionOf<IEvent<AEvent>>(6)
+            .WaitForExecutionOf<BEvent>(7)
+            .WaitForExecutionOf<IEvent<DEvent>>(6)
             .ExecuteAndWaitAsync(writeEvents);
 
         tracked.Executed.MessagesOf<IEvent<AEvent>>().Count().ShouldBe(6);
@@ -298,7 +311,7 @@ public class subscriptions_end_to_end
                         x.PublishEvent<AEvent>();
                         x.PublishEvent<DEvent>();
                     });
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var store = host.Services.GetRequiredService<IDocumentStore>();
 
@@ -321,8 +334,12 @@ public class subscriptions_end_to_end
             await daemon.WaitForNonStaleData(30.Seconds());
         };
 
+        // See use_unfiltered_publishing_subscription for why the explicit waiters are needed
         var tracked = await host
             .TrackActivity()
+            .Timeout(60.Seconds())
+            .WaitForExecutionOf<IEvent<AEvent>>(6)
+            .WaitForExecutionOf<IEvent<DEvent>>(6)
             .ExecuteAndWaitAsync(writeEvents);
 
         tracked.Executed.MessagesOf<IEvent<AEvent>>().Count().ShouldBe(6);
@@ -330,6 +347,140 @@ public class subscriptions_end_to_end
         // Filtered out
         tracked.Executed.MessagesOf<BEvent>().Count().ShouldBe(0);
         tracked.Executed.MessagesOf<IEvent<DEvent>>().Count().ShouldBe(6);
+    }
+
+    [Fact]
+    public async Task non_conjoined_store_preserves_legacy_default_tenant_fallthrough()
+    {
+        // Companion to carry_default_tenant_id_through_under_conjoined_tenancy:
+        // for non-conjoined stores the relay must keep falling through to the bus
+        // context's TenantId, so any setup that relied on the database identifier as
+        // the message tenant (e.g. per-tenant ancillary stores with a custom
+        // Database.Identifier) keeps working.
+        await dropSchema();
+
+        using var host = await Host.CreateDefaultBuilder()
+            .UseWolverine(opts =>
+            {
+                opts.Durability.Mode = DurabilityMode.Solo;
+
+                opts.Policies.UseDurableLocalQueues();
+
+                opts.Services.AddMarten(m =>
+                    {
+                        m.DisableNpgsqlLogging = true;
+                        m.Connection(Servers.PostgresConnectionString);
+                        m.DatabaseSchemaName = "subscriptions";
+                        // Default (single) tenancy on the events store
+                    }).IntegrateWithWolverine()
+                    .UseLightweightSessions()
+                    .PublishEventsToWolverine("Publish", x =>
+                    {
+                        x.PublishEvent<AEvent>();
+                    });
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
+
+        var store = host.DocumentStore();
+
+        var daemon = await store.BuildProjectionDaemonAsync();
+
+        await daemon.StartAllAsync();
+
+        Func<IMessageContext, Task> writeEvents = async _ =>
+        {
+            await using var session = store.LightweightSession();
+            session.Events.StartStream(Guid.NewGuid(), new AEvent(), new AEvent());
+            await session.SaveChangesAsync();
+
+            await daemon.WaitForNonStaleData(30.Seconds());
+        };
+
+        var tracked = await host
+            .TrackActivity()
+            .ExecuteAndWaitAsync(writeEvents);
+
+        var aEnvelopes = tracked.MessageSucceeded.Envelopes()
+            .Where(x => x.Message is IEvent<AEvent>)
+            .ToList();
+
+        aEnvelopes.ShouldNotBeEmpty();
+
+        // Pre-fix and post-fix behaviour for non-conjoined stores: the relay falls through
+        // and envelope.TenantId is the bus context value that
+        // WolverineSubscriptionRunner set from operations.Database.Identifier
+        // (e.g. "Main" for a single-database Marten store). Crucially it must NOT be the
+        // default-tenant marker — that would mean the fix had over-applied and dropped the
+        // database-identifier-as-tenant convention used by some ancillary-store setups.
+        foreach (var envelope in aEnvelopes)
+        {
+            envelope.TenantId.ShouldNotBeNull();
+            envelope.TenantId.ShouldNotBe(JasperFx.StorageConstants.DefaultTenantId);
+        }
+    }
+
+    [Fact]
+    public async Task carry_default_tenant_id_through_under_conjoined_tenancy()
+    {
+        // Regression: PublishingRelay used to drop DeliveryOptions for default-tenant
+        // events, letting WolverineSubscriptionRunner's bus.TenantId
+        // (= operations.Database.Identifier) leak onto the outbound envelope. Under
+        // conjoined tenancy where the database identifier is not the tenant, that
+        // misrouted default-tenant events into the wrong tenant context.
+        await dropSchema();
+
+        using var host = await Host.CreateDefaultBuilder()
+            .UseWolverine(opts =>
+            {
+                opts.Durability.Mode = DurabilityMode.Solo;
+
+                opts.Policies.UseDurableLocalQueues();
+
+                opts.Services.AddMarten(m =>
+                    {
+                        m.DisableNpgsqlLogging = true;
+                        m.Connection(Servers.PostgresConnectionString);
+                        m.DatabaseSchemaName = "subscriptions";
+                        m.Events.TenancyStyle = JasperFx.MultiTenancy.TenancyStyle.Conjoined;
+                    }).IntegrateWithWolverine()
+                    .UseLightweightSessions()
+                    .PublishEventsToWolverine("Publish", x =>
+                    {
+                        x.PublishEvent<AEvent>();
+                    });
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
+
+        var store = host.DocumentStore();
+
+        var daemon = await store.BuildProjectionDaemonAsync();
+
+        await daemon.StartAllAsync();
+
+        Func<IMessageContext, Task> writeEvents = async _ =>
+        {
+            // No tenant arg -> events get IEvent.TenantId == StorageConstants.DefaultTenantId
+            await using var session = store.LightweightSession();
+            session.Events.StartStream(Guid.NewGuid(), new AEvent(), new AEvent());
+            await session.SaveChangesAsync();
+
+            await daemon.WaitForNonStaleData(30.Seconds());
+        };
+
+        var tracked = await host
+            .TrackActivity()
+            .ExecuteAndWaitAsync(writeEvents);
+
+        var aEnvelopes = tracked.MessageSucceeded.Envelopes()
+            .Where(x => x.Message is IEvent<AEvent>)
+            .ToList();
+
+        aEnvelopes.ShouldNotBeEmpty();
+
+        foreach (var envelope in aEnvelopes)
+        {
+            // Marten's IEvent for a default-tenant event carries TenantId == "*DEFAULT*";
+            // the relayed Wolverine envelope must propagate that, not the database identifier.
+            envelope.TenantId.ShouldBe(JasperFx.StorageConstants.DefaultTenantId);
+        }
     }
 
     [Fact]
@@ -357,7 +508,7 @@ public class subscriptions_end_to_end
                         x.PublishEvent<AEvent>();
                         x.PublishEvent<DEvent>((e, bus) => bus.PublishAsync(new TransformedMessage('D')));
                     });
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
         
         var store = host.DocumentStore();
 
@@ -421,7 +572,7 @@ public class subscriptions_end_to_end
                         x.PublishEvent<AEvent>();
                         x.PublishEvent<DEvent>((e, bus) => bus.PublishAsync(new TransformedMessage('D')));
                     });
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var store = host.Services.GetRequiredService<IDocumentStore>();
 
@@ -444,8 +595,12 @@ public class subscriptions_end_to_end
             await daemon.WaitForNonStaleData(30.Seconds());
         };
 
+        // See use_unfiltered_publishing_subscription for why the explicit waiters are needed
         var tracked = await host
             .TrackActivity()
+            .Timeout(60.Seconds())
+            .WaitForExecutionOf<IEvent<AEvent>>(6)
+            .WaitForExecutionOf<TransformedMessage>(6)
             .ExecuteAndWaitAsync(writeEvents);
 
         tracked.Executed.MessagesOf<IEvent<AEvent>>().Count().ShouldBe(6);
@@ -479,7 +634,7 @@ public class subscriptions_end_to_end
                     }).IntegrateWithWolverine()
                     .UseLightweightSessions()
                     .SubscribeToEventsWithServices<ServiceUsingSubscription>(ServiceLifetime.Singleton);
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var store = host.Services.GetRequiredService<IDocumentStore>();
 
@@ -492,14 +647,14 @@ public class subscriptions_end_to_end
         session.Events.StartStream(Guid.NewGuid(), new AEvent(), new AEvent(), new AEvent(), new AEvent());
         session.Events.StartStream(Guid.NewGuid(), new BEvent(), new CEvent(), new CEvent(), new BEvent());
 
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         await daemon.WaitForNonStaleData(20.Seconds());
 
 
         // Second round
         session.Events.StartStream(Guid.NewGuid(), new DEvent(), new DEvent(), new DEvent(), new DEvent());
-        await session.SaveChangesAsync();
+        await session.SaveChangesAsync(TestContext.Current.CancellationToken);
         // await daemon.WaitForNonStaleData(20.Seconds());
 
         ServiceUsingSubscription.Read.Count().ShouldBe(1);
@@ -531,7 +686,7 @@ public class subscriptions_end_to_end
                     }).IntegrateWithWolverine()
                     .UseLightweightSessions()
                     .SubscribeToEventsWithServices<ServiceUsingSubscription>(ServiceLifetime.Scoped);
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var store = host.Services.GetRequiredService<IDocumentStore>();
 
@@ -548,7 +703,7 @@ public class subscriptions_end_to_end
             session.Events.StartStream(Guid.NewGuid(), new AEvent(), new AEvent(), new AEvent(), new AEvent());
             session.Events.StartStream(Guid.NewGuid(), new BEvent(), new CEvent(), new CEvent(), new BEvent());
 
-            await session.SaveChangesAsync();
+            await session.SaveChangesAsync(TestContext.Current.CancellationToken);
         }
 
         await daemon.WaitForNonStaleData(60.Seconds());

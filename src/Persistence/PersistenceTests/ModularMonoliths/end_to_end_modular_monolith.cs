@@ -26,12 +26,19 @@ using Weasel.SqlServer;
 using Wolverine.Configuration.Capabilities;
 using Wolverine.Marten;
 using Wolverine.Persistence;
-using Xunit.Abstractions;
-
 namespace PersistenceTests.ModularMonoliths;
 
 public class MonolithFixture : IAsyncLifetime
 {
+    /// <summary>
+    /// Deliberately NOT the default "wolverine" schema. This fixture schedules a message bound for
+    /// rabbitmq://queue/items, so any row it leaves behind names a transport that other suites do not
+    /// register. Sharing the default schema on the same database server -- as every suite here does --
+    /// meant such an orphan surfaced as a phantom failure in whichever suite next ran its durability
+    /// agent against it. See https://github.com/JasperFx/wolverine/issues/3413.
+    /// </summary>
+    public const string SchemaName = "modular_monolith";
+
     public MonolithFixture()
     {
         ItemsTable = new Table(new DbObjectName("mt_items", "items"));
@@ -44,7 +51,7 @@ public class MonolithFixture : IAsyncLifetime
 
     public Table ItemsTable { get; }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         await using var conn = new NpgsqlConnection(Servers.PostgresConnectionString);
         await conn.OpenAsync();
@@ -54,7 +61,7 @@ public class MonolithFixture : IAsyncLifetime
         Host = await Microsoft.Extensions.Hosting.Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
-                opts.Durability.MessageStorageSchemaName = "wolverine";
+                opts.Durability.MessageStorageSchemaName = SchemaName;
                 opts.Policies.UseDurableLocalQueues();
                 opts.Policies.UseDurableOutboxOnAllSendingEndpoints();
                 opts.Policies.AutoApplyTransactions();
@@ -118,9 +125,10 @@ public class MonolithFixture : IAsyncLifetime
         }
     }
 
-    public Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
-        return Host.StopAsync();
+        await Host.StopAsync();
+        Host.Dispose();
     }
 
     private async Task<string> CreateDatabaseIfNotExists(NpgsqlConnection conn, string databaseName)
@@ -150,15 +158,15 @@ public class end_to_end_modular_monolith : IClassFixture<MonolithFixture>, IAsyn
         theHost = fixture.Host;
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         // Make it empty...
         await theHost.RebuildAllEnvelopeStorageAsync();
     }
 
-    public Task DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        return Task.CompletedTask;
+        return ValueTask.CompletedTask;
     }
 
     [Fact]
@@ -168,9 +176,9 @@ public class end_to_end_modular_monolith : IClassFixture<MonolithFixture>, IAsyn
 
         capabilities.MessageStores.Select(x => x.Uri)
              .ShouldBe([
-                 new Uri("wolverinedb://postgresql/localhost/postgres/wolverine"),
-                 new Uri("wolverinedb://postgresql/localhost/things/wolverine"),
-                 new Uri("wolverinedb://sqlserver/localhost/master/wolverine")
+                 new Uri($"wolverinedb://postgresql/localhost/postgres/{MonolithFixture.SchemaName}"),
+                 new Uri($"wolverinedb://postgresql/localhost/things/{MonolithFixture.SchemaName}"),
+                 new Uri($"wolverinedb://sqlserver/localhost/master/{MonolithFixture.SchemaName}")
              ]);
     }
 
@@ -205,9 +213,9 @@ public class end_to_end_modular_monolith : IClassFixture<MonolithFixture>, IAsyn
         var databases = (await runtime.Stores.FindAllAsync()).Select(x => x.Uri).OrderBy(x => x.ToString()).ToArray();
         
         databases.ShouldBe([
-            new Uri("wolverinedb://postgresql/localhost/postgres/wolverine"),
-            new Uri("wolverinedb://postgresql/localhost/things/wolverine"),
-            new Uri("wolverinedb://sqlserver/localhost/master/wolverine"),
+            new Uri($"wolverinedb://postgresql/localhost/postgres/{MonolithFixture.SchemaName}"),
+            new Uri($"wolverinedb://postgresql/localhost/things/{MonolithFixture.SchemaName}"),
+            new Uri($"wolverinedb://sqlserver/localhost/master/{MonolithFixture.SchemaName}"),
             
             ]
         );
@@ -239,7 +247,7 @@ public class end_to_end_modular_monolith : IClassFixture<MonolithFixture>, IAsyn
         var session = await theHost.SendMessageAndWaitAsync(message);
 
         var envelope = session.Sent.SingleEnvelope<ApproveItem1>();
-        envelope.Store!.Uri.ShouldBe(new Uri("wolverinedb://sqlserver/localhost/master/wolverine"));
+        envelope.Store!.Uri.ShouldBe(new Uri($"wolverinedb://sqlserver/localhost/master/{MonolithFixture.SchemaName}"));
         var messageId = envelope.Id;
 
         // Message should have been deleted
@@ -254,7 +262,7 @@ public class end_to_end_modular_monolith : IClassFixture<MonolithFixture>, IAsyn
         var session = await theHost.SendMessageAndWaitAsync(message);
         var scheduledEnvelope = session.Scheduled.SingleEnvelope<Envelope>();
 
-        scheduledEnvelope.Store!.Uri.ShouldBe(new Uri("wolverinedb://sqlserver/localhost/master/wolverine"));
+        scheduledEnvelope.Store!.Uri.ShouldBe(new Uri($"wolverinedb://sqlserver/localhost/master/{MonolithFixture.SchemaName}"));
 
         var stored = await scheduledEnvelope.Store.Admin.AllIncomingAsync();
         var persisted = stored.Where(x => x.MessageType == TransportConstants.ScheduledEnvelope).Single();
@@ -280,7 +288,7 @@ public class end_to_end_modular_monolith : IClassFixture<MonolithFixture>, IAsyn
         var session = await theHost.SendMessageAndWaitAsync(message);
 
         var envelope = session.Sent.SingleEnvelope<ApproveThing>();
-        envelope.Store!.Uri.ShouldBe(new Uri("wolverinedb://postgresql/localhost/postgres/wolverine"));
+        envelope.Store!.Uri.ShouldBe(new Uri($"wolverinedb://postgresql/localhost/postgres/{MonolithFixture.SchemaName}"));
         var messageId = envelope.Id;
 
         // Message should have been deleted
@@ -295,7 +303,7 @@ public class end_to_end_modular_monolith : IClassFixture<MonolithFixture>, IAsyn
         var session = await theHost.SendMessageAndWaitAsync(message);
         var scheduledEnvelope = session.Scheduled.SingleEnvelope<Envelope>();
         
-        scheduledEnvelope.Store!.Uri.ShouldBe(new Uri("wolverinedb://postgresql/localhost/postgres/wolverine"));
+        scheduledEnvelope.Store!.Uri.ShouldBe(new Uri($"wolverinedb://postgresql/localhost/postgres/{MonolithFixture.SchemaName}"));
 
         var stored = await scheduledEnvelope.Store.Admin.AllIncomingAsync();
         var persisted = stored.Where(x => x.MessageType == TransportConstants.ScheduledEnvelope).Single();

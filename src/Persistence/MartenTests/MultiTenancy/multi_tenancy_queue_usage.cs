@@ -46,7 +46,7 @@ public class multi_tenancy_queue_usage : PostgresqlContext, IAsyncLifetime
         return builder.ConnectionString;
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         await using var conn = new NpgsqlConnection(Servers.PostgresConnectionString);
         await conn.OpenAsync();
@@ -77,7 +77,8 @@ public class multi_tenancy_queue_usage : PostgresqlContext, IAsyncLifetime
                 opts.Durability.NodeReassignmentPollingTime = 1.Seconds();
                 opts.Durability.HealthCheckPollingTime = 1.Seconds();
                 opts.Durability.TenantCheckPeriod = 250.Milliseconds();
-
+                opts.Discovery.DisableConventionalDiscovery()
+                    .IncludeType(typeof(TenantDocHandler));
                 opts.Durability.Mode = DurabilityMode.Solo;
 
                 opts.ListenToPostgresqlQueue("one");
@@ -110,6 +111,7 @@ public class multi_tenancy_queue_usage : PostgresqlContext, IAsyncLifetime
         _sender = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery();
                 // This is too extreme for real usage, but helps tests to run faster
                 opts.Durability.NodeReassignmentPollingTime = 1.Seconds();
                 opts.Durability.HealthCheckPollingTime = 1.Seconds();
@@ -151,12 +153,13 @@ public class multi_tenancy_queue_usage : PostgresqlContext, IAsyncLifetime
 
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
-        await _receiver.StopAsync();
+        await Task.WhenAll(
+            _receiver.StopAsync(),
+            _sender.StopAsync()
+        );
         _receiver.Dispose();
-
-        await _sender.StopAsync();
         _sender.Dispose();
     }
 
@@ -181,7 +184,7 @@ public class multi_tenancy_queue_usage : PostgresqlContext, IAsyncLifetime
 
             if (has3 && has4) return;
 
-            await Task.Delay(250.Milliseconds());
+            await Task.Delay(250.Milliseconds(), TestContext.Current.CancellationToken);
         }
 
         throw new TimeoutException("Did not detect the two new per tenant listeners were started up");
@@ -201,7 +204,7 @@ public class multi_tenancy_queue_usage : PostgresqlContext, IAsyncLifetime
             .Destination.ShouldBe(new Uri("postgresql://one/tenant3"));
 
         await using var session = theStore.LightweightSession("tenant3");
-        var doc = await session.LoadAsync<TenantDoc>(message.Id);
+        var doc = await session.LoadAsync<TenantDoc>(message.Id, TestContext.Current.CancellationToken);
         doc.ShouldNotBeNull();
         doc.Number.ShouldBe(10);
     }

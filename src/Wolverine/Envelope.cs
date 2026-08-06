@@ -1,4 +1,5 @@
-﻿using JasperFx.Core;
+﻿using System.Diagnostics;
+using JasperFx.Core;
 using JasperFx.Core.Reflection;
 using JasperFx.MultiTenancy;
 using MassTransit;
@@ -42,6 +43,7 @@ public partial class Envelope : IHasTenantId
     
     public Envelope()
     {
+        Debug.WriteLine("Being created");
     }
 
     public Envelope(object message)
@@ -77,7 +79,6 @@ public partial class Envelope : IHasTenantId
     }
 
     #region sample_envelope_deliver_by_property
-
     /// <summary>
     ///     Instruct Wolverine to throw away this message if it is not successfully sent and processed
     ///     by the time specified
@@ -150,7 +151,7 @@ public partial class Envelope : IHasTenantId
         {
             return _data;
         }
-        AssertMessage();
+        assertMessage();
 
         if(Serializer is IAsyncMessageSerializer asyncMessaeSerializer)
         {
@@ -180,7 +181,7 @@ public partial class Envelope : IHasTenantId
                 return _data;
             }
 
-            AssertMessage();
+            assertMessage();
 
             if (Serializer == null)
             {
@@ -208,7 +209,7 @@ public partial class Envelope : IHasTenantId
         set => _data = value;
     }
 
-    private void AssertMessage()
+    private void assertMessage()
     {
         if (_message == null)
         {
@@ -245,6 +246,16 @@ public partial class Envelope : IHasTenantId
     public int SendAttempts { get; set; }
 
     public DateTimeOffset SentAt { get; set; } = DateTimeOffset.UtcNow;
+
+    /// <summary>
+    /// Wall-clock UTC timestamp set inside <see cref="MarkReceived"/> when the envelope
+    /// is handed off from a listener to the receiver pipeline. Stays <c>null</c> for
+    /// envelopes that haven't been through a receiver yet (e.g. outbound). Read by the
+    /// opt-in <c>wolverine.envelope.receive_dwell_ms</c> activity tag from
+    /// <see cref="TrackingOptions.HandlerExecutionDiagnosticsEnabled"/>; not serialized.
+    /// </summary>
+    [JsonIgnore]
+    public DateTimeOffset? ReceivedAt { get; set; }
 
     /// <summary>
     ///     The name of the service that sent this envelope

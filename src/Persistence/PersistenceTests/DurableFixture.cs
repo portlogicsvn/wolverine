@@ -18,12 +18,12 @@ public abstract class DurableFixture<TTriggerHandler, TItemCreatedHandler> : IAs
     private IHost theReceiver = null!;
     private IHost theSender = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         var receiverPort = PortFinder.GetAvailablePort();
         var senderPort = PortFinder.GetAvailablePort();
         
-        theSender = WolverineHost.For(senderRegistry =>
+        theSender = await WolverineHost.ForAsync(senderRegistry =>
         {
             senderRegistry
                 .DisableConventionalDiscovery()
@@ -48,7 +48,7 @@ public abstract class DurableFixture<TTriggerHandler, TItemCreatedHandler> : IAs
         
         await theSender.ResetResourceState();
 
-        theReceiver = WolverineHost.For(receiverRegistry =>
+        theReceiver = await WolverineHost.ForAsync(receiverRegistry =>
         {
             receiverRegistry.DisableConventionalDiscovery()
                 .IncludeType<TTriggerHandler>()
@@ -66,12 +66,12 @@ public abstract class DurableFixture<TTriggerHandler, TItemCreatedHandler> : IAs
         await initializeStorage(theSender, theReceiver);
     }
 
-    public Task DisposeAsync()
+    public ValueTask DisposeAsync()
     {
         theSender?.Dispose();
         theReceiver?.Dispose();
 
-        return Task.CompletedTask;
+        return ValueTask.CompletedTask;
     }
 
     private async Task cleanDatabase()
@@ -130,7 +130,7 @@ public abstract class DurableFixture<TTriggerHandler, TItemCreatedHandler> : IAs
 
         await theSender.TrackActivity().AlsoTrack(theReceiver).SendMessageAndWaitAsync(item);
 
-        await Task.Delay(500.Milliseconds());
+        await Task.Delay(500.Milliseconds(), TestContext.Current.CancellationToken);
 
 
         await assertReceivedItemMatchesSent(item);

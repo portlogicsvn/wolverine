@@ -24,7 +24,6 @@ public class compliance_using_table_partitioning : MessageStoreCompliance
     public override async Task<IHost> BuildCleanHost()
     {
         #region sample_enabling_inbox_partitioning
-
         var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -76,6 +75,37 @@ public class compliance_using_table_partitioning : MessageStoreCompliance
     }
 
     [Fact]
+    public async Task delete_expired_handled_envelopes_in_batches()
+    {
+        // Regression for #3116 -- the batched, ctid-based cleanup has to work against the
+        // partitioned _handled table without spilling across partitions.
+        for (var i = 0; i < 5; i++)
+        {
+            var envelope = ObjectMother.Envelope();
+            await thePersistence.Inbox.StoreIncomingAsync(envelope);
+            await thePersistence.Inbox.MarkIncomingEnvelopeAsHandledAsync(envelope);
+        }
+
+        // Force expiry by pushing keep_until into the past
+        await using (var conn = new NpgsqlConnection(Servers.PostgresConnectionString))
+        {
+            await conn.OpenAsync(TestContext.Current.CancellationToken);
+            await conn.CreateCommand(
+                    $"update receiver_partitioned.{DatabaseConstants.IncomingTable} set {DatabaseConstants.KeepUntil} = :cutoff where status = 'Handled'")
+                .With("cutoff", DateTimeOffset.UtcNow.Subtract(1.Hours()))
+                .ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+            await conn.CloseAsync();
+        }
+
+        var command = new DeleteExpiredHandledEnvelopesCommand((IMessageDatabase)thePersistence,
+            new DurabilitySettings(), Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+        await theHost.InvokeAsync(command);
+
+        var counts = await thePersistence.Admin.FetchCountsAsync();
+        counts.Handled.ShouldBe(0);
+    }
+
+    [Fact]
     public async Task delete_old_log_node_records()
     {
         var nodeRecord1 = new NodeRecord()
@@ -103,11 +133,11 @@ public class compliance_using_table_partitioning : MessageStoreCompliance
         await theHost.InvokeAsync(new DatabaseOperationBatch(messageDatabase, [log]));
 
         using var conn = new NpgsqlConnection(Servers.PostgresConnectionString);
-        await conn.OpenAsync();
+        await conn.OpenAsync(TestContext.Current.CancellationToken);
         await conn.CreateCommand(
                 $"update receiver_partitioned.{DatabaseConstants.NodeRecordTableName} set timestamp = :time where node_number = 2")
             .With("time", DateTimeOffset.UtcNow.Subtract(10.Days()))
-            .ExecuteNonQueryAsync();
+            .ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         await conn.CloseAsync();
         
         var recent2 = await thePersistence.Nodes.FetchRecentRecordsAsync(100);

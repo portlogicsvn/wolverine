@@ -5,8 +5,7 @@ using Wolverine;
 using Wolverine.EntityFrameworkCore;
 using Wolverine.SqlServer;
 
-#region sample_InMediatorProgram
-
+#region sample_inmediatorprogram
 var builder = WebApplication.CreateBuilder(args);
 
 // Using Weasel to make sure the items table exists
@@ -39,26 +38,22 @@ builder.Services.AddDbContext<ItemsDbContext>(
 #endregion
 
 builder.Services.AddControllers();
-builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddOpenApi();
 
 var app = builder.Build();
 
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
 {
-    app.UseSwagger();
-    app.UseSwaggerUI();
+    app.MapOpenApi();
 }
 
-#region sample_InMemoryMediator_UseWolverineAsMediatorController
-
+#region sample_inmemorymediator_usewolverineasmediatorcontroller
 app.MapPost("/items/create", (CreateItemCommand cmd, IMessageBus bus) => bus.InvokeAsync(cmd));
 
 #endregion
 
-#region sample_InMemoryMediator_WithResponseController
-
+#region sample_inmemorymediator_withresponsecontroller
 app.MapPost("/items/create2", (CreateItemCommand cmd, IMessageBus bus) => bus.InvokeAsync<ItemCreated>(cmd));
 
 #endregion

@@ -1,3 +1,4 @@
+using System.Security.Claims;
 using JasperFx;
 using JasperFx.Events;
 using Marten;
@@ -5,17 +6,18 @@ using Marten.Events;
 using Marten.Linq;
 using Marten.Pagination;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.OpenApi.Models;
 using Wolverine.Attributes;
 using Wolverine.ErrorHandling;
 using Wolverine.Http;
 using Wolverine.Http.Marten;
 using Wolverine.Marten;
 using Wolverine.Runtime.Handlers;
+using WolverineWebApi.TestSupport;
 
 namespace WolverineWebApi.Marten;
 
 #region sample_order_aggregate_for_http
-
 // OrderId refers to the identity of the Order aggregate
 public record MarkItemReady(Guid OrderId, string ItemName, int Version);
 
@@ -119,8 +121,7 @@ public static class CanShipOrderMiddleWare
 
 public static class MarkItemEndpoint
 {
-    #region sample_using_EmptyResponse
-
+    #region sample_using_emptyresponse
     [AggregateHandler]
     [WolverinePost("/orders/ship"), EmptyResponse]
     // The OrderShipped return value is treated as an event being posted
@@ -145,7 +146,6 @@ public static class MarkItemEndpoint
     }
 
     #region sample_using_aggregate_attribute_1
-
     [WolverinePost("/orders/{orderId}/ship2"), EmptyResponse]
     // The OrderShipped return value is treated as an event being posted
     // to a Marten even stream
@@ -162,7 +162,6 @@ public static class MarkItemEndpoint
     #endregion
 
     #region sample_using_aggregate_attribute_2
-
     [WolverinePost("/orders/{orderId}/ship3"), EmptyResponse]
     // The OrderShipped return value is treated as an event being posted
     // to a Marten even stream
@@ -186,7 +185,6 @@ public static class MarkItemEndpoint
     }
 
     #region sample_using_aggregate_attribute_query_parameter
-    
     [WolverinePost("/orders/ship/from-query"), EmptyResponse]
     // The OrderShipped return value is treated as an event being posted
     // to a Marten even stream
@@ -238,7 +236,6 @@ public static class MarkItemEndpoint
     }
 
     #region sample_returning_multiple_events_from_http_endpoint
-
     [AggregateHandler]
     [WolverinePost("/orders/itemready")]
     public static (OrderStatus, Events) Post(MarkItemReady command, Order order)
@@ -285,8 +282,12 @@ public static class MarkItemEndpoint
         );
     }
 
+    // GH-3420: {id} has no route constraint and appears nowhere in the method signature -- it is the
+    // Order aggregate's identity, which only the Marten aggregate workflow knows about.
     [AggregateHandler]
     [WolverinePost("/orders/{id}/confirm")]
+    [ExpectParameter("id", ParameterLocation.Path, Type = "string", Format = "uuid", Required = true)]
+    [ExpectParameterCount(1)]
     public static (AcceptResponse, Events) Confirm(ConfirmOrder command, Order order)
     {
         return (
@@ -296,7 +297,6 @@ public static class MarkItemEndpoint
     }
 
     #region sample_returning_updated_aggregate_as_response_from_http_endpoint
-
     [AggregateHandler]
     [WolverinePost("/orders/{id}/confirm2")]
     // The updated version of the Order aggregate will be returned as the response body
@@ -323,8 +323,7 @@ public static class MarkItemEndpoint
         );
     }
 
-    #region sample_using_ReadAggregate_in_HTTP
-
+    #region sample_using_readaggregate_in_http
     [WolverineGet("/orders/latest/{id}")]
     public static Order GetLatest(Guid id, [ReadAggregate] Order order) => order;
 
@@ -335,7 +334,65 @@ public static class MarkItemEndpoint
     
     [WolverineGet("/orders/latest/from-query")]
     public static Order GetLatestFromQuery([FromQuery] Guid id, [ReadAggregate] Order order) => order;
+
+    // Repro for the [AsParameters] + [ReadAggregate] + route-id combination (codegen infinite loop)
+    [WolverineGet("/orders/latest/asparameters/{id}")]
+    public static Order GetLatestViaAsParameters(
+        [Microsoft.AspNetCore.Http.AsParameters] GetLatestOrderQuery query,
+        [ReadAggregate] Order order) => order;
 }
+
+public record GetLatestOrderQuery([FromRoute] Guid Id);
+
+// GH-3135 repro: an [AsParameters] object carries the conventional aggregate-id route value
+// ({orderId}) AND a [FromBody] payload, while [WriteAggregate] IEventStream<Order> resolves the
+// stream from that same id. Mirrors uniquelau's
+//   (Response, IEventStream<Journey>) Handle([AsParameters] cmd, [WriteAggregate] IEventStream<Journey>)
+// where cmd = ([FromRoute] Guid JourneyId, [FromBody] Payload) — the shape that reportedly 500s.
+public record ShipOrderPayload(string Carrier);
+
+public record ShipOrderViaAsParameters([FromRoute] Guid OrderId, [FromBody] ShipOrderPayload Body);
+
+public record OrderShipmentResponse(Guid OrderId, string Carrier);
+
+public static class WriteAggregateViaAsParametersEndpoint
+{
+    [WolverinePost("/orders/asparameters/{orderId}/ship")]
+    public static OrderShipmentResponse Post(
+        [Microsoft.AspNetCore.Http.AsParameters] ShipOrderViaAsParameters command,
+        [WriteAggregate] IEventStream<Order> stream)
+    {
+        stream.AppendOne(new OrderShipped());
+        return new OrderShipmentResponse(command.OrderId, command.Body.Carrier);
+    }
+}
+
+#region sample_write_aggregate_from_method
+public record ConfirmOrderFromMethod;
+
+public static class WriteAggregateFromMethodEndpoint
+{
+    // This static method resolves the aggregate ID from claims
+    public static Guid ResolveOrderId(ClaimsPrincipal user)
+    {
+        var claim = user.FindFirstValue("order-id");
+        return claim != null ? Guid.Parse(claim) : Guid.Empty;
+    }
+
+    [WolverinePost("/orders/confirm-from-method"), EmptyResponse]
+    public static OrderConfirmed Post(
+        ConfirmOrderFromMethod command,
+        [WriteAggregate(FromMethod = nameof(ResolveOrderId))] Order order)
+    {
+        return new OrderConfirmed();
+    }
+
+    [WolverineGet("/orders/read-from-method")]
+    public static Order Get(
+        [ReadAggregate(FromMethod = nameof(ResolveOrderId))] Order order) => order;
+}
+
+#endregion
 
 #region sample_using_[FromQuery]_binding
 
@@ -379,8 +436,7 @@ public static class QueryOrdersEndpoint
 
 #endregion
 
-#region sample_showing_concurrency_exception_moving_directly_to_DLQ
-
+#region sample_showing_concurrency_exception_moving_directly_to_dlq
 public static class MarkItemReadyHandler
 {
     // This will let us specify error handling policies specific

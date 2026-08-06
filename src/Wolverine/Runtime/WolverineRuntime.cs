@@ -8,9 +8,11 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.ObjectPool;
 using Wolverine.Configuration;
+using Wolverine.ErrorHandling;
 using Wolverine.Logging;
 using Wolverine.Persistence;
 using Wolverine.Persistence.Durability;
+using Wolverine.Persistence.Sagas;
 using Wolverine.Runtime.Agents;
 using Wolverine.Runtime.Handlers;
 using Wolverine.Runtime.Metrics;
@@ -22,7 +24,7 @@ using Wolverine.Transports.Stub;
 
 namespace Wolverine.Runtime;
 
-public sealed partial class WolverineRuntime : IWolverineRuntime, IHostedService
+public sealed partial class WolverineRuntime : IWolverineRuntime, IWolverineRuntimeInternal, IHostedService
 {
     private readonly IServiceContainer _container;
     private readonly EndpointCollection _endpoints;
@@ -36,6 +38,7 @@ public sealed partial class WolverineRuntime : IWolverineRuntime, IHostedService
 
     private readonly Lazy<MessageStoreCollection> _stores;
     private readonly Lazy<MetricsAccumulator> _accumulator;
+    private readonly Lazy<ISagaStoreDiagnostics> _sagaStorage;
 
     public WolverineRuntime(WolverineOptions options,
         IServiceContainer container,
@@ -45,15 +48,9 @@ public sealed partial class WolverineRuntime : IWolverineRuntime, IHostedService
         Options = options;
         Handlers = options.HandlerGraph;
 
-        // Set the envelope ID generation strategy based on configuration
         Envelope.IdGenerator = options.EnvelopeIdGeneration switch
         {
-#if NET9_0_OR_GREATER
             EnvelopeIdGeneration.GuidV7 => Guid.CreateVersion7,
-#else
-            EnvelopeIdGeneration.GuidV7 => throw new NotSupportedException(
-                "EnvelopeIdGeneration.GuidV7 requires .NET 9 or later. Guid.CreateVersion7 is not available on .NET 8."),
-#endif
             _ => MassTransit.NewId.NextSequentialGuid
         };
 
@@ -61,6 +58,14 @@ public sealed partial class WolverineRuntime : IWolverineRuntime, IHostedService
 
         _stores =
             new Lazy<MessageStoreCollection>(() => container.Services.GetRequiredService<MessageStoreCollection>());
+
+        // Aggregate every registered ISagaStoreDiagnostics behind one
+        // fan-out facade so callers (CritterWatch, /describe ...) see a
+        // single saga catalog regardless of how many backing stores are
+        // wired into this host.
+        _sagaStorage = new Lazy<ISagaStoreDiagnostics>(() =>
+            new AggregateSagaStoreDiagnostics(
+                container.Services.GetServices<ISagaStoreDiagnostics>()));
 
         LoggerFactory = loggers;
         Logger = loggers.CreateLogger<WolverineRuntime>();
@@ -77,9 +82,22 @@ public sealed partial class WolverineRuntime : IWolverineRuntime, IHostedService
         var provider = container.GetInstance<ObjectPoolProvider>();
         ExecutionPool = provider.Create(this);
 
+        // Separate pool for Envelope. See wolverine#2726 — pools envelopes
+        // allocated by the internal receive pipeline (the three Executor.cs
+        // InvokeAsync request/reply sites). Gated on ActiveSession == null
+        // at acquire time so tracking sessions, observer tests, and the
+        // ITrackedSession.Events capture-after-handler scenario all see
+        // fresh allocations and zero behavior change.
+        EnvelopePool = provider.Create(new EnvelopePoolPolicy());
+
         Pipeline = new HandlerPipeline(this, this);
 
         _container = container;
+
+        // GH-3564: when UseClaimCheck deferred to a DI-registered IClaimCheckStore (the
+        // ...FromServices overloads), hand it the built service provider now so the claim-check
+        // serializer resolves the real backend instead of silently falling back to the file system.
+        options.DeferredClaimCheckStore?.AttachProvider(container.Services);
 
         Cancellation = DurabilitySettings.Cancellation;
         _agentCancellation = CancellationTokenSource.CreateLinkedTokenSource(Cancellation);
@@ -88,14 +106,24 @@ public sealed partial class WolverineRuntime : IWolverineRuntime, IHostedService
 
         _endpoints = new EndpointCollection(this);
 
-        Replies = new ReplyTracker(loggers.CreateLogger<ReplyTracker>(), DurabilitySettings.AssignedNodeNumber);
+        Replies = new ReplyTracker(loggers.CreateLogger<ReplyTracker>(), DurabilitySettings.AssignedNodeNumber,
+            Options.ResultTypes);
         Handlers.AddMessageHandler(typeof(Acknowledgement), new AcknowledgementHandler(Replies));
         Handlers.AddMessageHandler(typeof(FailureAcknowledgement), new FailureAcknowledgementHandler(Replies, LoggerFactory.CreateLogger<FailureAcknowledgementHandler>()));
 
+        // GH-3224: millisecond-tuned histogram bucket boundaries (advice). Null => OpenTelemetry SDK
+        // defaults. Both time histograms are double-typed: execution time moved from long to
+        // double in GH-3490 so sub-millisecond handler executions are recorded instead of
+        // silently dropped.
+        var bucketBoundaries = options.Metrics.HistogramBucketBoundaries;
+        var timeAdvice = bucketBoundaries == null
+            ? null
+            : new InstrumentAdvice<double> { HistogramBucketBoundaries = bucketBoundaries.ToArray() };
+
         _sentCounter = Meter.CreateCounter<int>(MetricsConstants.MessagesSent, MetricsConstants.Messages,
             "Number of messages sent");
-        _executionCounter = Meter.CreateHistogram<long>(MetricsConstants.ExecutionTime, MetricsConstants.Milliseconds,
-            "Execution time in milliseconds");
+        _executionCounter = Meter.CreateHistogram<double>(MetricsConstants.ExecutionTime, MetricsConstants.Milliseconds,
+            "Execution time in milliseconds", tags: null, advice: timeAdvice);
         _successCounter = Meter.CreateCounter<int>(MetricsConstants.MessagesSucceeded, MetricsConstants.Messages,
             "Number of messages successfully processed");
 
@@ -110,9 +138,15 @@ public sealed partial class WolverineRuntime : IWolverineRuntime, IHostedService
 
         _effectiveTime = Meter.CreateHistogram<double>(MetricsConstants.EffectiveMessageTime,
             MetricsConstants.Milliseconds,
-            "Effective time between a message being sent and being completely handled in milliseconds");
+            "Effective time between a message being sent and being completely handled in milliseconds",
+            tags: null, advice: timeAdvice);
 
         _invokers = new LightweightCache<Type, IMessageInvoker>(findInvoker);
+
+        // Resolve IFaultPublisher lazily: the DI factory in HostBuilderExtensions reads
+        // back IWolverineRuntime to get the Meter, which would deadlock if we resolved
+        // it eagerly here while the runtime singleton is still being constructed.
+        _faultPublisher = new Lazy<IFaultPublisher>(() => _container.GetInstance<IFaultPublisher>());
 
         var activators = container.GetAllInstances<IWolverineActivator>();
         foreach (var activator in activators)
@@ -120,6 +154,9 @@ public sealed partial class WolverineRuntime : IWolverineRuntime, IHostedService
             activator.Apply(this);
         }
     }
+
+    private readonly Lazy<IFaultPublisher> _faultPublisher;
+    IFaultPublisher IWolverineRuntimeInternal.FaultPublisher => _faultPublisher.Value;
 
     public IStubHandlers Stubs => Options.Transports.GetOrCreate<StubTransport>();
 
@@ -130,6 +167,17 @@ public sealed partial class WolverineRuntime : IWolverineRuntime, IHostedService
     public IServiceProvider Services => _container.Services;
 
     public ObjectPool<MessageContext> ExecutionPool { get; }
+
+    /// <summary>
+    /// Pool of <see cref="Envelope"/> instances for the internal receive pipeline.
+    /// Acquire / release via <see cref="AcquireInternalEnvelope"/> and
+    /// <see cref="ReleaseInternalEnvelope"/> — those helpers gate on
+    /// <see cref="ActiveSession"/> so envelopes participating in a tracking
+    /// session always allocate fresh (preventing the
+    /// <see cref="EnvelopeRecord"/> capture-after-recycle hazard).
+    /// See wolverine#2726.
+    /// </summary>
+    internal ObjectPool<Envelope> EnvelopePool { get; }
 
     public HandlerGraph Handlers { get; }
 
@@ -164,6 +212,13 @@ public sealed partial class WolverineRuntime : IWolverineRuntime, IHostedService
             DeliveryOptions? options = null)
         {
             return Task.CompletedTask;
+        }
+
+        public IAsyncEnumerable<T> StreamAsync<T>(object message, MessageBus bus,
+            CancellationToken cancellation = default,
+            DeliveryOptions? options = null)
+        {
+            throw new NotSupportedException();
         }
     }
 
@@ -226,9 +281,11 @@ public sealed partial class WolverineRuntime : IWolverineRuntime, IHostedService
 
     public MessageStoreCollection Stores => _stores.Value;
 
+    public ISagaStoreDiagnostics SagaStorage => _sagaStorage.Value;
+
     public async Task<T?> TryFindMainMessageStore<T>() where T : class
     {
-        await _stores.Value.InitializeAsync();
+        await _stores.Value.InitializeAsync().ConfigureAwait(false);
         return _stores.Value.Main as T;
     }
 

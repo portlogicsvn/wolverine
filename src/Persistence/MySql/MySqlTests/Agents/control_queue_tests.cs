@@ -19,12 +19,12 @@ public class control_queue_tests : MySqlContext, IAsyncLifetime
     private static IHost _receiver = null!;
     private static Uri _receiverUri = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         await dropControlSchema();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await _sender.StopAsync();
         _sender.Dispose();
@@ -65,7 +65,7 @@ public class control_queue_tests : MySqlContext, IAsyncLifetime
     public async Task control_queue_table_should_exist()
     {
         await using var conn = new MySqlConnection(Servers.MySqlConnectionString);
-        await conn.OpenAsync();
+        await conn.OpenAsync(TestContext.Current.CancellationToken);
 
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = @"
@@ -75,8 +75,8 @@ public class control_queue_tests : MySqlContext, IAsyncLifetime
             AND table_name LIKE 'wolverine%'";
 
         var tables = new List<string>();
-        await using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        await using var reader = await cmd.ExecuteReaderAsync(TestContext.Current.CancellationToken);
+        while (await reader.ReadAsync(TestContext.Current.CancellationToken))
         {
             tables.Add(reader.GetString(0));
         }

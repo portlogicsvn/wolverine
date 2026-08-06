@@ -32,6 +32,7 @@ public class Bug_826_issue_with_paused_listener
 
         builder.UseWolverine(options =>
         {
+            options.Discovery.DisableConventionalDiscovery().IncludeType(typeof(UnreliableHandler));
             options.LocalQueueFor<ThisMeansTrouble>().Sequential();
             options.OnException<Exception>()
                 .Requeue().AndPauseProcessing(5.Seconds());
@@ -52,7 +53,7 @@ public class Bug_826_issue_with_paused_listener
                 .IntegrateWithWolverine();
         });
 
-        using var host = await builder.StartAsync();
+        using var host = await builder.StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         await host.TrackActivity()
             .WaitForMessageToBeReceivedAt<ThisMeansTrouble>(host)

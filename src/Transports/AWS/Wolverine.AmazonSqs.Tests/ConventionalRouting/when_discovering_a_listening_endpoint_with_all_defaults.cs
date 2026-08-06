@@ -5,15 +5,14 @@ using Wolverine.Configuration;
 
 namespace Wolverine.AmazonSqs.Tests.ConventionalRouting;
 
-[Trait("Category", "Flaky")]
 public class when_discovering_a_listening_endpoint_with_all_defaults : ConventionalRoutingContext
 {
     private readonly Uri theExpectedUri = "sqs://routed".ToUri();
-    private readonly AmazonSqsQueue theQueue;
+    private AmazonSqsQueue theQueue = null!;
 
-    public when_discovering_a_listening_endpoint_with_all_defaults()
+    public override async ValueTask InitializeAsync()
     {
-        theQueue = theRuntime.Endpoints.EndpointFor(theExpectedUri).ShouldBeOfType<AmazonSqsQueue>();
+        theQueue = (await theRuntime()).Endpoints.EndpointFor(theExpectedUri).ShouldBeOfType<AmazonSqsQueue>();
     }
 
     [Fact]
@@ -35,9 +34,9 @@ public class when_discovering_a_listening_endpoint_with_all_defaults : Conventio
     }
 
     [Fact]
-    public void should_be_an_active_listener()
+    public async Task should_be_an_active_listener()
     {
-        theRuntime.Endpoints.ActiveListeners().Any(x => x.Uri == theExpectedUri)
+        (await theRuntime()).Endpoints.ActiveListeners().Any(x => x.Uri == theExpectedUri)
             .ShouldBeTrue();
     }
 }

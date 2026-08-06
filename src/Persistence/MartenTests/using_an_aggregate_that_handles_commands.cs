@@ -1,7 +1,9 @@
 using IntegrationTests;
 using JasperFx.CodeGeneration;
 using Marten;
+using JasperFx.Events;
 using Marten.Events;
+using JasperFx.Events.Projections;
 using Marten.Events.Projections;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -26,6 +28,8 @@ public class using_an_aggregate_that_handles_commands : PostgresqlContext, IDisp
         theHost = Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
+                opts.Discovery.DisableConventionalDiscovery();
+                opts.Durability.Mode = DurabilityMode.Solo;
                 opts.ApplicationAssembly = GetType().Assembly;
                 opts.Services.AddMarten(o =>
                 {

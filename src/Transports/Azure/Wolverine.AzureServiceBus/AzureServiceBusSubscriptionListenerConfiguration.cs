@@ -1,3 +1,4 @@
+using Azure.Messaging.ServiceBus;
 using Azure.Messaging.ServiceBus.Administration;
 using Wolverine.AzureServiceBus.Internal;
 using Wolverine.Configuration;
@@ -64,6 +65,67 @@ public class AzureServiceBusSubscriptionListenerConfiguration : InteroperableLis
     }
 
     /// <summary>
+    ///     Customize the Azure Service Bus <see cref="ServiceBusProcessorOptions" /> used by this
+    ///     subscription listener when running in the inline (<c>ProcessInline()</c>) mode. This is the way
+    ///     to raise <see cref="ServiceBusProcessorOptions.MaxAutoLockRenewalDuration" /> for inline handlers
+    ///     that run longer than the Azure SDK's default of five minutes. Wolverine reserves control of the
+    ///     properties it depends on for message acknowledgement (currently <c>ReceiveMode</c>), which are
+    ///     re-asserted after this action runs.
+    /// </summary>
+    /// <param name="configure"></param>
+    /// <returns></returns>
+    public AzureServiceBusSubscriptionListenerConfiguration ConfigureProcessor(Action<ServiceBusProcessorOptions> configure)
+    {
+        add(e => e.ConfigureProcessor = configure);
+        return this;
+    }
+
+    /// <summary>
+    ///     Customize the Azure Service Bus <see cref="ServiceBusSessionProcessorOptions" /> used by this
+    ///     session-enabled subscription listener — e.g. <c>MaxConcurrentSessions</c>,
+    ///     <c>MaxAutoLockRenewalDuration</c>, <c>SessionIdleTimeout</c>, or <c>SessionIds</c>. Calling this
+    ///     implies <see cref="RequireSessions" /> and switches the session listener from the default
+    ///     AcceptNextSession loop to a <see cref="ServiceBusSessionProcessor" />. Multiple calls compose.
+    ///     Wolverine reserves control of the properties it depends on for message acknowledgement
+    ///     (<c>ReceiveMode</c>, <c>AutoCompleteMessages</c>), which are re-asserted after this action runs.
+    /// </summary>
+    /// <param name="configure"></param>
+    /// <returns></returns>
+    public AzureServiceBusSubscriptionListenerConfiguration ConfigureSessionProcessor(
+        Action<ServiceBusSessionProcessorOptions> configure)
+    {
+        add(e =>
+        {
+            e.Options.RequiresSession = true;
+            // Compose rather than overwrite so the SessionIds sugar can coexist with an explicit hook
+            e.ConfigureSessionProcessor += configure;
+        });
+        return this;
+    }
+
+    /// <summary>
+    ///     Pin this listener to only the given session identifiers. On a shared subscription this turns the
+    ///     session id into a broker-enforced routing key: competing consumers each pinned to their own id(s)
+    ///     never see each other's messages. Producers select the target by setting <c>DeliveryOptions.GroupId</c>
+    ///     to the session id. Delegates to <see cref="ConfigureSessionProcessor" /> by populating
+    ///     <c>ServiceBusSessionProcessorOptions.SessionIds</c>. (GH-3533)
+    /// </summary>
+    /// <param name="identifiers">The session identifiers this listener should exclusively lock</param>
+    /// <returns></returns>
+    public AzureServiceBusSubscriptionListenerConfiguration RequireSessionsWithOnlyTheseIdentifiers(
+        params string[] identifiers)
+    {
+        RequireSessions();
+        return ConfigureSessionProcessor(options =>
+        {
+            foreach (var id in identifiers)
+            {
+                options.SessionIds.Add(id);
+            }
+        });
+    }
+
+    /// <summary>
     ///     Configure the underlying Azure Service Bus Subscription rule. This is only applicable when
     ///     Wolverine is creating the Subscription.
     /// </summary>
@@ -106,6 +168,43 @@ public class AzureServiceBusSubscriptionListenerConfiguration : InteroperableLis
     public AzureServiceBusSubscriptionListenerConfiguration MaximumWaitTime(TimeSpan time)
     {
         add(e => e.MaximumWaitTime = time);
+        return this;
+    }
+
+    /// <summary>
+    ///     The number of messages that the underlying Azure Service Bus receiver eagerly buffers
+    ///     on the client ahead of processing for this subscription. The default is 0 (prefetch is
+    ///     disabled), or the transport-wide default set through
+    ///     <c>UseAzureServiceBus(...).PrefetchCount()</c>. Prefetched messages age against the
+    ///     subscription's message lock duration while they sit in the client buffer, so size this
+    ///     relative to MaximumMessagesToReceive and your handler latency
+    /// </summary>
+    /// <param name="prefetchCount">The client-side prefetch count. Must be non-negative</param>
+    /// <returns></returns>
+    public AzureServiceBusSubscriptionListenerConfiguration PrefetchCount(int prefetchCount)
+    {
+        if (prefetchCount < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(prefetchCount), prefetchCount,
+                "PrefetchCount cannot be negative");
+        }
+
+        add(e => e.PrefetchCount = prefetchCount);
+        return this;
+    }
+
+    /// <summary>
+    ///     How many messages an <c>Inline</c> listener for this subscription processes concurrently.
+    ///     This is the Azure Service Bus SDK's <c>MaxConcurrentCalls</c>, which Wolverine left at
+    ///     the SDK default of 1 -- so an inline listener consumed strictly one message at a time per
+    ///     endpoint. On a session listener driven by a <c>ServiceBusSessionProcessor</c> this sets
+    ///     <c>MaxConcurrentCallsPerSession</c> instead, which trades away the per-session FIFO
+    ///     ordering. Has no effect on the default Buffered/Durable batch receive loop. See GH-3494.
+    /// </summary>
+    /// <param name="concurrency">Concurrent handler invocations. Must be at least 1</param>
+    public AzureServiceBusSubscriptionListenerConfiguration MaximumConcurrentCalls(int concurrency)
+    {
+        add(e => e.MaximumConcurrentCalls = concurrency);
         return this;
     }
 

@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using JasperFx.Core.Reflection;
 using JasperFx.Descriptors;
 using Raven.Client.Documents;
@@ -60,13 +61,38 @@ public partial class RavenDbMessageStore : IMessageStoreWithAgentSupport
     public IMessageInbox Inbox => this;
     public IMessageOutbox Outbox => this;
     public INodeAgentPersistence Nodes => this;
+
+    // Default no-op listener store; real RavenDb-backed listener registry is
+    // a follow-up implementation. Stays a no-op while EnableDynamicListeners
+    // is false (default).
+    public IListenerStore Listeners { get; protected set; } = NullListenerStore.Instance;
+
     public IMessageStoreAdmin Admin => this;
     public IDeadLetters DeadLetters => this;
     public void Initialize(IWolverineRuntime runtime)
     {
-        // NOTHING YET
+        // In Balanced mode Wolverine requires a node control endpoint so nodes can
+        // exchange agent-coordination commands. Without this the runtime throws
+        // "ControlEndpoint cannot be null for this usage" from WolverineNode.For.
+        // Register a native RavenDB-backed control queue unless the user already
+        // supplied one (e.g. an external broker or UseTcpForControlEndpoint()).
+        if (Role == MessageStoreRole.Main
+            && runtime.Options.Transports.NodeControlEndpoint == null
+            && runtime.Options.Durability.Mode == DurabilityMode.Balanced)
+        {
+            // The transport itself is registered eagerly in UseRavenDbPersistence so
+            // its "ravendb://" scheme resolves for publishing rules. Here we promote
+            // its control endpoint to the NodeControlEndpoint, which marks it as a
+            // live listener — only under Balanced, so Solo hosts never poll.
+            var transport = runtime.Options.Transports.OfType<Transport.RavenDbControlTransport>().FirstOrDefault()
+                            ?? new Transport.RavenDbControlTransport(_store, runtime.Options);
+            runtime.Options.Transports.Add(transport);
+            runtime.Options.Transports.NodeControlEndpoint = transport.ControlEndpoint;
+        }
     }
 
+    [UnconditionalSuppressMessage("Trimming", "IL2026",
+        Justification = "DatabaseDescriptor(subject) reads subject's runtime-type properties for diagnostic reporting. RavenDbMessageStore properties trimmed away are silently omitted, which is acceptable for this diagnostic surface.")]
     public DatabaseDescriptor Describe()
     {
         return new DatabaseDescriptor(this)
@@ -86,9 +112,12 @@ public partial class RavenDbMessageStore : IMessageStoreWithAgentSupport
         _leaderLockId = "wolverine/leader/" + runtime.Options.ServiceName.ToLowerInvariant();
         _scheduledLockId = _scheduledLockId + "/" + runtime.Options.ServiceName.ToLowerInvariant();
         _runtime = runtime;
-        var agent = BuildAgent(runtime);
-        agent.As<RavenDbDurabilityAgent>().StartTimers();
-        return agent;
+
+        // NodeAgentController owns the durability agent lifecycle via the
+        // wolverinedb://ravendb/durability URI; do not start a second instance here.
+        // The agent built here is held by WolverineRuntime.DurableScheduledJobs purely
+        // for its disposal-time StopAsync (which is null-safe on the unstarted task fields).
+        return BuildAgent(runtime);
     }
 
     public IAgent BuildAgent(IWolverineRuntime runtime)

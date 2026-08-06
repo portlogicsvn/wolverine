@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
 using Wolverine.Http;
 
 namespace WolverineWebApi;
@@ -19,7 +20,6 @@ public class SpecificHttpException : CustomHttpException
 }
 
 #region sample_on_exception_handler_level
-
 /// <summary>
 /// Handler-level OnException: the exception handler is a method on the same class
 /// as the endpoint handler itself
@@ -46,7 +46,6 @@ public static class OnExceptionEndpoints
 #endregion
 
 #region sample_on_exception_specific
-
 /// <summary>
 /// Handler with multiple exception handlers, testing specificity ordering
 /// </summary>
@@ -90,7 +89,6 @@ public static class MultipleExceptionEndpoints
 #endregion
 
 #region sample_on_exception_async
-
 /// <summary>
 /// Async OnException handler
 /// </summary>
@@ -117,7 +115,6 @@ public static class AsyncExceptionEndpoints
 #endregion
 
 #region sample_on_exception_with_finally
-
 /// <summary>
 /// OnException combined with Finally, testing interaction
 /// </summary>
@@ -152,7 +149,6 @@ public static class ExceptionWithFinallyEndpoints
 #endregion
 
 #region sample_on_exception_no_match
-
 /// <summary>
 /// When the exception type doesn't match any OnException handler,
 /// the exception should propagate normally
@@ -180,7 +176,6 @@ public static class UnmatchedExceptionEndpoints
 #endregion
 
 #region sample_on_exception_no_error
-
 /// <summary>
 /// When no exception is thrown, OnException should not be invoked
 /// </summary>
@@ -204,8 +199,31 @@ public static class NoErrorEndpoints
 
 #endregion
 
-#region sample_on_exception_void_return
+// Probe (PR #3000 regression): does an HTTP-endpoint OnException support an *extra*
+// injected parameter alongside the exception (the author's literal ILogger example),
+// returning a ProblemDetails response?
+public static class InjectedParameterExceptionEndpoints
+{
+    [WolverineGet("/on-exception/injected-parameter")]
+    public static string EndpointThatThrowsForInjection()
+    {
+        throw new CustomHttpException("Injected parameter error");
+    }
 
+    public static ProblemDetails OnException(CustomHttpException ex,
+        ILogger<CustomHttpException> logger)
+    {
+        logger.LogError(ex, "Handled in OnException with an injected logger");
+        return new ProblemDetails
+        {
+            Status = 500,
+            Detail = ex.Message,
+            Title = "Injected Parameter Error"
+        };
+    }
+}
+
+#region sample_on_exception_void_return
 /// <summary>
 /// OnException with void return — exception is still swallowed
 /// </summary>

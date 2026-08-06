@@ -11,13 +11,12 @@ public class Samples
     public async Task register_the_middleware()
     {
         #region sample_bootstrap_with_dataannotations_validation
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
                 // Apply the validation middleware
                 opts.UseDataAnnotationsValidation();
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         #endregion
     }
@@ -26,7 +25,6 @@ public class Samples
     public async Task register_the_middleware_with_override_failure_condition()
     {
         #region sample_bootstrap_with_dataannotations_validation_and_custom_failure_condition
-
         using var host = await Host.CreateDefaultBuilder()
             .UseWolverine(opts =>
             {
@@ -36,14 +34,13 @@ public class Samples
                 // Override the service registration for IFailureAction
                 opts.Services.AddSingleton(typeof(IFailureAction<>), typeof(CustomFailureAction<>));
                 
-            }).StartAsync();
+            }).StartAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         #endregion
     }
 }
 
 #region sample_customizing_dataannotations_validation_failure_actions
-
 public class MySpecialException : Exception
 {
     public MySpecialException(string? message) : base(message)
@@ -62,7 +59,6 @@ public class CustomFailureAction<T> : IFailureAction<T>
 #endregion
 
 #region dataannotations_usage
-
 public record CreateCustomer(
     // you can use the attributes on a record, but you need to
     // add the `property` modifier to the attribute

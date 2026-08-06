@@ -1,5 +1,4 @@
-#region sample_SimpleSingularAgent
-
+#region sample_simplesingularagent
 using JasperFx.Core;
 using Wolverine.Runtime.Agents;
 
@@ -32,10 +31,11 @@ public class SimpleSingularAgent : SingularAgent
     }
 
     // This template method should be used to cleanly stop up your background service
-    protected override Task stopAsync(CancellationToken cancellationToken)
+    protected override async Task stopAsync(CancellationToken cancellationToken)
     {
+        await _cancellation.CancelAsync();
+        _cancellation.Dispose();
         _timer.SafeDispose();
-        return Task.CompletedTask;
     }
 }
 

@@ -13,7 +13,7 @@ public class BufferedComplianceFixture : TransportComplianceFixture, IAsyncLifet
     {
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         var number = Guid.NewGuid().ToString().Replace(".", "-");
 
@@ -38,10 +38,6 @@ public class BufferedComplianceFixture : TransportComplianceFixture, IAsyncLifet
         });
     }
 
-    public new async Task DisposeAsync()
-    {
-        await base.DisposeAsync();
-    }
 }
 
 public class BufferedSendingAndReceivingCompliance : TransportCompliance<BufferedComplianceFixture>
@@ -60,7 +56,7 @@ public class BufferedSendingAndReceivingCompliance : TransportCompliance<Buffere
         var transport = runtime.Options.Transports.GetOrCreate<AmazonSqsTransport>();
         var queue = transport.Queues[AmazonSqsTransport.DeadLetterQueueName];
         await queue.InitializeAsync(NullLogger.Instance);
-        var messages = await transport.Client!.ReceiveMessageAsync(queue.QueueUrl);
+        var messages = await transport.Client!.ReceiveMessageAsync(queue.QueueUrl, TestContext.Current.CancellationToken);
         messages.Messages.Count.ShouldBeGreaterThan(0);
     }
 }

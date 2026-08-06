@@ -9,6 +9,7 @@
         <GenerateAssemblyVersionAttribute>false</GenerateAssemblyVersionAttribute>
         <GenerateAssemblyFileVersionAttribute>false</GenerateAssemblyFileVersionAttribute>
         <GenerateAssemblyInformationalVersionAttribute>false</GenerateAssemblyInformationalVersionAttribute>
+        <IsAotCompatible>true</IsAotCompatible>
     </PropertyGroup>
     <ItemGroup>
         <ProjectReference Include="..\Wolverine.SqlServer\Wolverine.SqlServer.csproj" />
@@ -16,5 +17,4 @@
     <ItemGroup>
       <PackageReference Include="Polecat" />
     </ItemGroup>
-    <Import Project="../../../Analysis.Build.props" />
 </Project>

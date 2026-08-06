@@ -1,10 +1,18 @@
 # Configuration
 
 ::: info
-As of 3.0,  Wolverine **does not require the usage of the [Lamar](https://jasperfx.github.io/lamar) IoC container**, and will no longer replace the built in .NET container with Lamar.
+Wolverine uses the built in .NET `ServiceProvider` as its IoC container and does not replace it. It's
+theoretically possible to use other IoC containers as long as they conform to the .NET conforming container,
+but this isn't tested by the Wolverine team.
+:::
 
-Wolverine 3.0 *is* tested with both the built in `ServiceProvider` and Lamar. It's theoretically possible to use other
-IoC containers now as long as they conform to the .NET conforming container, but this isn't tested by the Wolverine team.
+::: warning Wolverine 6.0: IoC registrations need to be transparent to codegen
+Wolverine generates message-handler and HTTP-endpoint adapter code at startup. By default in 6.0,
+that codegen refuses to fall back to a runtime service locator — if you register a service with an
+opaque pattern (e.g. `AddScoped<TInterface>(sp => new TImpl(...))`), Wolverine will throw
+`InvalidServiceLocationException` at host startup. **Prefer concrete-type registrations
+(`AddScoped<TInterface, TImpl>()`)** for anything Wolverine needs to inject. See
+[Working with Code Generation](/guide/codegen.html) for the full story and the opt-in escape hatch.
 :::
 
 Wolverine is configured with the `IHostBuilder.UseWolverine()` or `HostApplicationBuilder` extension methods, with the actual configuration
@@ -29,7 +37,7 @@ Do note that there's some [additional configuration to use WolverineFx.HTTP](/gu
 Below is a sample of adding Wolverine to an ASP.NET Core application that is bootstrapped with
 `WebApplicationBuilder`:
 
-<!-- snippet: sample_Quickstart_Program -->
+<!-- snippet: sample_quickstart_program -->
 <a id='snippet-sample_quickstart_program'></a>
 ```cs
 using JasperFx;
@@ -38,9 +46,8 @@ using Wolverine;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// The almost inevitable inclusion of Swashbuckle:)
-builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+// The almost inevitable inclusion of OpenApi:)
+builder.Services.AddOpenApi();
 
 // For now, this is enough to integrate Wolverine into
 // your application, but there'll be *many* more
@@ -61,9 +68,7 @@ app.MapPost("/issues/create", (CreateIssue body, IMessageBus bus) => bus.InvokeA
 // An endpoint to assign an issue to an existing user that delegates to Wolverine as a mediator
 app.MapPost("/issues/assign", (AssignIssue body, IMessageBus bus) => bus.InvokeAsync(body));
 
-// Swashbuckle inclusion
-app.UseSwagger();
-app.UseSwaggerUI();
+app.MapOpenApi();
 
 app.MapGet("/", () => Results.Redirect("/swagger"));
 
@@ -72,7 +77,7 @@ app.MapGet("/", () => Results.Redirect("/swagger"));
 // your Wolverine application
 return await app.RunJasperFxCommands(args);
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/Quickstart/Program.cs#L1-L43' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_quickstart_program' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Samples/Quickstart/Program.cs#L1-L39' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_quickstart_program' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## "Headless" Applications
@@ -122,7 +127,7 @@ return await Host.CreateDefaultBuilder(args)
     // quite a few utilities and diagnostics in our Wolverine application
     .RunOaktonCommands(args);
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/OpenTelemetry/Subscriber1/Program.cs#L10-L46' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_bootstrapping_headless_service' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/OpenTelemetry/Subscriber1/Program.cs#L10-L45' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_bootstrapping_headless_service' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 As of Wolverine 3.0, you can also use the `HostApplicationBuilder` mechanism as well:
@@ -147,51 +152,10 @@ builder.UseWolverine(opts =>
 using var host = builder.Build();
 await host.StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/EfCoreTests/SampleUsageWithAutoApplyTransactions.cs#L16-L35' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_bootstrapping_with_auto_apply_transactions_for_sql_server' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/EfCoreTests/SampleUsageWithAutoApplyTransactions.cs#L16-L34' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_bootstrapping_with_auto_apply_transactions_for_sql_server' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 And lastly, you can just use `IServiceCollection.AddWolverine()` by itself.
-
-## Replacing ServiceProvider with Lamar
-
-If you run into any trouble whatsoever with code generation after upgrading to Wolverine 3.0, please:
-
-1. Please [raise a GitHub issue in Wolverine](https://github.com/JasperFx/wolverine/issues/new/choose) with some description of the offending message handler or http endpoint
-2. Fall back to Lamar for your IoC tool
-
-To use Lamar, add this Nuget to your main project:
-
-```bash
-dotnet add package Lamar.Microsoft.DependencyInjection
-```
-
-If you're using `IHostBuilder` like you might for a simple console app, it's:
-
-<!-- snippet: sample_use_lamar_with_host_builder -->
-<a id='snippet-sample_use_lamar_with_host_builder'></a>
-```cs
-// With IHostBuilder
-var builder = Host.CreateDefaultBuilder();
-builder.UseLamar();
-```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/CoreTests/Configuration/DocumentationSamples.cs#L14-L20' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_use_lamar_with_host_builder' title='Start of snippet'>anchor</a></sup>
-<!-- endSnippet -->
-
-In a web application, it's:
-
-```csharp
-var builder = WebApplication.CreateBuilder(args);
-builder.Host.UseLamar();
-```
-
-and with `HostApplicationBuilder`, try:
-
-```csharp
-var builder = Host.CreateApplicationBuilder();
-
-// Little ugly, and Lamar *should* have a helper for this...
-builder.ConfigureContainer<ServiceRegistry>(new LamarServiceProviderFactory());
-```
 
 ## Splitting Configuration Across Modules <Badge type="tip" text="5.0" />
 
@@ -228,5 +192,28 @@ host.Services.GetRequiredService<IWolverineRuntime>()
     .Mode
     .ShouldBe(DurabilityMode.Solo);
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/CoreTests/Configuration/using_configure_wolverine.cs#L14-L40' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_configure_wolverine' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/CoreTests/Configuration/using_configure_wolverine.cs#L14-L39' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_configure_wolverine' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
+
+## Service-Level Tags <Badge type="tip" text="6.15" />
+
+You can attach free-form, service-level **tags** to a Wolverine application through `WolverineOptions.Tags`. These are
+opaque strings — you own any `key:value` (or any other) convention — and they label the whole service rather than
+individual endpoints or messages:
+
+```cs
+builder.Services.AddWolverine(opts =>
+{
+    opts.ServiceName = "Orders";
+
+    // Free-form, operator-defined labels for this service
+    opts.Tags.Add("team:fulfillment");
+    opts.Tags.Add("tier:critical");
+    opts.Tags.Add("domain:orders");
+});
+```
+
+The tags are surfaced on `ServiceCapabilities.Tags`, the diagnostic snapshot Wolverine exposes for monitoring tools.
+[CritterWatch](https://github.com/JasperFx/CritterWatch) consumes them to let you group and filter related services on
+its dashboard by your own labels. They are distinct from any per-endpoint tagging — this is a single, service-wide set
+of labels.

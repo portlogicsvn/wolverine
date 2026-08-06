@@ -3,6 +3,7 @@ using Newtonsoft.Json;
 using Shouldly;
 using Wolverine;
 using Wolverine.Attributes;
+using Wolverine.Newtonsoft;
 using Wolverine.Runtime.Serialization;
 using Xunit;
 
@@ -10,8 +11,7 @@ namespace DocumentationSamples
 {
     namespace FirstTry
     {
-        #region sample_PersonBorn1
-
+        #region sample_personborn1
         public class PersonBorn
         {
             public string FirstName { get; set; } = null!;
@@ -30,7 +30,6 @@ namespace DocumentationSamples
         public class message_alias
         {
             #region sample_ootb_message_alias
-
             [Fact]
             public void message_alias_is_fullname_by_default()
             {
@@ -45,7 +44,6 @@ namespace DocumentationSamples
     namespace SecondTry
     {
         #region sample_override_message_alias
-
         [MessageIdentity("person-born")]
         public class PersonBorn
         {
@@ -61,7 +59,6 @@ namespace DocumentationSamples
         public class message_alias
         {
             #region sample_explicit_message_alias
-
             [Fact]
             public void message_alias_is_fullname_by_default()
             {
@@ -75,8 +72,7 @@ namespace DocumentationSamples
 
     namespace ThirdTry
     {
-        #region sample_PersonBorn_V2
-
+        #region sample_personborn_v2
         [MessageIdentity("person-born", Version = 2)]
         public class PersonBornV2
         {
@@ -87,8 +83,7 @@ namespace DocumentationSamples
 
         #endregion
 
-        #region sample_IForwardsTo_PersonBornV2
-
+        #region sample_iforwardsto_personbornv2
         public class PersonBorn : IForwardsTo<PersonBornV2>
         {
             public string FirstName { get; set; } = null!;
@@ -110,8 +105,7 @@ namespace DocumentationSamples
 
         #endregion
 
-        #region sample_PersonCreatedHandler
-
+        #region sample_personcreatedhandler
         public class PersonCreatedHandler
         {
             public static void Handle(PersonBorn person)
@@ -158,8 +152,7 @@ namespace DocumentationSamples
     {
         public static async Task CustomizingJsonSerialization()
         {
-            #region sample_CustomizingJsonSerialization
-
+            #region sample_customizingjsonserialization
             using var host = await Host.CreateDefaultBuilder()
                 .UseWolverine(opts =>
                 {

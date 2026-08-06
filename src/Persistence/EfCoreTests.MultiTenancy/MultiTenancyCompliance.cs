@@ -65,7 +65,7 @@ public abstract class MultiTenancyCompliance : IAsyncLifetime, IWolverineExtensi
         
     }
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         if (_engine == DatabaseEngine.PostgreSQL)
         {
@@ -79,7 +79,7 @@ public abstract class MultiTenancyCompliance : IAsyncLifetime, IWolverineExtensi
         theBuilder = theHost.Services.GetRequiredService<IDbContextBuilder<ItemsDbContext>>();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         try
         {
@@ -104,8 +104,10 @@ public abstract class MultiTenancyCompliance : IAsyncLifetime, IWolverineExtensi
         SqlConnection.ClearAllPools();
     }
 
+#pragma warning disable xUnit1013 // Public method should be marked as test
     public abstract void Configure(WolverineOptions options);
-    
+#pragma warning restore xUnit1013 // Public method should be marked as test
+
     [Fact]
     public async Task db_context_is_wolverine_enabled()
     {
@@ -160,17 +162,17 @@ public abstract class MultiTenancyCompliance : IAsyncLifetime, IWolverineExtensi
         var greenDbContext = await theBuilder.BuildAsync("green", CancellationToken.None);
         var redDbContext = await theBuilder.BuildAsync("red", CancellationToken.None);
 
-        (await blueDbContext.Items.FindAsync(blueId))!.Name.ShouldBe("Blue!");
-        (await greenDbContext.Items.FindAsync(blueId)).ShouldBeNull();
-        (await redDbContext.Items.FindAsync(blueId)).ShouldBeNull();
+        (await blueDbContext.Items.FindAsync(new object?[] { blueId }, TestContext.Current.CancellationToken))!.Name.ShouldBe("Blue!");
+        (await greenDbContext.Items.FindAsync(new object?[] { blueId }, TestContext.Current.CancellationToken)).ShouldBeNull();
+        (await redDbContext.Items.FindAsync(new object?[] { blueId }, TestContext.Current.CancellationToken)).ShouldBeNull();
 
-        (await blueDbContext.Items.FindAsync(redId)).ShouldBeNull();
-        (await greenDbContext.Items.FindAsync(redId)).ShouldBeNull();
-        (await redDbContext.Items.FindAsync(redId))!.Name.ShouldBe("Red!");
+        (await blueDbContext.Items.FindAsync(new object?[] { redId }, TestContext.Current.CancellationToken)).ShouldBeNull();
+        (await greenDbContext.Items.FindAsync(new object?[] { redId }, TestContext.Current.CancellationToken)).ShouldBeNull();
+        (await redDbContext.Items.FindAsync(new object?[] { redId }, TestContext.Current.CancellationToken))!.Name.ShouldBe("Red!");
 
-        (await blueDbContext.Items.FindAsync(greenId)).ShouldBeNull();
-        (await greenDbContext.Items.FindAsync(greenId))!.Name.ShouldBe("Green!");
-        (await redDbContext.Items.FindAsync(greenId)).ShouldBeNull();
+        (await blueDbContext.Items.FindAsync(new object?[] { greenId }, TestContext.Current.CancellationToken)).ShouldBeNull();
+        (await greenDbContext.Items.FindAsync(new object?[] { greenId }, TestContext.Current.CancellationToken))!.Name.ShouldBe("Green!");
+        (await redDbContext.Items.FindAsync(new object?[] { greenId }, TestContext.Current.CancellationToken)).ShouldBeNull();
     }
     
     [Fact]
@@ -187,7 +189,7 @@ public abstract class MultiTenancyCompliance : IAsyncLifetime, IWolverineExtensi
             var greenDbContext = await theBuilder.BuildAsync("green", CancellationToken.None);
             var redDbContext = await theBuilder.BuildAsync("red", CancellationToken.None);
 
-            (await defaultDbContext.FindAsync<Item>(defaultId))!.Name.ShouldBe("The Default!");
+            (await defaultDbContext.FindAsync<Item>(new object?[] { defaultId }, TestContext.Current.CancellationToken))!.Name.ShouldBe("The Default!");
         }
         catch (DefaultTenantUsageDisabledException)
         {
@@ -210,23 +212,23 @@ public abstract class MultiTenancyCompliance : IAsyncLifetime, IWolverineExtensi
         var greenDbContext = await theBuilder.BuildAsync("green", CancellationToken.None);
         var redDbContext = await theBuilder.BuildAsync("red", CancellationToken.None);
 
-        var blue = (await blueDbContext.Items.FindAsync(blueId))!;
+        var blue = (await blueDbContext.Items.FindAsync(new object?[] { blueId }, TestContext.Current.CancellationToken))!;
         blue.Name.ShouldBe("Blue!");
         blue.Approved.ShouldBeTrue();
-        (await greenDbContext.Items.FindAsync(blueId)).ShouldBeNull();
-        (await redDbContext.Items.FindAsync(blueId)).ShouldBeNull();
+        (await greenDbContext.Items.FindAsync(new object?[] { blueId }, TestContext.Current.CancellationToken)).ShouldBeNull();
+        (await redDbContext.Items.FindAsync(new object?[] { blueId }, TestContext.Current.CancellationToken)).ShouldBeNull();
 
-        (await blueDbContext.Items.FindAsync(redId)).ShouldBeNull();
-        (await greenDbContext.Items.FindAsync(redId)).ShouldBeNull();
-        var red = (await redDbContext.Items.FindAsync(redId))!;
+        (await blueDbContext.Items.FindAsync(new object?[] { redId }, TestContext.Current.CancellationToken)).ShouldBeNull();
+        (await greenDbContext.Items.FindAsync(new object?[] { redId }, TestContext.Current.CancellationToken)).ShouldBeNull();
+        var red = (await redDbContext.Items.FindAsync(new object?[] { redId }, TestContext.Current.CancellationToken))!;
         red.Name.ShouldBe("Red!");
         red.Approved.ShouldBeTrue();
 
-        (await blueDbContext.Items.FindAsync(greenId)).ShouldBeNull();
-        var green = (await greenDbContext.Items.FindAsync(greenId))!;
+        (await blueDbContext.Items.FindAsync(new object?[] { greenId }, TestContext.Current.CancellationToken)).ShouldBeNull();
+        var green = (await greenDbContext.Items.FindAsync(new object?[] { greenId }, TestContext.Current.CancellationToken))!;
         green.Name.ShouldBe("Green!");
         green.Approved.ShouldBeTrue();
-        (await redDbContext.Items.FindAsync(greenId)).ShouldBeNull();
+        (await redDbContext.Items.FindAsync(new object?[] { greenId }, TestContext.Current.CancellationToken)).ShouldBeNull();
     }
 
     [Fact]
@@ -246,11 +248,11 @@ public abstract class MultiTenancyCompliance : IAsyncLifetime, IWolverineExtensi
         var redDbContext = await theBuilder.BuildAsync("red", CancellationToken.None);
 
         
-        (await defaultDbContext.FindAsync<Item>(command.Id)).ShouldBeNull();
-        (await redDbContext.FindAsync<Item>(command.Id)).ShouldBeNull();
-        (await greenDbContext.FindAsync<Item>(command.Id)).ShouldBeNull();
+        (await defaultDbContext.FindAsync<Item>(new object?[] { command.Id }, TestContext.Current.CancellationToken)).ShouldBeNull();
+        (await redDbContext.FindAsync<Item>(new object?[] { command.Id }, TestContext.Current.CancellationToken)).ShouldBeNull();
+        (await greenDbContext.FindAsync<Item>(new object?[] { command.Id }, TestContext.Current.CancellationToken)).ShouldBeNull();
         
-        (await blueDbContext.FindAsync<Item>(command.Id))!.Name.ShouldBe(command.Name);
+        (await blueDbContext.FindAsync<Item>(new object?[] { command.Id }, TestContext.Current.CancellationToken))!.Name.ShouldBe(command.Name);
     }
 
     [Fact]
@@ -269,11 +271,11 @@ public abstract class MultiTenancyCompliance : IAsyncLifetime, IWolverineExtensi
         var greenDbContext = await theBuilder.BuildAsync("green", CancellationToken.None);
         var redDbContext = await theBuilder.BuildAsync("red", CancellationToken.None);
         
-        (await blueDbContext.FindAsync<Item>(command.Id)).ShouldBeNull();
-        (await redDbContext.FindAsync<Item>(command.Id)).ShouldBeNull();
-        (await greenDbContext.FindAsync<Item>(command.Id)).ShouldBeNull();
+        (await blueDbContext.FindAsync<Item>(new object?[] { command.Id }, TestContext.Current.CancellationToken)).ShouldBeNull();
+        (await redDbContext.FindAsync<Item>(new object?[] { command.Id }, TestContext.Current.CancellationToken)).ShouldBeNull();
+        (await greenDbContext.FindAsync<Item>(new object?[] { command.Id }, TestContext.Current.CancellationToken)).ShouldBeNull();
         
-        (await defaultDbContext.FindAsync<Item>(command.Id))!.Name.ShouldBe(command.Name);
+        (await defaultDbContext.FindAsync<Item>(new object?[] { command.Id }, TestContext.Current.CancellationToken))!.Name.ShouldBe(command.Name);
     }
 
     [Fact]
@@ -287,9 +289,10 @@ public abstract class MultiTenancyCompliance : IAsyncLifetime, IWolverineExtensi
         {
             x.Get.Url("/item1/" + command.Id).QueryString("tenant", "red");
         });
-        
-        result.ReadAsJson<Item>().Name.ShouldBe(command.Name);
-        
+
+        var item = await result.ReadAsJsonAsync<Item>();
+        item.Name.ShouldBe(command.Name);
+
         // Not found in other tenants
         await theHost.Scenario(x =>
         {
@@ -322,9 +325,10 @@ public abstract class MultiTenancyCompliance : IAsyncLifetime, IWolverineExtensi
         {
             x.Get.Url("/item2/" + command.Id).QueryString("tenant", "red");
         });
-        
-        result.ReadAsJson<Item>().Name.ShouldBe(command.Name);
-        
+
+        var item = await result.ReadAsJsonAsync<Item>();
+        item.Name.ShouldBe(command.Name);
+
         // Not found in other tenants
         await theHost.Scenario(x =>
         {
@@ -369,11 +373,11 @@ public abstract class MultiTenancyCompliance : IAsyncLifetime, IWolverineExtensi
         var greenDbContext = await theBuilder.BuildAsync("green", CancellationToken.None);
         var redDbContext = await theBuilder.BuildAsync("red", CancellationToken.None);
         
-        (await blueDbContext.FindAsync<Item>(command.Id))!.Approved.ShouldBeFalse();
-        (await redDbContext.FindAsync<Item>(command.Id))!.Approved.ShouldBeFalse();
+        (await blueDbContext.FindAsync<Item>(new object?[] { command.Id }, TestContext.Current.CancellationToken))!.Approved.ShouldBeFalse();
+        (await redDbContext.FindAsync<Item>(new object?[] { command.Id }, TestContext.Current.CancellationToken))!.Approved.ShouldBeFalse();
 
         // Only approved this one
-        (await greenDbContext.FindAsync<Item>(command.Id))!.Approved.ShouldBeTrue();
+        (await greenDbContext.FindAsync<Item>(new object?[] { command.Id }, TestContext.Current.CancellationToken))!.Approved.ShouldBeTrue();
     }
 
     [Fact]
@@ -399,11 +403,11 @@ public abstract class MultiTenancyCompliance : IAsyncLifetime, IWolverineExtensi
         var greenDbContext = await theBuilder.BuildAsync("green", CancellationToken.None);
         var redDbContext = await theBuilder.BuildAsync("red", CancellationToken.None);
         
-        (await blueDbContext.FindAsync<Item>(command.Id))!.Approved.ShouldBeFalse();
-        (await redDbContext.FindAsync<Item>(command.Id))!.Approved.ShouldBeFalse();
+        (await blueDbContext.FindAsync<Item>(new object?[] { command.Id }, TestContext.Current.CancellationToken))!.Approved.ShouldBeFalse();
+        (await redDbContext.FindAsync<Item>(new object?[] { command.Id }, TestContext.Current.CancellationToken))!.Approved.ShouldBeFalse();
 
         // Only approved this one
-        (await greenDbContext.FindAsync<Item>(command.Id))!.Approved.ShouldBeTrue();
+        (await greenDbContext.FindAsync<Item>(new object?[] { command.Id }, TestContext.Current.CancellationToken))!.Approved.ShouldBeTrue();
     }
 
     [Fact]
@@ -429,11 +433,11 @@ public abstract class MultiTenancyCompliance : IAsyncLifetime, IWolverineExtensi
         var greenDbContext = await theBuilder.BuildAsync("green", CancellationToken.None);
         var redDbContext = await theBuilder.BuildAsync("red", CancellationToken.None);
         
-        (await blueDbContext.FindAsync<Item>(command.Id))!.Approved.ShouldBeFalse();
-        (await redDbContext.FindAsync<Item>(command.Id))!.Approved.ShouldBeFalse();
+        (await blueDbContext.FindAsync<Item>(new object?[] { command.Id }, TestContext.Current.CancellationToken))!.Approved.ShouldBeFalse();
+        (await redDbContext.FindAsync<Item>(new object?[] { command.Id }, TestContext.Current.CancellationToken))!.Approved.ShouldBeFalse();
 
         // Only approved this one
-        (await greenDbContext.FindAsync<Item>(command.Id))!.Approved.ShouldBeTrue();
+        (await greenDbContext.FindAsync<Item>(new object?[] { command.Id }, TestContext.Current.CancellationToken))!.Approved.ShouldBeTrue();
     }
 
     [Fact]
@@ -454,8 +458,9 @@ public abstract class MultiTenancyCompliance : IAsyncLifetime, IWolverineExtensi
         {
             x.Get.Url("/orders/" + command.Id).QueryString("tenant", "red");
         });
-        
-        result.ReadAsJson<Order>().OrderStatus.ShouldBe(OrderStatus.CreditReserved);
+
+        var order = await result.ReadAsJsonAsync<Order>();
+        order.OrderStatus.ShouldBe(OrderStatus.CreditReserved);
 
     }
 
@@ -489,7 +494,7 @@ public abstract class MultiTenancyCompliance : IAsyncLifetime, IWolverineExtensi
         var builder = theHost.Services.GetRequiredService<IDbContextBuilder<ItemsDbContext>>();
         var dbContext = await builder.BuildAsync("blue", CancellationToken.None);
 
-        var item2 = await dbContext.Items.FindAsync(id);
+        var item2 = await dbContext.Items.FindAsync(new object?[] { id }, TestContext.Current.CancellationToken);
         item2!.Approved.ShouldBeTrue();
     }
 

@@ -1,56 +1,30 @@
 using JasperFx.Core;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging;
-using NSubstitute;
 using Wolverine.ComplianceTests;
 using Wolverine.ComplianceTests.Compliance;
 using Wolverine.ErrorHandling;
-using Wolverine.Runtime;
 using Wolverine.Runtime.Routing;
 using Wolverine.Tracking;
 using Xunit;
 
 namespace CoreTests.Acceptance;
 
-public class wolverine_as_command_bus : IntegrationContext, ILogger<WolverineRuntime>
+public class wolverine_as_command_bus : IntegrationContext
 {
-    public readonly IList<Exception> Exceptions = new List<Exception>();
     private readonly WorkTracker theTracker = new();
-
 
     public wolverine_as_command_bus(DefaultApp @default) : base(@default)
     {
     }
 
-    public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
-        Func<TState, Exception?, string> formatter)
+    private Task configure()
     {
-        if (exception != null)
-        {
-            Exceptions.Add(exception);
-        }
-    }
-
-    public bool IsEnabled(LogLevel logLevel)
-    {
-        return true;
-    }
-
-    public IDisposable BeginScope<TState>(TState state) where TState : notnull
-    {
-        return Substitute.For<IDisposable>();
-    }
-
-    private void configure()
-    {
-        with(opts =>
+        return with(opts =>
         {
             opts.Services.AddSingleton(theTracker);
 
             opts.Publish(x => x.MessagesFromAssemblyContaining<Message1>()
                 .ToLocalQueue("cascading"));
-
-            opts.Services.AddSingleton<ILogger<WolverineRuntime>>(this);
 
             opts.Policies.OnException<DivideByZeroException>().Requeue();
 
@@ -63,24 +37,24 @@ public class wolverine_as_command_bus : IntegrationContext, ILogger<WolverineRun
     [Fact]
     public async Task exceptions_will_be_thrown_to_caller()
     {
-        configure();
+        await configure();
 
         var message = new Message5
         {
             FailThisManyTimes = 1
         };
-        
+
         await Should.ThrowAsync<DivideByZeroException>(() => Publisher.InvokeAsync(message));
     }
 
     [Fact]
     public async Task will_process_inline()
     {
-        configure();
+        await configure();
 
         var message = new Message5();
 
-        await Publisher.InvokeAsync(message);
+        await Publisher.InvokeAsync(message, TestContext.Current.CancellationToken);
 
         theTracker.LastMessage.ShouldBeSameAs(message);
     }
@@ -88,20 +62,20 @@ public class wolverine_as_command_bus : IntegrationContext, ILogger<WolverineRun
     [Fact]
     public async Task use_retry_in_invoke()
     {
-        configure();
+        await configure();
         var message = new InvokedMessage { FailThisManyTimes = 2 };
 
-        await Publisher.InvokeAsync(message);
+        await Publisher.InvokeAsync(message, TestContext.Current.CancellationToken);
     }
 
     [Fact]
     public async Task will_send_cascading_messages()
     {
-        configure();
+        await configure();
 
         var message = new Message5();
 
-        await Publisher.InvokeAsync(message);
+        await Publisher.InvokeAsync(message, TestContext.Current.CancellationToken);
 
         var m1 = await theTracker.Message1;
         m1.Id.ShouldBe(message.Id);
@@ -111,7 +85,6 @@ public class wolverine_as_command_bus : IntegrationContext, ILogger<WolverineRun
     }
 
     #region sample_using_global_request_and_reply
-
     internal async ValueTask using_global_request_and_reply(IMessageContext messaging)
     {
         // Send a question to another application, and request that the handling
@@ -124,7 +97,7 @@ public class wolverine_as_command_bus : IntegrationContext, ILogger<WolverineRun
     [Fact]
     public async Task invoke_expecting_a_response()
     {
-        var answer = await Bus.InvokeAsync<Answer>(new Question { One = 3, Two = 4 });
+        var answer = await Bus.InvokeAsync<Answer>(new Question { One = 3, Two = 4 }, TestContext.Current.CancellationToken);
 
         answer.Sum.ShouldBe(7);
         answer.Product.ShouldBe(12);
@@ -133,7 +106,7 @@ public class wolverine_as_command_bus : IntegrationContext, ILogger<WolverineRun
     [Fact]
     public async Task invoke_expecting_a_response_with_struct()
     {
-        var answer = await Bus.InvokeAsync<AnswerStruct>(new QuestionStruct { One = 3, Two = 4 });
+        var answer = await Bus.InvokeAsync<AnswerStruct>(new QuestionStruct { One = 3, Two = 4 }, TestContext.Current.CancellationToken);
 
         answer.Sum.ShouldBe(7);
         answer.Product.ShouldBe(12);
@@ -151,14 +124,14 @@ public class wolverine_as_command_bus : IntegrationContext, ILogger<WolverineRun
     [Fact]
     public async Task invoke_with_no_known_response_do_not_blow_up()
     {
-        (await Bus.InvokeAsync<Answer>(new QuestionWithNoAnswer()))
+        (await Bus.InvokeAsync<Answer>(new QuestionWithNoAnswer(), TestContext.Current.CancellationToken))
             .ShouldBeNull();
     }
 
     [Fact]
     public async Task should_return_result_for_command_with_castable_result()
     {
-        var answer = await Bus.InvokeAsync<IAnswer>(new Question { One = 3, Two = 4 });
+        var answer = await Bus.InvokeAsync<IAnswer>(new Question { One = 3, Two = 4 }, TestContext.Current.CancellationToken);
 
         answer.Sum.ShouldBe(7);
         answer.Product.ShouldBe(12);

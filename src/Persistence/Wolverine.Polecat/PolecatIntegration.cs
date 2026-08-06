@@ -2,17 +2,21 @@ using JasperFx;
 using JasperFx.Core;
 using JasperFx.Core.Reflection;
 using JasperFx.Events;
+using JasperFx.Events.Daemon;
 using Polecat;
 using Microsoft.Extensions.DependencyInjection;
 using Wolverine.ErrorHandling;
+using Wolverine.Middleware;
 using Wolverine.Polecat.Codegen;
 using Wolverine.Polecat.Persistence.Sagas;
 using Wolverine.Polecat.Publishing;
+using Wolverine.Persistence;
 using Wolverine.Persistence.Sagas;
 using Wolverine.RDBMS;
 using Wolverine.Runtime;
 using Wolverine.Runtime.Routing;
 using Wolverine.Util;
+using System.Diagnostics.CodeAnalysis;
 
 namespace Wolverine.Polecat;
 
@@ -66,6 +70,14 @@ public class PolecatIntegration : IWolverineExtension, IEventForwarding
 
         options.Policies.Add<PolecatOpPolicy>();
 
+        // GH-3109: pre-populate chain.AncillaryStoreType for [PolecatStore]-attributed handlers so the
+        // message-type-to-ancillary-store map built later in WolverineRuntime.HostService sees it.
+        // Mirrors Marten's MartenStoreEagerPolicy; see PolecatStoreEagerPolicy for the Phase-A vs
+        // Phase-B ordering trap this addresses.
+        options.Policies.Add<PolecatStoreEagerPolicy>();
+
+        options.CodeGeneration.AddContinuationStrategy<Wolverine.Polecat.Requirements.PolecatDataRequirementContinuationStrategy>();
+
         options.CodeGeneration.MethodPreCompilation.Add(new PolecatBatchingPolicy());
     }
 
@@ -101,7 +113,7 @@ public class PolecatIntegration : IWolverineExtension, IEventForwarding
         set => _messageStorageSchemaName = value?.ToLowerInvariant();
     }
 
-    public EventForwardingTransform<T> SubscribeToEvent<T>()
+    public EventForwardingTransform<T> SubscribeToEvent<T>() where T : notnull
     {
         return new EventForwardingTransform<T>(EventRouter);
     }
@@ -114,12 +126,34 @@ internal class PolecatOverrides : IConfigurePolecat
         // Polecat's DocumentMapping automatically detects IRevisioned types
         // and enables numeric revisions. Wolverine's Saga type uses Version property
         // which is handled by the saga persistence framework.
+
+        // Replace Polecat's default NulloMessageOutbox with the Wolverine bridge so
+        // projection authors who call `slice.PublishMessage(...)` from a Polecat
+        // RaiseSideEffects override actually have the message delivered through
+        // Wolverine after the projection batch's SQL transaction commits. Mirrors
+        // the Marten side at MartenIntegration.cs:153. See wolverine#2774.
+        options.Events.MessageOutbox = new PolecatToWolverineOutbox(services);
+
+        // GH-3290 (Polecat parity with the Marten side): when Wolverine manages the event
+        // subscription distribution, it replaces Polecat's own daemon/coordinator hosting
+        // outright, but the store's only knowledge of the daemon state is
+        // DaemonSettings.AsyncMode. Record the real state: ExternallyManaged keeps the
+        // store's runtime posture identical to Disabled (nothing Polecat-hosted starts)
+        // while telling any AsyncMode reader that the async projections DO run. Only
+        // upgrades from Disabled — an explicit user AddAsyncDaemon()/AddProjectionCoordinator()
+        // choice is never overwritten, regardless of call order relative to IntegrateWithWolverine.
+        var integration = services.GetService<PolecatIntegration>();
+        if (integration is { UseWolverineManagedEventSubscriptionDistribution: true }
+            && options.DaemonSettings.AsyncMode == DaemonMode.Disabled)
+        {
+            options.DaemonSettings.AsyncMode = DaemonMode.ExternallyManaged;
+        }
     }
 }
 
 internal class EventWrapperForwarder : IHandledTypeRule
 {
-    public bool TryFindHandledType(Type concreteType, out Type handlerType)
+    public bool TryFindHandledType(Type concreteType, [NotNullWhen(true)] out Type? handlerType)
     {
         handlerType = concreteType.FindInterfaceThatCloses(typeof(IEvent<>));
         return handlerType != null;
@@ -174,7 +208,7 @@ internal class PolecatEventRouter : IMessageRouteSource
     public List<IMessageTransformation> Transformers { get; } = [];
 }
 
-internal class EventUnwrappingMessageRoute<T> : TransformedMessageRoute<IEvent<T>, T>
+internal class EventUnwrappingMessageRoute<T> : TransformedMessageRoute<IEvent<T>, T> where T : notnull
 {
     public EventUnwrappingMessageRoute(IMessageRoute inner) : base(e => e.Data, inner)
     {
@@ -193,10 +227,10 @@ public interface IEventForwarding
     /// published to Wolverine with its normal routing rules
     /// </summary>
     /// <typeparam name="T"></typeparam>
-    EventForwardingTransform<T> SubscribeToEvent<T>();
+    EventForwardingTransform<T> SubscribeToEvent<T>() where T : notnull;
 }
 
-public class EventForwardingTransform<TSource>
+public class EventForwardingTransform<TSource> where TSource : notnull
 {
     private readonly PolecatEventRouter _eventRouter;
 

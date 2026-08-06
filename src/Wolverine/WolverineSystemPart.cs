@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using JasperFx.CommandLine.Descriptions;
 using JasperFx.Core.Reflection;
@@ -17,8 +18,20 @@ namespace Wolverine;
 
 internal class WolverineSystemPart : SystemPartBase
 {
-    public static bool WithinDescription = false;
-    
+    // Scoped to the current async flow (AsyncLocal) rather than a process-global mutable field.
+    // A description pass (FindResources / describe) sets this true so MessageRoute may take a
+    // null Sender for display-only routing. As a global static, that "null Sender is OK" state
+    // could bleed across an await into concurrent route building on another task — or another
+    // host in the same process — and poison the runtime cache, NRE'ing on send. AsyncLocal keeps
+    // it confined to the description call tree that set it. See GH-2897.
+    private static readonly AsyncLocal<bool> _withinDescription = new();
+
+    public static bool WithinDescription
+    {
+        get => _withinDescription.Value;
+        set => _withinDescription.Value = value;
+    }
+
     private readonly WolverineRuntime _runtime;
 
     public WolverineSystemPart(IWolverineRuntime runtime) : base("Wolverine", new Uri("wolverine://" + runtime.Options.ServiceName))
@@ -26,24 +39,36 @@ internal class WolverineSystemPart : SystemPartBase
         _runtime = (WolverineRuntime)runtime;
     }
 
+    [RequiresUnreferencedCode(
+        "Renders the full WolverineOptions and HandlerGraph diagnostic surface to the console via OptionsDescription, " +
+        "which reflects over each subject's runtime-type properties. Trimmed-away properties are silently omitted. " +
+        "Annotation matches the SystemPartBase.WriteToConsole base method.")]
     public override async Task WriteToConsole()
     {
         WithinDescription = true;
-        await _runtime.StartLightweightAsync();
-        
-        _runtime.Options.WriteToConsole();
-        
-        AnsiConsole.WriteLine();
-        
-        await _runtime.Options.HandlerGraph.WriteToConsole();
-        AnsiConsole.WriteLine();
-        WriteMessageSubscriptions();
-        AnsiConsole.WriteLine();
-        WriteSendingEndpoints();
-        AnsiConsole.WriteLine();
-        WriteListeners();
-        AnsiConsole.WriteLine();
-        WriteErrorHandling();
+        try
+        {
+            await _runtime.StartLightweightAsync();
+
+            _runtime.Options.WriteToConsole();
+
+            AnsiConsole.WriteLine();
+
+            await _runtime.Options.HandlerGraph.WriteToConsole();
+            AnsiConsole.WriteLine();
+            WriteMessageSubscriptions();
+            AnsiConsole.WriteLine();
+            WriteSendingEndpoints();
+            AnsiConsole.WriteLine();
+            WriteListeners();
+            AnsiConsole.WriteLine();
+            WriteErrorHandling();
+        }
+        finally
+        {
+            // Don't leave the description flag set for anything that reuses this flow.
+            WithinDescription = false;
+        }
     }
     
     public void WriteMessageSubscriptions()
@@ -90,17 +115,24 @@ internal class WolverineSystemPart : SystemPartBase
         foreach (var messageType in messageTypes) _runtime.RoutingFor(messageType);
 
 
-        var table = new Table(){Title = new TableTitle("Subscriptions"){Style = new Style(decoration:Decoration.Bold)}};
+        var table = new Table(){Title = new TableTitle("Senders"){Style = new Style(decoration:Decoration.Bold)}};
 
         table.AddColumn("Uri", c => c.NoWrap = true);
         table.AddColumn("Name");
         table.AddColumn("Mode");
         table.AddColumn("Serializer(s)", c => c.NoWrap = true);
 
+        // Restrict to endpoints that have actually been wired up as senders. Without
+        // this filter, the table includes every endpoint registered in any transport
+        // — including listener-only queues — which makes it look like e.g. a Durable
+        // listener queue is actually a BufferedInMemory sender. An endpoint may also
+        // appear in both Senders and Listeners tables when it acts as both. See
+        // GH-2588.
         var senders = _runtime
-            .Options
-            .Transports
-            .SelectMany(x => x.Endpoints())
+            .Endpoints
+            .ActiveSendingAgents()
+            .Select(x => x.Endpoint)
+            .Distinct()
             .OrderBy(x => x.Uri.ToString());
 
         foreach (var endpoint in senders)
@@ -206,7 +238,11 @@ internal class WolverineSystemPart : SystemPartBase
                 {
                     if (transport.TryBuildStatefulResource(_runtime, out var resource))
                     {
-                        await transport.InitializeAsync(_runtime);
+                        // Not the full InitializeAsync: that connects to the broker/database during
+                        // discovery, before any resource's Setup() — defeating the database-building
+                        // IResourceCreators deliberately added first. Each resource reconnects per
+                        // operation, by which time the creators have run.
+                        await transport.InitializeEndpointsAsync(_runtime);
                         list.Add(resource!);
                     }
                 }

@@ -6,6 +6,7 @@ using JasperFx.CodeGeneration.Model;
 using JasperFx.Core.Reflection;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Wolverine.Configuration;
 using Wolverine.Runtime;
 
 namespace Wolverine.Http.CodeGen;
@@ -30,50 +31,39 @@ internal class ReadJsonBody : AsyncFrame
 
     public Variable Variable { get; }
 
+    /// <summary>
+    /// When true the body is optional: an empty request body binds null and continues rather than
+    /// returning 400. Set for a nullable [FromBody] member inside an [AsParameters] type. See GH-3135.
+    /// </summary>
+    public bool Optional { get; init; }
+
     public override void GenerateCode(GeneratedMethod method, ISourceWriter writer)
     {
         writer.WriteComment("Reading the request body via JSON deserialization");
+        var optionalArg = Optional ? ", true" : "";
         writer.Write(
-            $"var ({Variable.Usage}, jsonContinue) = await ReadJsonAsync<{Variable.VariableType.FullNameInCode()}>(httpContext);");
+            $"var ({Variable.Usage}, jsonContinue) = await ReadJsonAsync<{Variable.VariableType.FullNameInCode()}>(httpContext{optionalArg});");
         writer.Write(
             $"if (jsonContinue == {typeof(HandlerContinuation).FullNameInCode()}.{nameof(HandlerContinuation.Stop)}) return;");
 
         Next?.GenerateCode(method, writer);
     }
-}
 
-internal class ReadJsonBodyWithNewtonsoft : MethodCall
-{
-    private static MethodInfo findMethodForType(Type parameterType)
+    public override void GenerateFSharpCode(GeneratedMethod method, ISourceWriter writer)
     {
-        return typeof(NewtonsoftHttpSerialization).GetMethod(nameof(NewtonsoftHttpSerialization.ReadFromJsonAsync))!
-            .MakeGenericMethod(parameterType);
-    }
+        writer.WriteComment("Reading the request body via JSON deserialization");
 
-    public ReadJsonBodyWithNewtonsoft(ParameterInfo parameter) : base(typeof(NewtonsoftHttpSerialization), findMethodForType(parameter.ParameterType))
-    {
-        var parameterName = parameter.Name!;
-        if (parameterName == "_")
-        {
-            parameterName = Variable.DefaultArgName(parameter.ParameterType);
-        }
+        // ReadJsonAsync is an inherited *instance* method on HttpHandler (qualified with the member's
+        // `this` self identifier, jasperfx#393) returning (body, continuation). F# has no early
+        // `return`, so the abort guard renders the rest of the chain inside its `else` branch.
+        var optionalArg = Optional ? ", true" : "";
+        // ReadJsonAsync returns ValueTask<(T?, HandlerContinuation)> — a struct (value) tuple.
+        // F# requires `let! struct (a, b) =` for struct tuple destructuring.
+        writer.Write(
+            $"let! struct ({Variable.Usage}, jsonContinue) = this.{nameof(HttpHandler.ReadJsonAsync)}<{Variable.VariableType.FSharpName()}>(httpContext{optionalArg})");
 
-        ReturnVariable!.OverrideName(parameterName);
-
-        CommentText = "Reading the request body with JSON deserialization";
-    }
-    
-    public ReadJsonBodyWithNewtonsoft(Type requestType) : base(typeof(NewtonsoftHttpSerialization), findMethodForType(requestType))
-    {
-        var parameterName = Variable.DefaultArgName(requestType);
-        if (parameterName == "_")
-        {
-            parameterName = Variable.DefaultArgName(requestType);
-        }
-
-        ReturnVariable!.OverrideName(parameterName);
-
-        CommentText = "Reading the request body with JSON deserialization";
+        var condition = $"jsonContinue = {typeof(HandlerContinuation).FSharpName()}.{nameof(HandlerContinuation.Stop)}";
+        FSharpEmitHelpers.WriteAbortGuard(writer, method, condition, Next);
     }
 }
 
@@ -102,12 +92,24 @@ internal class JsonBodyParameterStrategy : IParameterStrategy
             return false;
         }
 
+        // GH-3538: an injected EF Core DbContext (e.g. a Wolverine-managed / conjoined
+        // tenant DbContext) is a concrete type, so when it is the only complex parameter on
+        // a POST/PUT endpoint the body inference below would otherwise decide it *is* the
+        // JSON request body and 400 with "Invalid JSON format". A DbContext is always a
+        // service/builder-provided parameter, never the request body — leave it for the
+        // service-resolution path. Checked by base-type name so Wolverine.Http need not
+        // reference Microsoft.EntityFrameworkCore.
+        if (IsDbContext(parameter.ParameterType))
+        {
+            return false;
+        }
+
         if (chain.RequestType == null && parameter.ParameterType.IsConcrete())
         {
             // It *could* be used twice, so let's watch out for this!
             chain.RequestBodyVariable ??= Usage == JsonUsage.SystemTextJson
                 ? new ReadJsonBody(parameter).Variable
-                : new ReadJsonBodyWithNewtonsoft(parameter).ReturnVariable!;
+                : RequireNewtonsoftCodeGen().CreateReadJsonBodyVariable(parameter);
 
             variable = chain.RequestBodyVariable;
 
@@ -119,7 +121,32 @@ internal class JsonBodyParameterStrategy : IParameterStrategy
         return false;
     }
 
+    // Walks the base-type chain looking for Microsoft.EntityFrameworkCore.DbContext by full
+    // name, so the core Wolverine.Http assembly doesn't take a dependency on EF Core. GH-3538.
+    internal static bool IsDbContext(Type type)
+    {
+        var current = type;
+        while (current != null && current != typeof(object))
+        {
+            if (current.FullName == "Microsoft.EntityFrameworkCore.DbContext")
+            {
+                return true;
+            }
+
+            current = current.BaseType;
+        }
+
+        return false;
+    }
+
     public JsonUsage Usage { get; set; } = JsonUsage.SystemTextJson;
+
+    /// <summary>
+    ///     Set by <see cref="HttpGraph.UseNewtonsoftJson"/> when the WolverineFx.Http.Newtonsoft
+    ///     companion package is wired up. Required when <see cref="Usage"/> is
+    ///     <see cref="JsonUsage.NewtonsoftJson"/>.
+    /// </summary>
+    internal INewtonsoftHttpCodeGen? NewtonsoftCodeGen { get; set; }
 
     public bool TryBuildVariable(HttpChain chain, out Variable variable)
     {
@@ -127,8 +154,8 @@ internal class JsonBodyParameterStrategy : IParameterStrategy
         {
             // It *could* be used twice, so let's watch out for this!
             chain.RequestBodyVariable ??= Usage == JsonUsage.SystemTextJson
-                ? new ReadJsonBody(chain.RequestType!).Variable
-                : new ReadJsonBodyWithNewtonsoft(chain.RequestType!).ReturnVariable!;
+                ? new ReadJsonBody(chain.RequestType!) { Optional = chain.RequestBodyIsOptional }.Variable
+                : RequireNewtonsoftCodeGen().CreateReadJsonBodyVariable(chain.RequestType!);
 
             variable = chain.RequestBodyVariable;
 
@@ -137,5 +164,19 @@ internal class JsonBodyParameterStrategy : IParameterStrategy
 
         variable = default!;
         return false;
+    }
+
+    private INewtonsoftHttpCodeGen RequireNewtonsoftCodeGen()
+    {
+        if (NewtonsoftCodeGen is null)
+        {
+            throw new InvalidOperationException(
+                $"{nameof(JsonUsage)}.{nameof(JsonUsage.NewtonsoftJson)} is selected for HTTP JSON serialization, " +
+                "but no Newtonsoft codegen hook is registered. Install the WolverineFx.Http.Newtonsoft NuGet package " +
+                "and call opts.UseNewtonsoftJsonForSerialization() inside MapWolverineEndpoints. " +
+                "See https://wolverinefx.net/guide/http/json.html#using-newtonsoft-json.");
+        }
+
+        return NewtonsoftCodeGen;
     }
 }

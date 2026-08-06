@@ -4,7 +4,7 @@ Just know that Wolverine completely supports the concept of [Storage Operations]
 
 Assuming you have an EF Core `DbContext` type like this registered in your system:
 
-<!-- snippet: sample_TodoDbContext -->
+<!-- snippet: sample_tododbcontext -->
 <a id='snippet-sample_tododbcontext'></a>
 ```cs
 public class TodoDbContext : DbContext
@@ -27,13 +27,13 @@ public class TodoDbContext : DbContext
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/EfCoreTests/using_storage_return_types_and_entity_attributes.cs#L47-L69' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_tododbcontext' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Persistence/EfCoreTests/using_storage_return_types_and_entity_attributes.cs#L47-L68' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_tododbcontext' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 You can use storage operations in Wolverine message handlers or HTTP endpoints like these samples from the Wolverine
 test suite:
 
-<!-- snippet: sample_TodoHandler_to_demonstrate_storage_operations -->
+<!-- snippet: sample_todohandler_to_demonstrate_storage_operations -->
 <a id='snippet-sample_todohandler_to_demonstrate_storage_operations'></a>
 ```cs
 public static class TodoHandler
@@ -134,12 +134,12 @@ public static class TodoHandler
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/Wolverine.ComplianceTests/StorageActionCompliance.cs#L294-L394' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_todohandler_to_demonstrate_storage_operations' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Testing/Wolverine.ComplianceTests/StorageActionCompliance.cs#L295-L394' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_todohandler_to_demonstrate_storage_operations' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ::: warning
 When a handler returns an `IStorageAction`, Wolverine automatically
-applies [transactional middleware](/guide/durability/marten/transactional-middleware) for that handler — even if the
+applies [transactional middleware](/guide/durability/efcore/transactional-middleware) for that handler — even if the
 handler is not explicitly decorated with `[Transactional]` or `AutoApplyTransactions()` is not configured.
 
 This behavior is required because Wolverine needs to automatically call `SaveChangesAsync()` on the EF Core `DbContext`

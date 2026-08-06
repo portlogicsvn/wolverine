@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.ObjectPool;
 using Wolverine.ErrorHandling;
@@ -30,7 +31,7 @@ internal class TracingExecutor : IExecutor
     private readonly string _messageTypeName;
 
     private readonly Action<ILogger, string, string, Guid, Exception?> _executionStarted;
-    private readonly Action<ILogger, string, string, Guid, Exception?> _executionFinished;
+    private readonly Action<ILogger, string, string, Guid, long, Exception?> _executionFinished;
     private readonly Action<ILogger, string, Guid, string, Exception?> _messageSucceeded;
     private readonly Action<ILogger, string, Guid, string, Exception> _messageFailed;
 
@@ -64,9 +65,9 @@ internal class TracingExecutor : IExecutor
             ExecutionStartedEventId,
             "{CorrelationId}: Started processing {Name}#{Id}");
 
-        _executionFinished = LoggerMessage.Define<string, string, Guid>(handler.ProcessingLogLevel,
+        _executionFinished = LoggerMessage.Define<string, string, Guid, long>(handler.ProcessingLogLevel,
             ExecutionFinishedEventId,
-            "{CorrelationId}: Finished processing {Name}#{Id}");
+            "{CorrelationId}: Finished processing {Name}#{Id}, executed in {Duration} ms");
     }
 
     public IMessageHandler Handler { get; }
@@ -107,7 +108,8 @@ internal class TracingExecutor : IExecutor
         finally
         {
             _contextPool.Return(context);
-            _executionFinished(_logger, envelope.CorrelationId!, _messageTypeName, envelope.Id, null);
+            _executionFinished(_logger, envelope.CorrelationId!, _messageTypeName, envelope.Id,
+                envelope.ExecutionTime, null);
             activity?.Stop();
         }
     }
@@ -194,7 +196,8 @@ internal class TracingExecutor : IExecutor
         }
         finally
         {
-            _executionFinished(_logger, envelope.CorrelationId!, _messageTypeName, envelope.Id, null);
+            _executionFinished(_logger, envelope.CorrelationId!, _messageTypeName, envelope.Id,
+                envelope.ExecutionTime, null);
         }
     }
 
@@ -228,6 +231,107 @@ internal class TracingExecutor : IExecutor
             return await retry
                 .ExecuteInlineAsync(context, context.Runtime, DateTimeOffset.UtcNow, Activity.Current, cancellation)
                 .ConfigureAwait(false);
+        }
+    }
+
+    public IAsyncEnumerable<T> StreamAsync<T>(object message, MessageBus bus,
+        CancellationToken cancellation = default,
+        DeliveryOptions? options = null)
+    {
+        var envelope = new Envelope(message)
+        {
+            ResponseType = typeof(IAsyncEnumerable<T>),
+            TenantId = options?.TenantId ?? bus.TenantId,
+            DoNotCascadeResponse = true
+        };
+
+        options?.Override(envelope);
+        bus.TrackEnvelopeCorrelation(envelope, Activity.Current);
+
+        return StreamCoreAsync<T>(envelope, cancellation);
+    }
+
+    private async IAsyncEnumerable<T> StreamCoreAsync<T>(Envelope envelope,
+        [EnumeratorCancellation] CancellationToken cancellation)
+    {
+        using var activity = Handler.TelemetryEnabled ? WolverineTracing.StartStreaming(envelope) : null;
+        _tracker.ExecutionStarted(envelope);
+        _executionStarted(_logger, envelope.CorrelationId!, _messageTypeName, envelope.Id, null);
+
+        var context = _contextPool.Get();
+        context.ReadEnvelope(envelope, InvocationCallback.Instance);
+        envelope.Attempts = 1;
+
+        IAsyncEnumerable<T>? stream = null;
+
+        try
+        {
+            await InvokeAsync(context, cancellation);
+            await context.FlushOutgoingMessagesAsync();
+            stream = envelope.Response as IAsyncEnumerable<T>;
+            activity?.AddEvent(new ActivityEvent(WolverineTracing.StreamingStarted));
+        }
+        catch (Exception e)
+        {
+            activity?.SetStatus(ActivityStatusCode.Error, e.GetType().Name);
+            _tracker.ExecutionFinished(envelope, e);
+            _messageFailed(_logger, _messageTypeName, envelope.Id,
+                envelope.Destination?.ToString() ?? "local", e);
+            _contextPool.Return(context);
+            _executionFinished(_logger, envelope.CorrelationId!, _messageTypeName, envelope.Id,
+                envelope.ExecutionTime, null);
+            throw;
+        }
+
+        if (stream == null)
+        {
+            activity?.SetStatus(ActivityStatusCode.Ok);
+            _tracker.ExecutionFinished(envelope);
+            _messageSucceeded(_logger, _messageTypeName, envelope.Id,
+                envelope.Destination?.ToString() ?? "local", null);
+            _contextPool.Return(context);
+            _executionFinished(_logger, envelope.CorrelationId!, _messageTypeName, envelope.Id,
+                envelope.ExecutionTime, null);
+            yield break;
+        }
+
+        await using var enumerator = stream.GetAsyncEnumerator(cancellation);
+        try
+        {
+            while (true)
+            {
+                T current;
+                try
+                {
+                    if (!await enumerator.MoveNextAsync())
+                    {
+                        activity?.AddEvent(new ActivityEvent(WolverineTracing.StreamingCompleted));
+                        activity?.SetStatus(ActivityStatusCode.Ok);
+                        _tracker.ExecutionFinished(envelope);
+                        _messageSucceeded(_logger, _messageTypeName, envelope.Id,
+                            envelope.Destination?.ToString() ?? "local", null);
+                        yield break;
+                    }
+
+                    current = enumerator.Current;
+                }
+                catch (Exception e)
+                {
+                    activity?.SetStatus(ActivityStatusCode.Error, e.GetType().Name);
+                    _tracker.ExecutionFinished(envelope, e);
+                    _messageFailed(_logger, _messageTypeName, envelope.Id,
+                        envelope.Destination?.ToString() ?? "local", e);
+                    throw;
+                }
+
+                yield return current;
+            }
+        }
+        finally
+        {
+            _contextPool.Return(context);
+            _executionFinished(_logger, envelope.CorrelationId!, _messageTypeName, envelope.Id,
+                envelope.ExecutionTime, null);
         }
     }
 }

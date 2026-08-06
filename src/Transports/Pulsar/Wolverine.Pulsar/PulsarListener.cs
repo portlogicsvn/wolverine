@@ -8,7 +8,7 @@ using Wolverine.Transports;
 
 namespace Wolverine.Pulsar;
 
-internal class PulsarListener : IListener, ISupportDeadLetterQueue, ISupportNativeScheduling
+internal class PulsarListener : IListener, ISupportDeadLetterQueue, ISupportNativeScheduling, IReportConnectionState
 {
     private readonly CancellationToken _cancellation;
     private readonly IConsumer<ReadOnlySequence<byte>>? _consumer;
@@ -21,8 +21,16 @@ internal class PulsarListener : IListener, ISupportDeadLetterQueue, ISupportNati
     private readonly IReceiver _receiver;
     private readonly Task? _receivingRetryLoop;
     private readonly PulsarEndpoint _endpoint;
+    private readonly PulsarAckHandler _ackHandler;
+    private readonly Schemas.IPulsarMessageCodec? _codec;
     private IProducer<ReadOnlySequence<byte>>? _retryLetterQueueProducer;
     private IProducer<ReadOnlySequence<byte>>? _dlqProducer;
+
+    // GH-3231: DotPulsar exposes consumer state only via change-notifications, so a background monitor tracks the
+    // latest state here. Volatile because it is written by the monitor task and read by external health probes.
+    private volatile TransportConnectionState _connectionState = TransportConnectionState.Disconnected;
+
+    public TransportConnectionState ConnectionState => _connectionState;
 
     public PulsarListener(IWolverineRuntime runtime, PulsarEndpoint endpoint, IReceiver receiver,
         PulsarTransport transport,
@@ -31,6 +39,16 @@ internal class PulsarListener : IListener, ISupportDeadLetterQueue, ISupportNati
         _endpoint = endpoint;
         _receiver = receiver ?? throw new ArgumentNullException(nameof(receiver));
         _cancellation = cancellation;
+        _codec = endpoint.MessageCodec;
+
+        if (endpoint.AckStrategy == PulsarAckStrategy.Cumulative &&
+            endpoint.SubscriptionType is SubscriptionType.Shared or SubscriptionType.KeyShared)
+        {
+            throw new InvalidOperationException(
+                $"Cumulative acknowledgment is only valid for Exclusive or Failover subscriptions, not " +
+                $"{endpoint.SubscriptionType}, on Pulsar topic {endpoint.PulsarTopic()}. Use Individual or " +
+                "Batched acknowledgment for shared subscriptions.");
+        }
 
         Address = endpoint.Uri;
 
@@ -49,18 +67,49 @@ internal class PulsarListener : IListener, ISupportDeadLetterQueue, ISupportNati
 
         var combined = CancellationTokenSource.CreateLinkedTokenSource(_cancellation, _localCancellation.Token);
 
-        _consumer = transport.Client!.NewConsumer()
+        // GH-3183: when an endpoint schema is configured, create the consumer with it so the broker
+        // registers/enforces the schema for the topic. The schema is a pass-through over Wolverine's
+        // bytes, so the builder is still IConsumerBuilder<ReadOnlySequence<byte>> and the receive path is
+        // unchanged.
+        var consumerBuilder = (endpoint.Schema != null
+                ? transport.Client!.NewConsumer(endpoint.Schema)
+                : transport.Client!.NewConsumer())
             .SubscriptionName(endpoint.SubscriptionName)
             .SubscriptionType(endpoint.SubscriptionType)
-            .Topic(endpoint.PulsarTopic())
-            .Create();
+            .InitialPosition(endpoint.SubscriptionInitialPosition)
+            // GH-3231: track the consumer's connection state so health probes can read it (see ConnectionState). A
+            // user-supplied StateChangedHandler via ConfigureConsumer below would override this.
+            .StateChangedHandler(changed => _connectionState = changed.ConsumerState.ToTransportConnectionState());
 
-        NativeDeadLetterQueueEnabled = (transport.DeadLetterTopic is not null &&
-                                       transport.DeadLetterTopic.Mode != DeadLetterTopicMode.WolverineStorage) ||
-                                       (endpoint.DeadLetterTopic is not null && endpoint.DeadLetterTopic.Mode !=
-                                       DeadLetterTopicMode.WolverineStorage);
+        if (endpoint.TopicsPattern is not null)
+        {
+            // Pattern subscription: consume every topic matching the regex.
+            consumerBuilder = consumerBuilder
+                .TopicsPattern(endpoint.TopicsPattern)
+                .RegexSubscriptionMode(endpoint.RegexSubscriptionMode);
+        }
+        else if (endpoint.AdditionalTopics.Count > 0)
+        {
+            // Multi-topic subscription: one consumer over the primary + additional topics.
+            consumerBuilder = consumerBuilder.Topics(endpoint.AllTopicPaths());
+        }
+        else
+        {
+            consumerBuilder = consumerBuilder.Topic(endpoint.PulsarTopic());
+        }
 
-        NativeRetryLetterQueueEnabled = endpoint.RetryLetterTopic is not null &&
+        endpoint.ConfigureConsumer?.Invoke(consumerBuilder);
+
+        _consumer = consumerBuilder.Create();
+
+        _ackHandler = new PulsarAckHandler(_consumer, endpoint.AckStrategy, endpoint.AckBatchSize,
+            endpoint.AckBatchInterval, _cancellation);
+
+        // Per-endpoint-override-wins resolution (endpoint override, else transport default).
+        NativeDeadLetterQueueEnabled = endpoint.EffectiveDeadLetterTopic is not null &&
+                                       endpoint.EffectiveDeadLetterTopic.Mode != DeadLetterTopicMode.WolverineStorage;
+
+        NativeRetryLetterQueueEnabled = endpoint.EffectiveRetryLetterTopic is not null &&
                                         RetryLetterTopic.SupportedSubscriptionTypes.Contains(endpoint.SubscriptionType);
 
         trySetupNativeResiliency(endpoint, transport);
@@ -69,6 +118,9 @@ internal class PulsarListener : IListener, ISupportDeadLetterQueue, ISupportNati
         {
             await foreach (var message in _consumer.Messages(combined.Token))
             {
+                // Record receipt so the ack handler can compute the cumulative-ack watermark safely.
+                _ackHandler.Track(FixMessageId(message.MessageId, _consumer.Topic));
+
                 var envelope = new PulsarEnvelope(message)
                 {
                     Data = message.Data.ToArray(),
@@ -76,6 +128,13 @@ internal class PulsarListener : IListener, ISupportDeadLetterQueue, ISupportNati
                 };
 
                 mapper.MapIncomingToEnvelope(envelope, message);
+
+                // GH-3213: a schema codec (Avro) owns the body encoding, so decode the message object
+                // directly here — the pipeline then skips its own body deserialization.
+                if (_codec != null)
+                {
+                    envelope.Message = _codec.Decode(message.Data);
+                }
 
                 await receiver.ReceivedAsync(this, envelope);
             }
@@ -97,6 +156,11 @@ internal class PulsarListener : IListener, ISupportDeadLetterQueue, ISupportNati
 
                     mapper.MapIncomingToEnvelope(envelope, message);
 
+                    if (_codec != null)
+                    {
+                        envelope.Message = _codec.Decode(message.Data);
+                    }
+
                     await receiver.ReceivedAsync(this, envelope);
                 }
             }, combined.Token);
@@ -110,7 +174,7 @@ internal class PulsarListener : IListener, ISupportDeadLetterQueue, ISupportNati
             return;
         }
 
-        if (endpoint.RetryLetterTopic is not null)
+        if (endpoint.EffectiveRetryLetterTopic is not null)
         {
             _retryLetterQueueProducer = transport.Client!.NewProducer()
                 .Topic(getRetryLetterTopicUri(endpoint)!.ToString())
@@ -129,38 +193,46 @@ internal class PulsarListener : IListener, ISupportDeadLetterQueue, ISupportNati
     {
         var topicRetry = getRetryLetterTopicUri(endpoint);
 
-        return transport.Client!.NewConsumer()
+        var retryBuilder = transport.Client!.NewConsumer()
             .SubscriptionName(endpoint.SubscriptionName)
             .SubscriptionType(endpoint.SubscriptionType)
-            .Topic(topicRetry!.ToString())
-            .Create();
+            .InitialPosition(endpoint.SubscriptionInitialPosition)
+            .Topic(topicRetry!.ToString());
+
+        endpoint.ConfigureConsumer?.Invoke(retryBuilder);
+
+        return retryBuilder.Create();
     }
 
     private Uri? getRetryLetterTopicUri(PulsarEndpoint endpoint)
     {
         return NativeRetryLetterQueueEnabled
-            ? PulsarEndpoint.UriFor(endpoint.IsPersistent, endpoint.Tenant, endpoint.Namespace,
-                endpoint.RetryLetterTopic?.TopicName ?? $"{endpoint.TopicName}-RETRY")
+            ? PulsarEndpoint.NativeTopicPath(endpoint.IsPersistent, endpoint.Tenant, endpoint.Namespace,
+                endpoint.EffectiveRetryLetterTopic?.TopicName ?? $"{endpoint.TopicName}-RETRY")
             : null;
     }
 
     private Uri getDeadLetteredTopicUri(PulsarEndpoint endpoint)
     {
-        var topicDql = PulsarEndpoint.UriFor(endpoint.IsPersistent, endpoint.Tenant, endpoint.Namespace,
-            endpoint.DeadLetterTopic?.TopicName ?? $"{endpoint.TopicName}-DLQ");
-
-        return topicDql;
+        return PulsarEndpoint.NativeTopicPath(endpoint.IsPersistent, endpoint.Tenant, endpoint.Namespace,
+            endpoint.EffectiveDeadLetterTopic?.TopicName ?? $"{endpoint.TopicName}-DLQ");
     }
 
     public ValueTask CompleteAsync(Envelope envelope)
     {
         if (envelope is PulsarEnvelope e)
         {
-            // Acknowledge on the appropriate consumer based on where the message came from
-            var consumer = e.IsFromRetryConsumer && _retryConsumer != null ? _retryConsumer : _consumer;
-            if (consumer != null)
+            // Retry-consumer messages always acknowledge individually; the configurable ack strategy
+            // (#3180) applies to the primary consumer.
+            if (e.IsFromRetryConsumer && _retryConsumer != null)
             {
-                return consumer.Acknowledge(e.MessageData, _cancellation);
+                return _retryConsumer.Acknowledge(FixMessageId(e.MessageData.MessageId, _retryConsumer.Topic),
+                    _cancellation);
+            }
+
+            if (_consumer != null)
+            {
+                return _ackHandler.CompleteAsync(FixMessageId(e.MessageData.MessageId, _consumer.Topic));
             }
         }
 
@@ -171,10 +243,25 @@ internal class PulsarListener : IListener, ISupportDeadLetterQueue, ISupportNati
 
     public async ValueTask DeferAsync(Envelope envelope)
     {
-        if (_enableRequeue && _sender is not null && envelope is PulsarEnvelope e)
+        if (envelope is not PulsarEnvelope e)
+        {
+            return;
+        }
+
+        if (_endpoint.UseNativeRedelivery)
         {
             var consumer = e.IsFromRetryConsumer && _retryConsumer != null ? _retryConsumer : _consumer;
-            await consumer!.Acknowledge(e.MessageData, _cancellation);
+            // Native per-message redelivery: leave the message unacknowledged and ask Pulsar to
+            // redeliver just this one message (preserves its redelivery count) — #3177.
+            await consumer!.RedeliverUnacknowledgedMessages(
+                [FixMessageId(e.MessageData.MessageId, consumer.Topic)], _cancellation);
+            return;
+        }
+
+        if (_enableRequeue && _sender is not null)
+        {
+            var consumer = e.IsFromRetryConsumer && _retryConsumer != null ? _retryConsumer : _consumer;
+            await consumer!.Acknowledge(FixMessageId(e.MessageData.MessageId, consumer.Topic), _cancellation);
             await _sender.SendAsync(envelope);
         }
     }
@@ -182,6 +269,10 @@ internal class PulsarListener : IListener, ISupportDeadLetterQueue, ISupportNati
     public async ValueTask DisposeAsync()
     {
         await _localCancellation.CancelAsync();
+        _localCancellation.Dispose();
+
+        // Flush any pending batched acks before the consumer is torn down.
+        await _ackHandler.DisposeAsync();
 
         if (_consumer != null)
         {
@@ -245,16 +336,34 @@ internal class PulsarListener : IListener, ISupportDeadLetterQueue, ISupportNati
             throw new InvalidOperationException("Requeue is not enabled for this endpoint");
         }
 
-        if (_sender is not null && envelope is PulsarEnvelope)
+        if (envelope is PulsarEnvelope e)
         {
-            await _sender.SendAsync(envelope);
-            return true;
+            if (_endpoint.UseNativeRedelivery)
+            {
+                var consumer = e.IsFromRetryConsumer && _retryConsumer != null ? _retryConsumer : _consumer;
+                await consumer!.RedeliverUnacknowledgedMessages(
+                    [FixMessageId(e.MessageData.MessageId, consumer.Topic)], _cancellation);
+                return true;
+            }
+
+            if (_sender is not null)
+            {
+                await _sender.SendAsync(envelope);
+                return true;
+            }
         }
 
         return false;
     }
 
     public bool NativeDeadLetterQueueEnabled { get; }
+
+    /// <summary>
+    /// Whether this listener should use Pulsar's native per-message redelivery for failed messages
+    /// when no retry-letter / dead-letter topic is configured. See #3177.
+    /// </summary>
+    internal bool UsesNativeRedelivery => _endpoint.UseNativeRedelivery;
+
     public RetryLetterTopic? RetryLetterTopic => _endpoint.RetryLetterTopic;
 
     public async Task MoveToErrorsAsync(Envelope envelope, Exception exception)
@@ -267,19 +376,26 @@ internal class PulsarListener : IListener, ISupportDeadLetterQueue, ISupportNati
 
     public bool NativeRetryLetterQueueEnabled { get; }
 
+    // Only claim the native-scheduling capability when the retry-letter queue is actually configured;
+    // otherwise MoveToScheduledUntilAsync has no producer to move the message to and the runtime should
+    // fall back to the durable/buffered rescheduler rather than believe a native reschedule succeeded.
+    public bool NativeSchedulingEnabled => NativeRetryLetterQueueEnabled;
+
     public async Task MoveToScheduledUntilAsync(Envelope envelope, DateTimeOffset time)
     {
         if (NativeRetryLetterQueueEnabled && envelope is PulsarEnvelope)
         {
-            await moveToQueueAsync(envelope, envelope.Failure, false);
+            // Honor the caller's requested delivery time rather than the retry-letter tier schedule.
+            await moveToQueueAsync(envelope, envelope.Failure, false, time);
         }
     }
 
-    private async Task moveToQueueAsync(Envelope envelope, Exception? exception, bool isDeadLettered = false)
+    private async Task moveToQueueAsync(Envelope envelope, Exception? exception, bool isDeadLettered = false,
+        DateTimeOffset? scheduledTime = null)
     {
         if (envelope is PulsarEnvelope e)
         {
-            var messageMetadata = BuildMessageMetadata(envelope, e, exception, isDeadLettered);
+            var messageMetadata = BuildMessageMetadata(envelope, e, exception, isDeadLettered, scheduledTime);
 
             IConsumer<ReadOnlySequence<byte>>? sourceConsumer;
             IProducer<ReadOnlySequence<byte>> targetProducer;
@@ -299,7 +415,7 @@ internal class PulsarListener : IListener, ISupportDeadLetterQueue, ISupportNati
             }
 
             // Acknowledge the original message
-            await sourceConsumer!.Acknowledge(e.MessageData, _cancellation);
+            await sourceConsumer!.Acknowledge(FixMessageId(e.MessageData.MessageId, sourceConsumer.Topic), _cancellation);
 
             // Send copy to retry/DLQ topic
             await targetProducer.Send(messageMetadata, e.MessageData.Data, _cancellation)
@@ -307,10 +423,41 @@ internal class PulsarListener : IListener, ISupportDeadLetterQueue, ISupportNati
         }
     }
 
+    /// <summary>
+    /// Workaround for https://github.com/apache/pulsar-dotpulsar/issues/287. DotPulsar's
+    /// <c>BatchHandler.Add</c> constructs the inner <see cref="MessageId" /> for each message of a
+    /// batch via the four-arg ctor and never sets <see cref="MessageId.Topic" />, so
+    /// <c>Consumer.Acknowledge</c> hits <c>_subConsumers[messageId.Topic]</c> with the empty
+    /// string and throws <see cref="System.Collections.Generic.KeyNotFoundException" /> on
+    /// partitioned topics. Reconstruct the <see cref="MessageId" /> with the partition sub-topic
+    /// URI built from the <see cref="IConsumer.Topic" /> the source consumer was subscribed to.
+    /// Using <c>consumer.Topic</c> rather than <c>_endpoint.PulsarTopic()</c> means the same
+    /// helper works for the retry consumer (which subscribes to <c>{baseTopic}-RETRY</c>) without
+    /// any branching — DotPulsar reports the actual subscribed topic per consumer.
+    /// </summary>
+    internal static MessageId FixMessageId(MessageId messageId, string consumerTopic)
+    {
+        if (string.IsNullOrEmpty(messageId.Topic) && messageId.Partition >= 0)
+        {
+            return new MessageId(messageId.LedgerId, messageId.EntryId, messageId.Partition,
+                messageId.BatchIndex, $"{consumerTopic}-partition-{messageId.Partition}");
+        }
+
+        return messageId;
+    }
+
     private MessageMetadata BuildMessageMetadata(Envelope envelope, PulsarEnvelope e, Exception? exception,
-        bool isDeadLettered)
+        bool isDeadLettered, DateTimeOffset? scheduledTime = null)
     {
         var messageMetadata = new MessageMetadata();
+
+        // Stamp the standard failure metadata (exception info + original destination) BEFORE
+        // copying the headers into the outgoing metadata so it actually reaches the DLQ or
+        // retry-letter message on the wire. GH-3474
+        if (exception != null)
+        {
+            DeadLetterQueueConstants.StampFailureMetadata(envelope, exception);
+        }
 
         foreach (var property in e.Headers)
         {
@@ -341,15 +488,15 @@ internal class PulsarListener : IListener, ISupportDeadLetterQueue, ISupportNati
             var delayTime = _endpoint.RetryLetterTopic!.Retry[envelope.Attempts - 1];
             messageMetadata[PulsarEnvelopeConstants.DelayTimeMetadataKey] =
                 delayTime.TotalMilliseconds.ToString(CultureInfo.InvariantCulture);
-            messageMetadata.DeliverAtTimeAsDateTimeOffset = DateTimeOffset.UtcNow.Add(delayTime);
+            // A caller-supplied reschedule time (ReScheduleAsync / scheduled-retry policy) wins over the
+            // retry-letter tier delay so "retry at T" is actually honored; fall back to the tier schedule.
+            messageMetadata.DeliverAtTimeAsDateTimeOffset = scheduledTime ?? DateTimeOffset.UtcNow.Add(delayTime);
         }
         else
         {
             messageMetadata.DeliverAtTimeAsDateTimeOffset = DateTimeOffset.UtcNow;
             if (exception != null)
             {
-                DeadLetterQueueConstants.StampFailureMetadata(envelope, exception);
-
                 var exceptionText = exception.ToString();
                 messageMetadata[PulsarEnvelopeConstants.Exception] = exceptionText;
                 e.Headers[PulsarEnvelopeConstants.Exception] = exceptionText;

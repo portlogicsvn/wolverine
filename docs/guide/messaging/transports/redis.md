@@ -7,7 +7,7 @@ first install the `WolverineFx.Redis` Nuget package to your application. Behind 
 is using the [StackExchange.Redis](https://github.com/StackExchange/StackExchange.Redis) library. 
 
 ```bash
-dotnet add WolverineFx.Redis
+dotnet add package WolverineFx.Redis
 ```
 
 ## Using as Message Transport
@@ -20,7 +20,7 @@ To connect to Redis and configure listeners and senders, use this syntax:
 using var host = await Host.CreateDefaultBuilder()
     .UseWolverine(opts =>
     {
-        opts.UseRedisTransport("localhost:6379")
+        opts.UseRedisTransport(RedisContainerFixture.ConnectionString)
             
             // Auto-create streams and consumer groups
             .AutoProvision()
@@ -76,8 +76,65 @@ using var host = await Host.CreateDefaultBuilder()
         opts.Services.AddResourceSetupOnStartup();
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Redis/Wolverine.Redis.Tests/DocumentationSamples.cs#L19-L80' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_bootstrapping_with_redis' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Redis/Wolverine.Redis.Tests/DocumentationSamples.cs#L20-L80' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_bootstrapping_with_redis' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
+
+## Connection Options <Badge type="tip" text="6.9" />
+
+`UseRedisTransport()` accepts four different connection sources. The connection string overload above
+is the simplest, but you can also pass StackExchange.Redis [`ConfigurationOptions`](https://stackexchange.github.io/StackExchange.Redis/Configuration),
+a fully caller-managed [`IConnectionMultiplexer`](https://stackexchange.github.io/StackExchange.Redis/Basics),
+or a factory that resolves one from your IoC container:
+
+```csharp
+// 1. Connection string — Wolverine owns the ConnectionMultiplexer
+opts.UseRedisTransport("localhost:6379");
+
+// 2. ConfigurationOptions — Wolverine builds and owns the ConnectionMultiplexer,
+//    but you control every StackExchange.Redis setting
+var configuration = ConfigurationOptions.Parse("localhost:6379");
+configuration.ConnectRetry = 5;
+opts.UseRedisTransport(configuration);
+
+// 3. A caller-managed IConnectionMultiplexer — you own its lifetime; Wolverine never disposes it
+IConnectionMultiplexer multiplexer = await ConnectionMultiplexer.ConnectAsync("localhost:6379");
+opts.UseRedisTransport(multiplexer);
+
+// 4. A factory resolved from the IoC container — share one multiplexer between Wolverine and
+//    the rest of your application. The container owns it; Wolverine never disposes it.
+opts.UseRedisTransport(sp => sp.GetRequiredService<IConnectionMultiplexer>());
+```
+
+With options (2), (3), and (4) Wolverine never has to recreate the connection from a static connection
+string, which is what makes token-based authentication possible.
+
+### Azure Managed Redis with Entra ID / Managed Identity
+
+Azure Managed Redis access tokens expire and must be refreshed. The
+[`Microsoft.Azure.StackExchangeRedis`](https://github.com/Azure/Microsoft.Azure.StackExchangeRedis) package
+handles that refresh by augmenting a `ConfigurationOptions` (or the multiplexer it builds). Because Wolverine
+can take that `ConfigurationOptions` (or the resulting `IConnectionMultiplexer`) directly, the connection
+re-authenticates in place and the application no longer has to restart when a token expires:
+
+```csharp
+// Requires the Microsoft.Azure.StackExchangeRedis package
+var configuration = await ConfigurationOptions
+    .Parse("your-cache.region.redis.azure.net:10000")
+    .ConfigureForAzureWithTokenCredentialAsync(new DefaultAzureCredential());
+
+opts.UseRedisTransport(configuration);
+
+// — or — build the multiplexer yourself and hand it to Wolverine:
+// var multiplexer = await ConnectionMultiplexer.ConnectAsync(configuration);
+// opts.UseRedisTransport(multiplexer);
+```
+
+::: tip
+When you pass an `IConnectionMultiplexer` (option 3) or a factory that resolves one (option 4), Wolverine uses
+it as-is and does **not** dispose it on shutdown — the multiplexer (and any token-refresh background work wired
+into it) is owned by your application / IoC container. With the connection-string and `ConfigurationOptions`
+overloads Wolverine owns the multiplexer it builds and disposes it for you.
+:::
 
 If you need to control the database id within Redis, you have these options:
 
@@ -87,7 +144,7 @@ If you need to control the database id within Redis, you have these options:
 using var host = await Host.CreateDefaultBuilder()
     .UseWolverine(opts =>
     {
-        opts.UseRedisTransport("localhost:6379");
+        opts.UseRedisTransport(RedisContainerFixture.ConnectionString);
 
         // Configure streams on different databases
         opts.PublishMessage<OrderCreated>()
@@ -108,7 +165,7 @@ using var host = await Host.CreateDefaultBuilder()
             .UseDurableInbox();
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Redis/Wolverine.Redis.Tests/DocumentationSamples.cs#L85-L111' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_redis_database_configuration' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Redis/Wolverine.Redis.Tests/DocumentationSamples.cs#L85-L110' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_redis_database_configuration' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 To work with multiple databases in one application, see this sample:
@@ -119,7 +176,7 @@ To work with multiple databases in one application, see this sample:
 using var host = await Host.CreateDefaultBuilder()
     .UseWolverine(opts =>
     {
-        opts.UseRedisTransport("localhost:6379").AutoProvision();
+        opts.UseRedisTransport(RedisContainerFixture.ConnectionString).AutoProvision();
 
         // Different message types on different databases for isolation
         
@@ -140,8 +197,95 @@ using var host = await Host.CreateDefaultBuilder()
         opts.ListenToRedisStream("analytics", "analytics-processors", 3);
     }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Redis/Wolverine.Redis.Tests/DocumentationSamples.cs#L141-L167' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_multiple_database_usage' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Redis/Wolverine.Redis.Tests/DocumentationSamples.cs#L139-L164' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_multiple_database_usage' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
+
+## Connecting to Multiple Brokers <Badge type="tip" text="6.9" />
+
+If a single Wolverine application needs to talk to more than one Redis broker, register the additional
+broker(s) with `AddNamedRedisBroker` using a `BrokerName`, then pin publishing or listening to a specific
+broker with the `*OnNamedBroker` overloads:
+
+<!-- snippet: sample_redis_named_broker -->
+<a id='snippet-sample_redis_named_broker'></a>
+```cs
+using var host = await Host.CreateDefaultBuilder()
+    .UseWolverine(opts =>
+    {
+        // The default Redis broker
+        opts.UseRedisTransport("localhost:6379");
+
+        // An additional, independent Redis broker identified by name
+        opts.AddNamedRedisBroker(new BrokerName("secondary"), "localhost:6399");
+
+        // Publish a message type to a stream on the named broker
+        opts.PublishMessage<OrderCreated>()
+            .ToRedisStreamOnNamedBroker(new BrokerName("secondary"), "orders");
+
+        // Listen to a stream on the named broker
+        opts.ListenToRedisStreamOnNamedBroker(new BrokerName("secondary"), "orders", "order-processors");
+    }).StartAsync();
+```
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Redis/Wolverine.Redis.Tests/DocumentationSamples.cs#L169-L187' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_redis_named_broker' title='Start of snippet'>anchor</a></sup>
+<!-- endSnippet -->
+
+::: info
+The Wolverine `Uri` scheme for any endpoint on a named broker is the broker name itself, so in the example
+above you would see endpoint URIs like `secondary://stream/0/orders`. The default broker keeps the canonical
+`redis://` scheme, which keeps the two brokers' endpoints from colliding.
+:::
+
+`AddNamedRedisBroker` has the same connection-source overloads as `UseRedisTransport`: a connection string,
+a `ConfigurationOptions`, a caller-managed `IConnectionMultiplexer`, or a factory that resolves one from the
+IoC container.
+
+Connecting to multiple named brokers is distinct from [Multi-Tenancy](#multi-tenancy): a named broker is a
+statically-addressed second connection that you target explicitly, whereas per-tenant connections are
+selected at runtime from each message's tenant id.
+
+## Multi-Tenancy <Badge type="tip" text="6.9" />
+
+The Redis transport supports *broker-per-tenant* multi-tenancy: each tenant talks to its own dedicated Redis
+server while sharing the same stream topology. Register a dedicated connection per tenant with `AddTenant`,
+and Wolverine routes each message to the correct server from its `Envelope.TenantId`:
+
+<!-- snippet: sample_redis_multi_tenancy -->
+<a id='snippet-sample_redis_multi_tenancy'></a>
+```cs
+using var host = await Host.CreateDefaultBuilder()
+    .UseWolverine(opts =>
+    {
+        opts.UseRedisTransport("localhost:6379")
+            .AutoProvision()
+
+            // Route messages that carry a tenant id to that tenant's own Redis server;
+            // messages with no (or an unknown) tenant id fall back to the shared connection
+            .ConfigureMultiTenancy(TenantedIdBehavior.FallbackToDefault)
+
+            // Each tenant gets its own dedicated Redis server
+            .AddTenant("tenant1", "redis-tenant1:6379")
+            .AddTenant("tenant2", "redis-tenant2:6379");
+
+        // The stream topology is shared; the connection is chosen per message from Envelope.TenantId
+        opts.PublishMessage<OrderCreated>().ToRedisStream("orders");
+        opts.ListenToRedisStream("orders", "order-processors");
+    }).StartAsync();
+```
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Redis/Wolverine.Redis.Tests/DocumentationSamples.cs#L192-L212' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_redis_multi_tenancy' title='Start of snippet'>anchor</a></sup>
+<!-- endSnippet -->
+
+Outbound sends are routed by tenant id through the framework's `TenantedSender`; inbound, Wolverine runs one
+listener per tenant connection and stamps each received envelope with its tenant id. `ConfigureMultiTenancy`
+controls what happens for a message whose tenant id is unknown:
+
+* `FallbackToDefault` (the default) — use the shared/default connection.
+* `TenantIdRequired` — reject a message that has no tenant id.
+* `IgnoreUnknownTenants` — silently drop messages for tenants that were never registered.
+
+Each tenant is an independent Redis server, so the same stream key and consumer group are created separately
+on each tenant's connection without colliding. As with named brokers, `AddTenant` accepts a connection
+string, a `ConfigurationOptions`, or a caller-managed `IConnectionMultiplexer`; Wolverine disposes only the
+multiplexers it builds itself.
 
 ## Interoperability
 
@@ -150,7 +294,7 @@ First, see the [tutorial on interoperability with Wolverine](/tutorials/interop)
 Next, the Redis transport supports interoperability through the `IRedisEnvelopeMapper` interface. If necessary, you
 can build your own version of this mapper interface like the following:
 
-<!-- snippet: sample_OurRedisJsonMapper -->
+<!-- snippet: sample_ourredisjsonmapper -->
 <a id='snippet-sample_ourredisjsonmapper'></a>
 ```cs
 // Simplistic envelope mapper that expects every message to be of
@@ -213,7 +357,7 @@ public class OurRedisJsonMapper<TMessage> : EnvelopeMapper<StreamEntry, List<Nam
     }
 }
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Redis/Wolverine.Redis.Tests/DocumentationSamples.cs#L186-L248' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_ourredisjsonmapper' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Redis/Wolverine.Redis.Tests/DocumentationSamples.cs#L230-L291' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_ourredisjsonmapper' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
 ## Scheduled Messaging <Badge type="tip" text="5.10" />
@@ -224,7 +368,14 @@ necessary to utilize that.
 ## Dead Letter Queue Messages <Badge type="tip" text="5.10" />
 
 For `Buffered` or `Inline` endpoints, you can use native Redis streams for "dead letter queue" messages using
-the name "{StreamKey}:dead-letter":
+the name "{StreamKey}:dead-letter". Each dead letter stream entry contains the serialized envelope plus the
+standard Wolverine diagnostic headers as top-level entry fields — `exception-type`, `exception-message`,
+`exception-stack`, `failed-at`, `original-destination` — alongside `message-type`, `envelope-id`, and
+`attempts` fields so tooling can inspect failures without deserializing the envelope. See
+[diagnostic headers on dead letter messages](/tutorials/dead-letter-queues#diagnostic-headers-on-dead-letter-messages)
+for the full cross-transport header structure.
+
+Enable the native dead letter queue like this:
 
 <!-- snippet: sample_using_dead_letter_queue_for_redis -->
 <a id='snippet-sample_using_dead_letter_queue_for_redis'></a>
@@ -233,7 +384,7 @@ var builder = Host.CreateDefaultBuilder();
 
 using var host = await builder.UseWolverine(opts =>
 {
-    opts.UseRedisTransport("localhost:6379").AutoProvision()
+    opts.UseRedisTransport(RedisContainerFixture.ConnectionString).AutoProvision()
         .SystemQueuesEnabled(false) // Disable reply queues
         .DeleteStreamEntryOnAck(true); // Clean up stream entries on ack
 
@@ -256,7 +407,53 @@ using var host = await builder.UseWolverine(opts =>
     opts.Services.AddResourceSetupOnStartup();
 }).StartAsync();
 ```
-<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Redis/Wolverine.Redis.Tests/Samples/RedisTransportWithScheduling.cs#L7-L36' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_dead_letter_queue_for_redis' title='Start of snippet'>anchor</a></sup>
+<sup><a href='https://github.com/JasperFx/wolverine/blob/main/src/Transports/Redis/Wolverine.Redis.Tests/Samples/RedisTransportWithScheduling.cs#L8-L36' title='Snippet source file'>snippet source</a> | <a href='#snippet-sample_using_dead_letter_queue_for_redis' title='Start of snippet'>anchor</a></sup>
 <!-- endSnippet -->
 
+## Resetting in Tests
 
+Redis stream endpoints implement the same `IBrokerQueue` surface as the relational database queue
+transports, so [`IHost.ClearAllWolverineStorageAsync()`](/guide/testing.html#resetting-all-wolverine-storage-in-tests)
+purges them alongside envelope storage. If you need the streams left alone, reset envelope storage
+directly with `IMessageStoreAdmin.RebuildAsync()` instead.
+
+## Global Partitioning
+
+Redis streams can be used as the external transport for [global partitioned messaging](/guide/messaging/partitioning#global-partitioning). This creates a set of sharded Redis streams with companion local queues for sequential processing across a multi-node cluster.
+
+Use `UseShardedRedisStreams()` within a `GlobalPartitioned()` configuration:
+
+```cs
+using var host = await Host.CreateDefaultBuilder()
+    .UseWolverine(opts =>
+    {
+        opts.UseRedisTransport("localhost:6379").AutoProvision();
+
+        opts.MessagePartitioning.ByMessage<IMyMessage>(x => x.GroupId);
+
+        opts.MessagePartitioning.GlobalPartitioned(topology =>
+        {
+            // Creates 4 sharded Redis streams named "orders1" through "orders4"
+            // with matching companion local queues for sequential processing
+            topology.UseShardedRedisStreams("orders", 4);
+            topology.MessagesImplementing<IMyMessage>();
+        });
+    }).StartAsync();
+```
+
+This creates Redis streams named `orders1` through `orders4` with companion local queues `global-orders1` through `global-orders4`. Messages are routed to the correct shard based on their group id, and Wolverine handles the coordination between nodes automatically.
+
+## URI reference
+
+The `RedisEndpointUri` helper class builds canonical endpoint URIs:
+
+| URI form | Helper call |
+|---|---|
+| `redis://stream/{databaseId}/{streamKey}` | `RedisEndpointUri.Stream("key", databaseId: 0)` |
+| `redis://stream/{databaseId}/{streamKey}?consumerGroup={group}` | `RedisEndpointUri.Stream("key", 0, "group")` |
+
+```csharp
+using Wolverine.Redis;
+
+var uri = RedisEndpointUri.Stream("orders", databaseId: 3);
+```

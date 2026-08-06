@@ -1,4 +1,3 @@
-using System.Threading.Tasks.Dataflow;
 using JasperFx.Blocks;
 using JasperFx.Core;
 using Microsoft.Extensions.Logging;
@@ -46,26 +45,29 @@ public abstract class SendingAgent : ISendingAgent, ISenderCallback, ISenderCirc
             ? sendWithCallbackHandlingAsync
             : sendWithExplicitHandlingAsync;
 
-        _sending = new RetryBlock<Envelope>(senderDelegate, logger, _settings.Cancellation, new ExecutionDataflowBlockOptions());
+        _sending = new RetryBlock<Envelope>(senderDelegate, logger, _settings.Cancellation);
     }
 
     public ISender Sender => _sender;
 
-    public virtual ValueTask DisposeAsync()
+    public virtual async ValueTask DisposeAsync()
     {
+        // Stop the circuit-breaker ping loop before tearing down the sender it pings through --
+        // otherwise it keeps running against a disposed/unreachable destination indefinitely.
+        _circuitWatcher?.SafeDispose();
+        _circuitWatcher = null;
+
         if (_sender is IAsyncDisposable ad)
         {
-            return ad.DisposeAsync();
+            await ad.DisposeAsync().ConfigureAwait(false);
         }
-
-        if (_sender is IDisposable d)
+        else if (_sender is IDisposable d)
         {
             d.SafeDispose();
         }
 
         _sending.Dispose();
-
-        return ValueTask.CompletedTask;
+        _failureCountLock.Dispose();
     }
 
     Task ISenderCallback.MarkTimedOutAsync(OutgoingMessageBatch outgoing)
@@ -279,6 +281,15 @@ public abstract class SendingAgent : ISendingAgent, ISenderCallback, ISenderCirc
             await _sender.SendAsync(envelope);
 
             await MarkSuccessfulAsync(envelope);
+
+            // wolverine#2955: success branch only — a retried/failed envelope is
+            // re-queued by MarkProcessingFailureAsync and must not be released
+            // out from under the retry. _runtime is null in test paths that
+            // hand-construct a SendingAgent; pooling is opt-in for those.
+            if (envelope.FromPool && _runtime is Runtime.WolverineRuntime runtime)
+            {
+                runtime.ReleaseInternalEnvelope(envelope, true);
+            }
         }
         catch (NotSupportedException)
         {

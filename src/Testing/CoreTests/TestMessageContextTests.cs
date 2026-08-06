@@ -22,7 +22,7 @@ public class TestMessageContextTests
     public async Task invoke_a_message_inline()
     {
         var message = new Message2();
-        await theContext.InvokeAsync(message);
+        await theContext.InvokeAsync(message, TestContext.Current.CancellationToken);
 
         theSpy.Invoked.ShouldHaveMessageOfType<Message2>()
             .ShouldBeSameAs(message);
@@ -71,6 +71,56 @@ public class TestMessageContextTests
 
         theSpy.Published.ShouldHaveEnvelopeForMessageType<Message1>()
             .Headers["a"].ShouldBe("1");
+    }
+
+    [Fact]
+    public async Task publish_all_typed_messages_in_order()
+    {
+        var messages = new List<Message1> { new(), new(), new() };
+
+        await theContext.PublishAllAsync(messages);
+
+        theSpy.Published.Select(x => x.ShouldBeOfType<Envelope>().Message).ShouldBe(messages);
+    }
+
+    [Fact]
+    public async Task publish_all_heterogeneous_messages_in_order()
+    {
+        object[] messages = [new Message1(), new Message2(), new Message3()];
+
+        await theContext.PublishAllAsync(messages);
+
+        theSpy.Published.Select(x => x.ShouldBeOfType<Envelope>().Message).ShouldBe(messages);
+    }
+
+    [Fact]
+    public async Task publish_all_with_no_messages_is_a_no_op()
+    {
+        await theContext.PublishAllAsync(Array.Empty<Message1>());
+
+        theSpy.Published.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task publish_all_rejects_a_null_sequence()
+    {
+        IEnumerable<Message1> messages = null!;
+
+        await Should.ThrowAsync<ArgumentNullException>(async () =>
+            await theContext.PublishAllAsync(messages));
+
+        theSpy.Published.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task publish_all_stops_and_propagates_an_enumeration_failure()
+    {
+        var first = new Message1();
+
+        await Should.ThrowAsync<InvalidOperationException>(async () =>
+            await theContext.PublishAllAsync(messagesThatFailAfter(first)));
+
+        theSpy.Published.Single().ShouldBeOfType<Envelope>().Message.ShouldBeSameAs(first);
     }
 
     [Fact]
@@ -127,7 +177,7 @@ public class TestMessageContextTests
     public async Task invoke_remotely()
     {
         var message1 = new Message1();
-        await theContext.InvokeAsync(message1);
+        await theContext.InvokeAsync(message1, TestContext.Current.CancellationToken);
 
         theSpy.Invoked.ShouldHaveMessageOfType<Message1>();
     }
@@ -138,7 +188,7 @@ public class TestMessageContextTests
         var uri = "something://one".ToUri();
         var message1 = new Message1();
 
-        await theContext.EndpointFor(uri).InvokeAsync(message1);
+        await theContext.EndpointFor(uri).InvokeAsync(message1, TestContext.Current.CancellationToken);
 
         var env = theSpy.Sent.ShouldHaveEnvelopeForMessageType<Message1>();
         env.Destination.ShouldBe(uri);
@@ -149,7 +199,7 @@ public class TestMessageContextTests
     {
         var message1 = new Message1();
 
-        await theContext.EndpointFor("endpoint1").InvokeAsync(message1);
+        await theContext.EndpointFor("endpoint1").InvokeAsync(message1, TestContext.Current.CancellationToken);
 
         var env = theSpy.Sent.ShouldHaveEnvelopeForMessageType<Message1>();
         env.EndpointName.ShouldBe("endpoint1");
@@ -161,7 +211,7 @@ public class TestMessageContextTests
         var response = new NumberResponse(11);
         theSpy.WhenInvokedMessageOf<NumberRequest>().RespondWith(response);
 
-        (await theContext.InvokeAsync<NumberResponse>(new NumberRequest(3, 4)))
+        (await theContext.InvokeAsync<NumberResponse>(new NumberRequest(3, 4), TestContext.Current.CancellationToken))
             .ShouldBeSameAs(response);
     }
 
@@ -184,10 +234,10 @@ public class TestMessageContextTests
         theSpy.WhenInvokedMessageOf<NumberRequest>(x => x.X == 3).RespondWith(response1);
         theSpy.WhenInvokedMessageOf<NumberRequest>(x => x.X == 5).RespondWith(response2);
 
-        (await theContext.InvokeAsync<NumberResponse>(new NumberRequest(3, 4)))
+        (await theContext.InvokeAsync<NumberResponse>(new NumberRequest(3, 4), TestContext.Current.CancellationToken))
             .ShouldBeSameAs(response1);
 
-        (await theContext.InvokeAsync<NumberResponse>(new NumberRequest(5, 4)))
+        (await theContext.InvokeAsync<NumberResponse>(new NumberRequest(5, 4), TestContext.Current.CancellationToken))
             .ShouldBeSameAs(response2);
     }
 
@@ -207,6 +257,36 @@ public class TestMessageContextTests
     }
 
     [Fact]
+    public async Task stream_request_records_invocation_and_returns_configured_response()
+    {
+        var response = new NumberResponse(21);
+        theSpy.WhenInvokedMessageOf<IAsyncEnumerable<NumberRequest>>().RespondWith(response);
+
+        var stream = numberRequests();
+        (await theContext.StreamAsync<NumberRequest, NumberResponse>(stream, TestContext.Current.CancellationToken))
+            .ShouldBeSameAs(response);
+
+        theSpy.Invoked.Single().ShouldBeSameAs(stream);
+    }
+
+    [Fact]
+    public async Task stream_request_with_expected_response_miss()
+    {
+        var ex = await Should.ThrowAsync<Exception>(async () =>
+        {
+            await theContext.StreamAsync<NumberRequest, NumberResponse>(numberRequests());
+        });
+
+        ex.Message.ShouldStartWith("There is no matching expectation for the request message");
+    }
+
+    private static async IAsyncEnumerable<NumberRequest> numberRequests()
+    {
+        yield return new NumberRequest(1, 2);
+        await Task.Yield();
+    }
+
+    [Fact]
     public async Task invoke_with_expected_response_no_filter_hit_to_endpoint_by_uri()
     {
         var response1 = new NumberResponse(11);
@@ -217,9 +297,9 @@ public class TestMessageContextTests
         var destination2 = new Uri("stub://two");
         theSpy.WhenInvokedMessageOf<NumberRequest>(destination:destination2).RespondWith(response2);
 
-        (await theContext.EndpointFor(destination1).InvokeAsync<NumberResponse>(new NumberRequest(4, 5))).ShouldBeSameAs(response1);
+        (await theContext.EndpointFor(destination1).InvokeAsync<NumberResponse>(new NumberRequest(4, 5), TestContext.Current.CancellationToken)).ShouldBeSameAs(response1);
 
-        (await theContext.EndpointFor(destination2).InvokeAsync<NumberResponse>(new NumberRequest(4, 5))).ShouldBeSameAs(response2);
+        (await theContext.EndpointFor(destination2).InvokeAsync<NumberResponse>(new NumberRequest(4, 5), TestContext.Current.CancellationToken)).ShouldBeSameAs(response2);
     }
 
     [Fact]
@@ -245,7 +325,7 @@ public class TestMessageContextTests
         var destination1 = new Uri("stub://one");
         theSpy.WhenInvokedMessageOf<NumberRequest>(x => x.X == 4,destination:destination1).RespondWith(response1);
 
-        (await theContext.EndpointFor(destination1).InvokeAsync<NumberResponse>(new NumberRequest(4, 5))).ShouldBeSameAs(response1);
+        (await theContext.EndpointFor(destination1).InvokeAsync<NumberResponse>(new NumberRequest(4, 5), TestContext.Current.CancellationToken)).ShouldBeSameAs(response1);
     }
 
     [Fact]
@@ -274,9 +354,9 @@ public class TestMessageContextTests
 
         theSpy.WhenInvokedMessageOf<NumberRequest>(endpointName:"two").RespondWith(response2);
 
-        (await theContext.EndpointFor("one").InvokeAsync<NumberResponse>(new NumberRequest(4, 5))).ShouldBeSameAs(response1);
+        (await theContext.EndpointFor("one").InvokeAsync<NumberResponse>(new NumberRequest(4, 5), TestContext.Current.CancellationToken)).ShouldBeSameAs(response1);
 
-        (await theContext.EndpointFor("two").InvokeAsync<NumberResponse>(new NumberRequest(4, 5))).ShouldBeSameAs(response2);
+        (await theContext.EndpointFor("two").InvokeAsync<NumberResponse>(new NumberRequest(4, 5), TestContext.Current.CancellationToken)).ShouldBeSameAs(response2);
     }
 
     [Fact]
@@ -300,7 +380,7 @@ public class TestMessageContextTests
         var response1 = new NumberResponse(11);
         theSpy.WhenInvokedMessageOf<NumberRequest>(x => x.X == 4,endpointName:"one").RespondWith(response1);
 
-        (await theContext.EndpointFor("one").InvokeAsync<NumberResponse>(new NumberRequest(4, 5))).ShouldBeSameAs(response1);
+        (await theContext.EndpointFor("one").InvokeAsync<NumberResponse>(new NumberRequest(4, 5), TestContext.Current.CancellationToken)).ShouldBeSameAs(response1);
     }
 
     [Fact]
@@ -324,7 +404,7 @@ public class TestMessageContextTests
         var uri = "something://one".ToUri();
         var message1 = new Message1();
 
-        await theContext.EndpointFor(uri).InvokeAsync(message1, new DeliveryOptions().WithHeader("ack-test", "value"));
+        await theContext.EndpointFor(uri).InvokeAsync(message1, new DeliveryOptions().WithHeader("ack-test", "value"), TestContext.Current.CancellationToken);
 
         var envelope = theSpy.Sent.ShouldHaveEnvelopeForMessageType<Message1>();
         envelope.Destination.ShouldBe(uri);
@@ -336,7 +416,7 @@ public class TestMessageContextTests
     {
         var message1 = new Message1();
 
-        await theContext.EndpointFor("endpoint1").InvokeAsync(message1, new DeliveryOptions().WithHeader("ack-name-test", "value"));
+        await theContext.EndpointFor("endpoint1").InvokeAsync(message1, new DeliveryOptions().WithHeader("ack-name-test", "value"), TestContext.Current.CancellationToken);
 
         var envelope = theSpy.Sent.ShouldHaveEnvelopeForMessageType<Message1>();
         envelope.EndpointName.ShouldBe("endpoint1");
@@ -349,9 +429,7 @@ public class TestMessageContextTests
         var response = new NumberResponse(11);
         theSpy.WhenInvokedMessageOf<NumberRequest>().RespondWith(response);
 
-        var result = await theContext.InvokeAsync<NumberResponse>(
-            new NumberRequest(3, 4),
-            new DeliveryOptions().WithHeader("custom", "value"));
+        var result = await theContext.InvokeAsync<NumberResponse>(new NumberRequest(3, 4), new DeliveryOptions().WithHeader("custom", "value"), TestContext.Current.CancellationToken);
 
         result.ShouldBeSameAs(response);
 
@@ -367,15 +445,11 @@ public class TestMessageContextTests
         theSpy.WhenInvokedMessageOf<NumberRequest>(x => x.X == 3).RespondWith(response1);
         theSpy.WhenInvokedMessageOf<NumberRequest>(x => x.X == 5).RespondWith(response2);
 
-        var result1 = await theContext.InvokeAsync<NumberResponse>(
-            new NumberRequest(3, 4),
-            new DeliveryOptions().WithHeader("test", "one"));
+        var result1 = await theContext.InvokeAsync<NumberResponse>(new NumberRequest(3, 4), new DeliveryOptions().WithHeader("test", "one"), TestContext.Current.CancellationToken);
 
         result1.ShouldBeSameAs(response1);
 
-        var result2 = await theContext.InvokeAsync<NumberResponse>(
-            new NumberRequest(5, 4),
-            new DeliveryOptions().WithHeader("test", "two"));
+        var result2 = await theContext.InvokeAsync<NumberResponse>(new NumberRequest(5, 4), new DeliveryOptions().WithHeader("test", "two"), TestContext.Current.CancellationToken);
 
         result2.ShouldBeSameAs(response2);
     }
@@ -404,9 +478,7 @@ public class TestMessageContextTests
         theSpy.WhenInvokedMessageOf<NumberRequest>(destination: destination).RespondWith(response);
 
         var result = await theContext.EndpointFor(destination)
-            .InvokeAsync<NumberResponse>(
-                new NumberRequest(4, 5),
-                new DeliveryOptions().WithHeader("uri-test", "value"));
+            .InvokeAsync<NumberResponse>(new NumberRequest(4, 5), new DeliveryOptions().WithHeader("uri-test", "value"), TestContext.Current.CancellationToken);
 
         result.ShouldBeSameAs(response);
 
@@ -423,9 +495,7 @@ public class TestMessageContextTests
         theSpy.WhenInvokedMessageOf<NumberRequest>(x => x.X == 4, destination: destination).RespondWith(response);
 
         var result = await theContext.EndpointFor(destination)
-            .InvokeAsync<NumberResponse>(
-                new NumberRequest(4, 5),
-                new DeliveryOptions().WithHeader("filter-uri-test", "value"));
+            .InvokeAsync<NumberResponse>(new NumberRequest(4, 5), new DeliveryOptions().WithHeader("filter-uri-test", "value"), TestContext.Current.CancellationToken);
 
         result.ShouldBeSameAs(response);
     }
@@ -437,9 +507,7 @@ public class TestMessageContextTests
         theSpy.WhenInvokedMessageOf<NumberRequest>(endpointName: "one").RespondWith(response);
 
         var result = await theContext.EndpointFor("one")
-            .InvokeAsync<NumberResponse>(
-                new NumberRequest(4, 5),
-                new DeliveryOptions().WithHeader("name-test", "value"));
+            .InvokeAsync<NumberResponse>(new NumberRequest(4, 5), new DeliveryOptions().WithHeader("name-test", "value"), TestContext.Current.CancellationToken);
 
         result.ShouldBeSameAs(response);
 
@@ -455,17 +523,47 @@ public class TestMessageContextTests
         theSpy.WhenInvokedMessageOf<NumberRequest>(x => x.X == 4, endpointName: "one").RespondWith(response);
 
         var result = await theContext.EndpointFor("one")
-            .InvokeAsync<NumberResponse>(
-                new NumberRequest(4, 5),
-                new DeliveryOptions().WithHeader("filter-name-test", "value"));
+            .InvokeAsync<NumberResponse>(new NumberRequest(4, 5), new DeliveryOptions().WithHeader("filter-name-test", "value"), TestContext.Current.CancellationToken);
 
         result.ShouldBeSameAs(response);
     }
 
-    public static async Task set_up_invoke_expectations()
+    [Fact]
+    public async Task stream_records_message_and_yields_empty_sequence()
+    {
+        var request = new NumberRequest(3, 4);
+
+        var items = new List<NumberResponse>();
+        await foreach (var item in theContext.StreamAsync<NumberResponse>(request, TestContext.Current.CancellationToken))
+        {
+            items.Add(item);
+        }
+
+        items.ShouldBeEmpty();
+        theSpy.Invoked.ShouldHaveMessageOfType<NumberRequest>().ShouldBeSameAs(request);
+    }
+
+    [Fact]
+    public async Task stream_with_delivery_options_records_envelope_with_header_applied()
+    {
+        var request = new NumberRequest(3, 4);
+
+        var items = new List<NumberResponse>();
+        await foreach (var item in theContext.StreamAsync<NumberResponse>(request, new DeliveryOptions().WithHeader("stream-test", "value"), TestContext.Current.CancellationToken))
+        {
+            items.Add(item);
+        }
+
+        items.ShouldBeEmpty();
+
+        var envelope = theSpy.Invoked.OfType<Envelope>().Last();
+        envelope.Message.ShouldBeSameAs(request);
+        envelope.Headers["stream-test"].ShouldBe("value");
+    }
+
+    private static async Task set_up_invoke_expectations()
     {
         #region sample_using_invoke_with_expected_response_with_test_message_context
-
         var spy = new TestMessageContext();
         var context = (IMessageContext)spy;
 
@@ -497,6 +595,12 @@ public class TestMessageContextTests
             .InvokeAsync<NumberResponse>(new NumberRequest(5, 6));
 
         #endregion
+    }
+
+    private static IEnumerable<Message1> messagesThatFailAfter(Message1 first)
+    {
+        yield return first;
+        throw new InvalidOperationException("Expected test failure");
     }
 }
 

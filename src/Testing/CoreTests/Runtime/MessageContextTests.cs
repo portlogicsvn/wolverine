@@ -128,6 +128,11 @@ public class MessageContextTests
     [Fact]
     public void track_envelope_correlation()
     {
+        // Source is preserved when already set on the envelope (see
+        // track_envelope_correlation_does_not_override_existing_source);
+        // clear it here so the ServiceName fallback path is exercised.
+        theEnvelope.Source = null;
+
         using var activity = new Activity("DoWork");
         activity.Start();
 
@@ -189,6 +194,36 @@ public class MessageContextTests
     }
 
     [Fact]
+    public void track_envelope_correlation_does_not_override_existing_source()
+    {
+        // A CustomizeOutgoingMessagesOfType<T> rule (or any per-message
+        // DeliveryOptions override) may have already set Source — for example
+        // when publishing CloudEvents and the producer needs a spec-valid
+        // per-message `source` URI. The framework must not clobber it.
+        theEnvelope.Source = "https://api.example.com/users/123";
+
+        using var activity = new Activity("DoWork");
+        activity.Start();
+
+        theContext.TrackEnvelopeCorrelation(theEnvelope, activity);
+
+        theEnvelope.Source.ShouldBe("https://api.example.com/users/123");
+    }
+
+    [Fact]
+    public void track_envelope_correlation_falls_back_to_service_name_when_source_is_empty()
+    {
+        theEnvelope.Source = null;
+
+        using var activity = new Activity("DoWork");
+        activity.Start();
+
+        theContext.TrackEnvelopeCorrelation(theEnvelope, activity);
+
+        theEnvelope.Source.ShouldBe("MyService");
+    }
+
+    [Fact]
     public void reads_user_name_from_envelope()
     {
         var original = ObjectMother.Envelope();
@@ -209,7 +244,7 @@ public class MessageContextTests
     [Fact]
     public async Task clear_all_cleans_out_outstanding_messages()
     {
-        using var host = WolverineHost.For(opts =>
+        using var host = await WolverineHost.ForAsync(opts =>
         {
             opts.PublishAllMessages().ToPort(PortFinder.GetAvailablePort());
         });
@@ -254,6 +289,7 @@ public class MessageContextTests
     public async Task reschedule_with_native_scheduling()
     {
         var callback = Substitute.For<IChannelCallback, ISupportNativeScheduling>();
+        callback.As<ISupportNativeScheduling>().NativeSchedulingEnabled.Returns(true);
         var scheduledTime = DateTime.Today.AddHours(8);
 
         theContext.ReadEnvelope(theEnvelope, callback);
@@ -265,6 +301,27 @@ public class MessageContextTests
         await theContext.Storage.Inbox.DidNotReceive().RescheduleExistingEnvelopeForRetryAsync(theEnvelope);
         await callback.As<ISupportNativeScheduling>().Received()
             .MoveToScheduledUntilAsync(theEnvelope, scheduledTime);
+    }
+
+    [Fact]
+    public async Task reschedule_falls_back_to_durable_inbox_when_native_scheduling_disabled()
+    {
+        // A listener that implements ISupportNativeScheduling but reports NativeSchedulingEnabled == false
+        // (e.g. Pulsar without a retry-letter topic) must NOT be treated as able to reschedule natively;
+        // the runtime should fall back to the durable inbox rather than silently no-op. GH-3491.
+        var callback = Substitute.For<IChannelCallback, ISupportNativeScheduling>();
+        callback.As<ISupportNativeScheduling>().NativeSchedulingEnabled.Returns(false);
+        var scheduledTime = DateTime.Today.AddHours(8);
+
+        theContext.ReadEnvelope(theEnvelope, callback);
+
+        await theContext.ReScheduleAsync(scheduledTime);
+
+        theEnvelope.ScheduledTime.ShouldBe(scheduledTime);
+
+        await callback.As<ISupportNativeScheduling>().DidNotReceive()
+            .MoveToScheduledUntilAsync(Arg.Any<Envelope>(), Arg.Any<DateTimeOffset>());
+        await theContext.Storage.Inbox.Received().RescheduleExistingEnvelopeForRetryAsync(theEnvelope);
     }
 
     [Fact]

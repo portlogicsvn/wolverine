@@ -7,35 +7,34 @@ using Xunit;
 
 namespace Wolverine.AzureServiceBus.Tests.ConventionalRouting;
 
-[Trait("Category", "Flaky")]
 public class end_to_end_with_conventional_routing_with_prefix : IAsyncLifetime
 {
     private IHost _receiver = null!;
     private IHost _sender = null!;
 
-    public Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
-        _sender = WolverineHost.For(opts =>
+        _sender = await WolverineHost.ForAsync(opts =>
         {
             opts.UseAzureServiceBusTesting()
                 .PrefixIdentifiers("shazaam")
-                .UseConventionalRouting().AutoProvision().AutoPurgeOnStartup();
+                .UseConventionalRouting(x => x.ExcludeTypes(t => t != typeof(RoutedMessage)))
+                .AutoProvision().AutoPurgeOnStartup();
             opts.DisableConventionalDiscovery();
             opts.ServiceName = "Sender";
         });
 
-        _receiver = WolverineHost.For(opts =>
+        _receiver = await WolverineHost.ForAsync(opts =>
         {
             opts.UseAzureServiceBusTesting()
                 .PrefixIdentifiers("shazaam")
-                .UseConventionalRouting().AutoProvision().AutoPurgeOnStartup();
+                .UseConventionalRouting(x => x.ExcludeTypes(t => t != typeof(RoutedMessage)))
+                .AutoProvision().AutoPurgeOnStartup();
             opts.ServiceName = "Receiver";
         });
-
-        return Task.CompletedTask;
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         if (_sender != null) await _sender.StopAsync();
         if (_receiver != null) await _receiver.StopAsync();

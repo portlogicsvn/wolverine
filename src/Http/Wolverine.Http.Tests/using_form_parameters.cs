@@ -1,3 +1,4 @@
+using System.Net.Http;
 using JasperFx;
 using JasperFx.CodeGeneration.Frames;
 using JasperFx.Core;
@@ -6,6 +7,7 @@ using Wolverine.Http.CodeGen;
 using Wolverine.Runtime;
 using WolverineWebApi;
 using WolverineWebApi.Forms;
+using MvcBindingSource = Microsoft.AspNetCore.Mvc.ModelBinding.BindingSource;
 
 namespace Wolverine.Http.Tests;
 
@@ -28,7 +30,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("Age is 8");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("Age is 8");
     }
 
     [Fact]
@@ -42,7 +45,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("North");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("North");
     }
 
     [Fact]
@@ -56,7 +60,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("north");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("north");
     }
 
     [Fact]
@@ -69,7 +74,8 @@ public class using_form_parameters : IntegrationContext
                 .ToUrl("/form/explicit");
         });
 
-        body.ReadAsText().ShouldBeEmpty();
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBeEmpty();
     }
 
     [Fact]
@@ -83,7 +89,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("North");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("North");
     }
 
     [Fact]
@@ -97,7 +104,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("Age is ");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("Age is ");
     }
 
     [Fact]
@@ -111,7 +119,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("Age is ");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("Age is ");
     }
 
     [Fact]
@@ -125,7 +134,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("Age is 11");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("Age is 11");
     }
 
     [Fact]
@@ -139,7 +149,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("Age is missing");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("Age is missing");
     }
 
     [Fact]
@@ -153,7 +164,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("Age is missing");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("Age is missing");
     }
 
     [Fact(Skip = "Seems alba doesn't support collections in form data in any way")]
@@ -167,7 +179,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("foo,bar,baz");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("foo,bar,baz");
     }
 
     [Fact(Skip = "Seems alba doesn't support collections in form data in any way")]
@@ -181,7 +194,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("5,8,13");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("5,8,13");
     }
 
     [Fact(Skip = "Seems alba doesn't support collections in form data in any way")]
@@ -199,7 +213,43 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe($"{guid1},{guid2},{guid3}");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe($"{guid1},{guid2},{guid3}");
+    }
+
+    // The Alba-based form collection tests below are skipped because Alba cannot post form collections,
+    // but a raw client can, so the [FromForm] TEnum[] binder is exercised end to end here. Its elements
+    // used to parse case-sensitively while the scalar and List<TEnum> form binders passed ignoreCase.
+    [Fact]
+    public async Task use_parsed_enum_array_from_form()
+    {
+        var text = await postEnumArrayForm("North", "East", "South");
+        text.ShouldBe("North,East,South");
+    }
+
+    [Fact]
+    public async Task use_parsed_enum_array_from_form_is_case_insensitive()
+    {
+        var text = await postEnumArrayForm("north", "eAsT", "SOUTH");
+        text.ShouldBe("North,East,South");
+    }
+
+    [Fact]
+    public async Task use_parsed_enum_array_from_form_still_ignores_unparseable_values()
+    {
+        var text = await postEnumArrayForm("north", "nonsense");
+        text.ShouldBe("North");
+    }
+
+    private async Task<string> postEnumArrayForm(params string[] values)
+    {
+        var content = new FormUrlEncodedContent(
+            values.Select(x => new KeyValuePair<string, string>("collection", x)));
+
+        var response = await Host.Server.CreateClient().PostAsync("/form/array/enum", content);
+        response.EnsureSuccessStatusCode();
+
+        return await response.Content.ReadAsStringAsync();
     }
 
     [Fact(Skip = "Seems alba doesn't support collections in form data in any way")]
@@ -213,7 +263,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe($"North,East,South");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe($"North,East,South");
     }
 
     [Fact(Skip = "Seems alba doesn't support collections in form data in any way")]
@@ -226,7 +277,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("foo,bar,baz");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("foo,bar,baz");
     }
     
     [Fact(Skip = "Seems alba doesn't support collections in form data in any way")]
@@ -240,7 +292,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("none");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("none");
     }
     
     [Fact(Skip = "Seems alba doesn't support collections in form data in any way")]
@@ -254,7 +307,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("1,2,4");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("1,2,4");
     }
     
     [Fact(Skip = "Seems alba doesn't support collections in form data in any way")]
@@ -268,7 +322,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("none");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("none");
     }
 
     [Fact]
@@ -282,7 +337,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("0001-01-01T00:00:00.0000000");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("0001-01-01T00:00:00.0000000");
     }
 
     [Fact]
@@ -297,7 +353,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("0001-01-01T00:00:00.0000000");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("0001-01-01T00:00:00.0000000");
     }
 
     [Fact]
@@ -311,7 +368,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("2025-04-05T00:00:00.0000000");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("2025-04-05T00:00:00.0000000");
     }
 
     [Fact]
@@ -325,7 +383,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("2025-04-05T13:37:42.0123456");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("2025-04-05T13:37:42.0123456");
     }
 
     [Fact]
@@ -340,7 +399,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("2025-04-05T13:37:42.0123456");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("2025-04-05T13:37:42.0123456");
     }
     
     [Fact]
@@ -354,7 +414,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("Value is missing");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("Value is missing");
     }
 
     [Fact]
@@ -368,7 +429,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("2025-04-05T00:00:00.0000000");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("2025-04-05T00:00:00.0000000");
     }
 
     [Fact]
@@ -383,7 +445,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("2025-04-05T13:37:42.0123456");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("2025-04-05T13:37:42.0123456");
     }
 
     [Fact]
@@ -398,7 +461,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("0001-01-01");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("0001-01-01");
     }
 
     [Fact]
@@ -413,7 +477,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("2025-04-05");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("2025-04-05");
     }
 
     [Fact]
@@ -428,7 +493,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("0001-01-01");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("0001-01-01");
     }
 
     [Fact]
@@ -442,7 +508,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("Value is missing");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("Value is missing");
     }
 
     [Fact]
@@ -457,7 +524,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("2025-04-05");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("2025-04-05");
     }
 
     [Fact]
@@ -472,11 +540,11 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("0001-01-01");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("0001-01-01");
     }
 
     #region sample_form_value_usage
-
     [Fact]
     public async Task use_string_form_hit()
     {
@@ -490,7 +558,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("Name is Magic");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("Name is Magic");
     }
 
     [Fact]
@@ -504,7 +573,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("Name is missing");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("Name is missing");
     }
 
     [Fact]
@@ -521,7 +591,8 @@ public class using_form_parameters : IntegrationContext
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        body.ReadAsText().ShouldBe("Amount is 42.1");
+        var text = await body.ReadAsTextAsync();
+        text.ShouldBe("Amount is 42.1");
     }
 
     #endregion
@@ -536,5 +607,44 @@ public class using_form_parameters : IntegrationContext
 
         var variable = chain.TryFindOrCreateFormValue(parameter);
         variable!.Creator.ShouldBeOfType<ParsedArrayFormValue>();
+    }
+
+    [Fact]
+    public void form_parameter_descriptions_have_a_parameter_descriptor()
+    {
+        // Regression: ApiParameterDescription instances emitted for [FromForm]
+        // primitive parameters used to leave ParameterDescriptor null. ASP.NET
+        // Core's OpenApiDocumentService.GetFormRequestBody groups form
+        // parameters by ParameterDescriptor.Name and NREs when it is missing,
+        // taking down the entire /openapi/v1.json response for any endpoint
+        // that has at least one such parameter.
+        var chain = HttpChains.ChainFor("POST", "/form/explicit");
+        var apiDescription = chain!.CreateApiDescription("POST");
+
+        var formParameter = apiDescription.ParameterDescriptions.Single(p => p.Name == "name");
+        formParameter.Source.ShouldBe(MvcBindingSource.Form);
+        formParameter.Type.ShouldBe(typeof(string));
+        formParameter.ParameterDescriptor.ShouldNotBeNull();
+        formParameter.ParameterDescriptor.Name.ShouldBe("name");
+        formParameter.ParameterDescriptor.ParameterType.ShouldBe(typeof(string));
+    }    
+     
+    [Fact]
+    public void form_endpoints_honor_consumes_metadata_for_supported_request_formats()
+    {
+        // fillRequestType only seeds SupportedRequestFormats from
+        // IAcceptsMetadata when the endpoint has a body request type, is
+        // not a form endpoint, and is not a GET. Form endpoints used to
+        // fall through and rely on ASP.NET Core OpenAPI's
+        // "application/x-www-form-urlencoded" default, which silently
+        // dropped [Consumes("multipart/form-data")] and caused generated
+        // clients (Orval, NSwag) to emit URLSearchParams bodies instead of
+        // multipart for file-upload endpoints.
+        var chain = HttpChains.ChainFor("POST", "/form/multipart-consumes");
+        var apiDescription = chain!.CreateApiDescription("POST");
+
+        apiDescription.SupportedRequestFormats
+            .Select(f => f.MediaType)
+            .ShouldContain("multipart/form-data");
     }
 }

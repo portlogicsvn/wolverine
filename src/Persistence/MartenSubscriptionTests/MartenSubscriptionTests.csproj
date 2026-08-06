@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
     <PropertyGroup>
+        <OutputType>Exe</OutputType>
         <IsPackable>false</IsPackable>
         <IsTestProject>true</IsTestProject>
     </PropertyGroup>
@@ -11,7 +12,7 @@
         <PackageReference Include="Microsoft.NET.Test.Sdk"/>
 
         <PackageReference Include="Shouldly" />
-        <PackageReference Include="xunit"/>
+        <PackageReference Include="xunit.v3"/>
         <PackageReference Include="xunit.runner.visualstudio">
             <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
             <PrivateAssets>all</PrivateAssets>
@@ -33,4 +34,9 @@
 
 
 
+  <ItemGroup>
+    <!-- Core WolverineFx no longer ships the Roslyn runtime compiler (#2876); this
+         Dynamic-mode test project needs it. The package auto-registers via its [WolverineModule]. -->
+    <ProjectReference Include="../../Wolverine.RuntimeCompilation/Wolverine.RuntimeCompilation.csproj" />
+  </ItemGroup>
 </Project>

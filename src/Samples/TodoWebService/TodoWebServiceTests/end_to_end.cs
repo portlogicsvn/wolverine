@@ -12,7 +12,7 @@ public class end_to_end : IAsyncLifetime
 {
     private IAlbaHost _host = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _host = await AlbaHost.For<Program>();
 
@@ -21,13 +21,12 @@ public class end_to_end : IAsyncLifetime
         await store.Advanced.Clean.DeleteAllDocumentsAsync();
     }
 
-    public Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
-        return _host.DisposeAsync().AsTask();
+        await _host.DisposeAsync().AsTask();
     }
 
     #region sample_testing_hello_world_for_http
-
     [Fact]
     public async Task hello_world()
     {
@@ -37,7 +36,8 @@ public class end_to_end : IAsyncLifetime
             x.Header("content-type").SingleValueShouldEqual("text/plain");
         });
 
-        result.ReadAsText().ShouldBe("Hello.");
+        var text = await result.ReadAsTextAsync();
+        text.ShouldBe("Hello.");
     }
 
     #endregion
@@ -76,7 +76,7 @@ public class end_to_end : IAsyncLifetime
             x.Get.Url("/todoitems");
         });
 
-        var results = result.ReadAsJson<Todo[]>();
+        var results = await result.ReadAsJsonAsync<Todo[]>();
         results.ShouldBeEmpty();
     }
 
@@ -109,10 +109,7 @@ public class end_to_end : IAsyncLifetime
         {
             x.Post.Json(new CreateTodoListRequest("Help me Obi Wan Kenobi!")).ToUrl("/api/todo-lists/");
             x.StatusCodeShouldBe(201);
-
         });
-
-
     }
 
     [Fact]
@@ -124,7 +121,7 @@ public class end_to_end : IAsyncLifetime
             opts.Post.Json(wrongJson).ToUrl("/api/todo-lists");
             opts.StatusCodeShouldBe(400);
         });
-        var problemDetails = results.ReadAsJson<ProblemDetails>();
+        var problemDetails = await results.ReadAsJsonAsync<ProblemDetails>();
         problemDetails.Detail.ShouldBe("The JSON value could not be converted to TodoWebService.CreateTodoListRequest. Path: $.title | LineNumber: 0 | BytePositionInLine: 13.");
         problemDetails.Status.ShouldBe(400);
         problemDetails.Title.ShouldBe("Invalid JSON format");
