@@ -30,6 +30,8 @@ jobs:
           # but the API key is exchanged dynamically via GitHub OIDC.
           user: ${{ secrets.NUGET_USER }}
 
-      # Push the package
-      - name: NuGet push
-        run: dotnet nuget push artifacts/my-sdk.nupkg --api-key ${{steps.login.outputs.NUGET_API_KEY}} --source https://api.nuget.org/v3/index.json
+      - name: Publish to NuGet
+        run: |
+          find . -name '*.nupkg' -exec dotnet nuget push "{}" --source https://api.nuget.org/v3/index.json --api-key "${{ steps.nuget-login.outputs.NUGET_API_KEY }}" --skip-duplicate \;
+          # find . -name '*.snupkg' -exec dotnet nuget push "{}" --source https://api.nuget.org/v3/index.json --api-key "${{ steps.nuget-login.outputs.NUGET_API_KEY }}" \;
+        shell: bash
