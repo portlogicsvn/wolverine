@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using JasperFx.Core;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.ObjectPool;
@@ -228,18 +228,24 @@ public class HandlerPipeline : IHandlerPipeline
                     envelope.Message = serializer.ReadFromData(messageType, envelope);
                 }
             }
-            else
+            else if (envelope.MessageType == TransportConstants.ScheduledEnvelope)
             {
                 if (serializer is IAsyncMessageSerializer asyncMessageSerializer)
                 {
-                    envelope.Message = await asyncMessageSerializer.ReadFromDataAsync(typeof(Envelope), envelope);
+                    envelope.Message = await asyncMessageSerializer.ReadFromDataAsync(typeof(Envelope), envelope).ConfigureAwait(false);
                 }
                 else
                 {
                     envelope.Message = serializer.ReadFromData(typeof(Envelope), envelope);
                 }
-
-                //return new NoHandlerContinuation(_runtime.MissingHandlers(), _runtime);
+            }
+            else
+            {
+                // Only the scheduled-envelope transport wrapper should deserialize as Envelope.
+                // Any other unknown message type needs to flow through the normal "missing handler"
+                // path so request/reply callers get a failure acknowledgement instead of a bogus
+                // "no response was created" error or a false success acknowledgement.
+                return new NoHandlerContinuation(_runtime.MissingHandlers(), _runtime);
             }
 
             //if (envelope.Message == null)
