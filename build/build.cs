@@ -338,8 +338,7 @@ partial class Build : NukeBuild
                 DotNetPack(s => s
                     .SetProject(project)
                     .SetOutputDirectory("./artifacts")
-                    .SetConfiguration(Configuration.Release)
-                    .SetProperty("PortlogicsRemapSingleLevelPackageIds", "true"));
+                    .SetConfiguration(Configuration.Release));
             }
         });
 
