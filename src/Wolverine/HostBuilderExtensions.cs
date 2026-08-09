@@ -18,6 +18,7 @@ using JasperFx.CodeGeneration.Services;
 using JasperFx.CommandLine;
 using JasperFx.CommandLine.Descriptions;
 using JasperFx.Resources;
+using JasperFx.RuntimeCompiler;
 using Microsoft.Extensions.Logging;
 using Wolverine.Configuration;
 using Wolverine.ErrorHandling;
@@ -109,14 +110,11 @@ public static class HostBuilderExtensions
         services.AddJasperFx();
         services.AddSingleton<MessageStoreCollection>();
 
-        // The Roslyn runtime compiler (JasperFx.RuntimeCompiler / AssemblyGenerator) is no
-        // longer registered by, or referenced from, core WolverineFx. Apps running
-        // TypeLoadMode.Dynamic/Auto reference the WolverineFx.RuntimeCompilation package,
-        // which auto-registers IAssemblyGenerator via its [WolverineModule] (or an explicit
-        // opts.UseRuntimeCompilation() call). TypeLoadMode.Static apps pre-generate all code
-        // and ship without Roslyn — smaller binaries, faster cold start, AOT-readiness. A
-        // fail-fast guard at startup (WolverineRuntime.HostService.logCodeGenerationConfiguration)
-        // catches a Dynamic app that is missing the generator. See #2876 / #1577 / AOT pillar #2746.
+        // Wolverine 6 tách Roslyn khỏi core (WolverineFx.RuntimeCompilation). Fork này đã
+        // reference JasperFx.RuntimeCompiler trong Wolverine.csproj và TOS dùng
+        // ExtensionDiscovery.ManualOnly → module auto-register không chạy. Đăng ký lại
+        // như v5 để TypeLoadMode.Dynamic hoạt động.
+        services.AddSingleton<IAssemblyGenerator, AssemblyGenerator>();
 
         services.AddSingleton(typeof(AncillaryMessageStoreApplication<>));
         
